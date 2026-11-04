@@ -110,7 +110,9 @@ def parse_csv_leads(file_bytes: bytes) -> list[RawPlace]:
         is_high = any(keyword in norm_cat for keyword in HIGH_MARGIN_KEYWORDS)
 
         key_str = f"{name}_{phone}_{address}"
-        external_id = f"csv_{hashlib.md5(key_str.encode('utf-8')).hexdigest()[:12]}"
+        # Stable lead ID, not a security measure (hence usedforsecurity=False).
+        digest = hashlib.md5(key_str.encode("utf-8"), usedforsecurity=False).hexdigest()
+        external_id = f"csv_{digest[:12]}"
         if external_id in seen_ids:
             continue
         seen_ids.add(external_id)

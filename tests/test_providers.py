@@ -7,6 +7,14 @@ import pytest
 from src.services.providers import OSMOverpassProvider, TwoGisProvider, parse_csv_leads
 
 
+def test_csv_external_ids_are_stable() -> None:
+    """IDs of already imported CSV leads must never change, otherwise re-imports create duplicates."""
+    places = parse_csv_leads(Path("data/test_leads.csv").read_bytes())
+    assert [p.external_id for p in places] == [
+        "csv_ba557a73ccc5", "csv_fabaddede281", "csv_bed2b36eed14", "csv_f3ce564fe7bf",
+    ]
+
+
 def test_parse_real_csv_leads() -> None:
     """Verify parsing real test_leads.csv yields exactly 4 expected RawPlaces."""
     places = parse_csv_leads(Path("data/test_leads.csv").read_bytes())
