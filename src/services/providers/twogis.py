@@ -2,9 +2,10 @@
 
 import logging
 from typing import Any
+
 import httpx
 
-from src.services.checker import is_social_domain
+from src.services.checker import is_social_domain, url_host
 from src.services.providers.base import (
     SPB_DISTRICTS,
     TARGET_CATEGORIES,
@@ -15,6 +16,10 @@ from src.services.providers.base import (
 logger = logging.getLogger(__name__)
 
 TWOGIS_CATALOG_URL: str = "https://catalog.api.2gis.com/3.0/items"
+# API maximum page size (docs: page_size 1..50).
+TWOGIS_PAGE_SIZE: int = 50
+# Each page is a separate billable request: cap pages per harvest (up to 500 places).
+TWOGIS_MAX_PAGES: int = 10
 
 
 class TwoGisProvider(BaseMapProvider):
@@ -44,33 +49,84 @@ class TwoGisProvider(BaseMapProvider):
         query = cat_info.get("query_2gis", "")
         high_margin = bool(cat_info.get("high_margin", False))
 
-        params = {
+        params: dict[str, str | int] = {
             "q": query,
             "point1": f"{west},{north}",
             "point2": f"{east},{south}",
             "fields": "items.point,items.address,items.contact_groups",
-            "page_size": 50,
+            "page_size": TWOGIS_PAGE_SIZE,
             "key": self.api_key.strip(),
         }
 
-        try:
-            if self._client is not None:
-                response = await self._client.get(
-                    TWOGIS_CATALOG_URL, params=params, timeout=self.timeout
+        if self._client is not None:
+            return await self._fetch_all_pages(
+                self._client, params, district_name, category_key, high_margin
+            )
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            return await self._fetch_all_pages(client, params, district_name, category_key, high_margin)
+
+    async def _fetch_all_pages(
+        self,
+        client: httpx.AsyncClient,
+        params: dict[str, str | int],
+        district_name: str,
+        category_key: str,
+        high_margin: bool,
+    ) -> list[RawPlace]:
+        """
+        Request result pages until all results are collected or TWOGIS_MAX_PAGES is reached.
+
+        2GIS reports API errors in meta.code / meta.error; meta.code 404 ('itemNotFound')
+        means there are no (more) results. A failed page keeps the results collected so far.
+        """
+        places: list[RawPlace] = []
+        seen_ids: set[str] = set()
+
+        for page in range(1, TWOGIS_MAX_PAGES + 1):
+            try:
+                response = await client.get(
+                    TWOGIS_CATALOG_URL, params={**params, "page": page}, timeout=self.timeout
                 )
-            else:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.get(TWOGIS_CATALOG_URL, params=params)
+                data = response.json() if response.status_code == 200 else None
+            except (httpx.HTTPError, ValueError) as exc:
+                logger.warning("2GIS request failed (page %d): %s", page, type(exc).__name__)
+                break
 
-            if response.status_code != 200:
-                logger.warning("2GIS API returned status %d", response.status_code)
-                return []
+            if not isinstance(data, dict):
+                logger.warning("2GIS API returned HTTP %d (page %d)", response.status_code, page)
+                break
 
-            data = response.json()
-            return self._parse_items(data, district_name, category_key, high_margin)
-        except (httpx.HTTPError, ValueError, KeyError) as exc:
-            logger.warning("2GIS request failed: %s", exc)
-            return []
+            meta = data.get("meta") or {}
+            code = meta.get("code", 200)
+            if code == 404:
+                break
+            if code != 200:
+                error = meta.get("error") or {}
+                logger.warning(
+                    "2GIS API error (page %d): %s %s: %s",
+                    page, code, error.get("type"), error.get("message"),
+                )
+                break
+
+            for place in self._parse_items(data, district_name, category_key, high_margin):
+                if place.external_id not in seen_ids:
+                    seen_ids.add(place.external_id)
+                    places.append(place)
+
+            result = data.get("result") or {}
+            items = result.get("items") or []
+            total = result.get("total")
+            if len(items) < TWOGIS_PAGE_SIZE:
+                break
+            if isinstance(total, int) and page * TWOGIS_PAGE_SIZE >= total:
+                break
+        else:
+            logger.warning(
+                "2GIS results truncated at %d pages (%d places) for %s / %s",
+                TWOGIS_MAX_PAGES, len(places), district_name, category_key,
+            )
+
+        return places
 
     def _parse_items(
         self,
@@ -116,18 +172,8 @@ class TwoGisProvider(BaseMapProvider):
             raw_website = websites[0] if websites else None
             socials_str = ", ".join(socials_list) if socials_list else None
 
-            if not socials_str and raw_website:
-                host = None
-                try:
-                    url_to_parse = (
-                        raw_website if raw_website.startswith(("http://", "https://"))
-                        else f"https://{raw_website}"
-                    )
-                    host = httpx.URL(url_to_parse).host
-                except Exception:
-                    pass
-                if is_social_domain(host):
-                    socials_str = raw_website
+            if not socials_str and raw_website and is_social_domain(url_host(raw_website)):
+                socials_str = raw_website
 
             places.append(
                 RawPlace(
@@ -167,23 +213,13 @@ class TwoGisProvider(BaseMapProvider):
                     if val_str not in phones:
                         phones.append(val_str)
                 elif c_type in ("website", "url"):
-                    host = None
-                    try:
-                        url_parsed = (
-                            val_str if val_str.startswith(("http://", "https://"))
-                            else f"https://{val_str}"
-                        )
-                        host = httpx.URL(url_parsed).host
-                    except Exception:
-                        pass
-                    if is_social_domain(host):
-                        if val_str not in socials:
-                            socials.append(val_str)
-                    else:
-                        if val_str not in websites:
-                            websites.append(val_str)
-                elif c_type in ("vkontakte", "vk", "telegram", "instagram", "whatsapp", "social"):
-                    if val_str not in socials:
-                        socials.append(val_str)
+                    target = socials if is_social_domain(url_host(val_str)) else websites
+                    if val_str not in target:
+                        target.append(val_str)
+                elif (
+                    c_type in ("vkontakte", "vk", "telegram", "instagram", "whatsapp", "social")
+                    and val_str not in socials
+                ):
+                    socials.append(val_str)
 
         return phones, websites, socials

@@ -1,0 +1,6 @@
+# Local development and CI: runtime dependencies + test, type-check and lint tools.
+-r requirements.txt
+pytest==9.2.0
+pytest-asyncio==1.4.1.post1
+mypy==2.4.1
+ruff==0.17.3

@@ -1,5 +1,7 @@
 """Lead scoring service based on website status, contacts, and business niche."""
 
+import re
+
 STATUS_POINTS: dict[str, int] = {
     "dead_site": 45,
     "social_only": 35,
@@ -28,6 +30,21 @@ HIGH_MARGIN_CATEGORY_KEYS: frozenset[str] = frozenset({
     "legal_b2b",
     "hotels",
 })
+
+# 'ремонт' targets renovation and car repair; small repair shops (shoes, clothes, phones,
+# watches, appliances) are low-margin. Such phrases are removed before keyword matching,
+# so 'Автосервис, ремонт телефонов' still counts as high-margin via 'автосервис'.
+LOW_MARGIN_REPAIR_RE = re.compile(
+    r"ремонт\w*(?:\s+и\s+\w+)?\s+"
+    r"(?:обув\w*|одежд\w*|телефон\w*|смартфон\w*|планшет\w*|ноутбук\w*|компьютер\w*"
+    r"|часов|часы|сумок|бытов\w*|техник\w*)"
+)
+
+
+def is_high_margin_category(category: str | None) -> bool:
+    """Return True if a free-text category (e.g. from CSV) names a high-margin niche."""
+    normalized = LOW_MARGIN_REPAIR_RE.sub(" ", (category or "").lower().replace("ё", "е"))
+    return any(keyword in normalized for keyword in HIGH_MARGIN_KEYWORDS)
 
 
 def calculate_lead_score(
@@ -61,11 +78,10 @@ def calculate_lead_score(
     if not has_phone and not has_socials:
         score -= 30
 
-    norm_category = (category_key or "").lower().strip()
     is_high = (
         high_margin
         or category_key in HIGH_MARGIN_CATEGORY_KEYS
-        or any(keyword in norm_category for keyword in HIGH_MARGIN_KEYWORDS)
+        or is_high_margin_category(category_key)
     )
     if is_high:
         score += 15

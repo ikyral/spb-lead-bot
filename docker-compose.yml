@@ -1,12 +1,19 @@
-version: "3.8"
-
 services:
   spb-lead-bot:
-    build: .
+    build:
+      context: .
+      args:
+        # The bot runs as this unprivileged user; set to `id -u` / `id -g` of the host user owning ./db.
+        APP_UID: ${APP_UID:-1000}
+        APP_GID: ${APP_GID:-1000}
     container_name: spb-lead-bot
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # Overrides DB_URL from .env: the database must live inside the mounted ./db directory.
+      DB_URL: "sqlite+aiosqlite:////app/db/leads.db"
     volumes:
       - ./data:/app/data
-      - ./leads.db:/app/leads.db
+      # Mount a directory, not a file: a missing file would be created by Docker as a directory.
+      - ./db:/app/db

@@ -1,0 +1,29 @@
+# Project ruff config (takes precedence over a user's global ruff config). Run: `ruff check .`
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = [
+    "E", "W", "F",   # pycodestyle, pyflakes
+    "I",             # import sorting
+    "B",             # bugbear
+    "UP",            # pyupgrade (target 3.11)
+    "ASYNC",         # asyncio pitfalls
+    "S",             # bandit security checks
+    "BLE",           # blind `except Exception`
+    "SIM", "PIE",    # simplifications
+    "RUF",
+]
+ignore = [
+    "RUF001", "RUF002", "RUF003",  # Cyrillic in strings, docstrings and comments is intended
+    "ASYNC109",                    # httpcore's AsyncNetworkBackend interface defines `timeout` parameters
+]
+
+[lint.per-file-ignores]
+# Tests: asserts, fake tokens and addresses as fixture data, subprocess with sys.executable,
+# reading small fixture files inside async tests.
+"tests/**" = ["S101", "S104", "S106", "S603", "ASYNC240"]
+# Runs pip with fixed arguments to regenerate requirements.lock.
+"scripts/lock_requirements.py" = ["S603"]
+# Exec'ing the container CMD after dropping privileges is the purpose of the entrypoint.
+"docker_entrypoint.py" = ["S606"]

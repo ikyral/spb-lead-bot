@@ -13,6 +13,9 @@ from src.services.providers.base import SPB_DISTRICTS, TARGET_CATEGORIES
 DISTRICT_NAMES: list[str] = list(SPB_DISTRICTS.keys())
 CATEGORY_KEYS: list[str] = list(TARGET_CATEGORIES.keys())
 
+# Shown when callback data is malformed, forged, or from a keyboard of an older bot version.
+STALE_BUTTON_TEXT: str = "Кнопка устарела. Откройте меню заново."
+
 
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
     """Return the persistent bottom reply keyboard."""
@@ -34,18 +37,19 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
 def get_districts_keyboard() -> InlineKeyboardMarkup:
     """Generate inline keyboard for SPb districts selection."""
     builder = InlineKeyboardBuilder()
-    for idx, name in enumerate(DISTRICT_NAMES):
-        builder.button(text=name, callback_data=f"dist:{idx}")
+    # Stable keys (not list positions): reordering districts cannot retarget old buttons.
+    for name in DISTRICT_NAMES:
+        builder.button(text=name, callback_data=f"dist:{name}")
     builder.adjust(2)
     return builder.as_markup()
 
 
-def get_categories_keyboard(district_idx: int) -> InlineKeyboardMarkup:
+def get_categories_keyboard(district_name: str) -> InlineKeyboardMarkup:
     """Generate inline keyboard for business categories in selected district."""
     builder = InlineKeyboardBuilder()
-    for cat_idx, cat_key in enumerate(CATEGORY_KEYS):
+    for cat_key in CATEGORY_KEYS:
         title = TARGET_CATEGORIES[cat_key]["title"]
-        builder.button(text=title, callback_data=f"cat:{district_idx}:{cat_idx}")
+        builder.button(text=title, callback_data=f"cat:{district_name}:{cat_key}")
     builder.button(text="⬅️ Назад к районам", callback_data="dist_back")
     builder.adjust(1)
     return builder.as_markup()

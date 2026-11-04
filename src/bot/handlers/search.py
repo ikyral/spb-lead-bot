@@ -1,25 +1,81 @@
 """Search handlers for finding leads in SPb and importing CSV data."""
 
+import html
 import io
 import logging
+import time
+
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from src.bot.keyboards import (
-    CATEGORY_KEYS,
-    DISTRICT_NAMES,
+    STALE_BUTTON_TEXT,
     get_categories_keyboard,
     get_districts_keyboard,
     get_main_menu_keyboard,
 )
 from src.config import settings
 from src.database.repo import async_session_maker
-from src.services.pipeline import import_csv_harvest, run_lead_harvest
-from src.services.providers.base import TARGET_CATEGORIES
+from src.services.pipeline import MAX_CSV_PLACES, import_csv_harvest, run_lead_harvest
+from src.services.providers.base import SPB_DISTRICTS, TARGET_CATEGORIES
 
 logger = logging.getLogger(__name__)
 router = Router(name="search")
+
+
+# Telegram limits message edits; progress is refreshed at most this often.
+PROGRESS_UPDATE_INTERVAL_SECONDS: float = 3.0
+
+
+async def _edit_or_send(
+    callback: CallbackQuery,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> Message | None:
+    """
+    Edit the callback message, or send a new one if it is too old to edit (InaccessibleMessage).
+
+    Returns the message that now shows the text, so it can be edited later.
+    """
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+        return callback.message
+    if callback.message:
+        return await callback.message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+    return None
+
+
+class ProgressReporter:
+    """Pipeline progress callback that shows 'checked N/M' in a status message (throttled)."""
+
+    def __init__(
+        self,
+        message: Message | None,
+        header: str,
+        min_interval: float = PROGRESS_UPDATE_INTERVAL_SECONDS,
+    ) -> None:
+        self._message = message
+        self._header = header
+        self._min_interval = min_interval
+        self._last_update = time.monotonic()
+
+    async def __call__(self, done: int, total: int) -> None:
+        # The final count is skipped: the result report replaces the message right away.
+        if self._message is None or done >= total:
+            return
+        now = time.monotonic()
+        if now - self._last_update < self._min_interval:
+            return
+        self._last_update = now
+        try:
+            await self._message.edit_text(
+                f"{self._header}\n\nПроверено сайтов: <b>{done}/{total}</b>",
+                parse_mode="HTML",
+            )
+        except TelegramAPIError as exc:
+            logger.debug("Progress update skipped: %s", exc)
 
 
 @router.message(CommandStart())
@@ -50,47 +106,51 @@ async def handle_search_menu(message: Message) -> None:
 async def handle_dist_back(callback: CallbackQuery) -> None:
     """Return to districts selection list."""
     await callback.answer()
-    if callback.message:
-        await callback.message.edit_text(
-            "📍 <b>Выберите район Санкт-Петербурга:</b>",
-            reply_markup=get_districts_keyboard(),
-            parse_mode="HTML",
-        )
+    await _edit_or_send(
+        callback,
+        "📍 <b>Выберите район Санкт-Петербурга:</b>",
+        reply_markup=get_districts_keyboard(),
+    )
 
 
 @router.callback_query(F.data.startswith("dist:"))
 async def handle_district_chosen(callback: CallbackQuery) -> None:
     """Show business categories for the chosen district."""
-    await callback.answer()
-    dist_idx = int(callback.data.split(":")[1])
-    district_name = DISTRICT_NAMES[dist_idx]
+    district_name = (callback.data or "").removeprefix("dist:")
+    if district_name not in SPB_DISTRICTS:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
 
-    if callback.message:
-        await callback.message.edit_text(
-            f"📍 Район: <b>{district_name}</b>\n\n"
-            "Выберите категорию бизнеса для сбора лидов:",
-            reply_markup=get_categories_keyboard(dist_idx),
-            parse_mode="HTML",
-        )
+    await callback.answer()
+    await _edit_or_send(
+        callback,
+        f"📍 Район: <b>{district_name}</b>\n\n"
+        "Выберите категорию бизнеса для сбора лидов:",
+        reply_markup=get_categories_keyboard(district_name),
+    )
 
 
 @router.callback_query(F.data.startswith("cat:"))
 async def handle_category_chosen(callback: CallbackQuery) -> None:
     """Trigger lead harvest for the selected district and category."""
-    parts = callback.data.split(":")
-    dist_idx = int(parts[1])
-    cat_idx = int(parts[2])
-    district_name = DISTRICT_NAMES[dist_idx]
-    category_key = CATEGORY_KEYS[cat_idx]
+    parts = (callback.data or "").split(":")
+    if (
+        len(parts) != 3
+        or parts[1] not in SPB_DISTRICTS
+        or parts[2] not in TARGET_CATEGORIES
+    ):
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    _, district_name, category_key = parts
     category_title = TARGET_CATEGORIES[category_key]["title"]
 
     await callback.answer()
-    if callback.message:
-        await callback.message.edit_text(
-            f"⏳ Сканирую район <b>{district_name}</b> ({category_title}) "
-            "и проверяю сайты...\nЭто может занять 10-30 секунд.",
-            parse_mode="HTML",
-        )
+    header = (
+        f"⏳ Сканирую район <b>{district_name}</b> ({category_title}) и проверяю сайты...\n"
+        "В больших районах это может занять несколько минут."
+    )
+    status_message = await _edit_or_send(callback, header)
+    progress = ProgressReporter(status_message, header, min_interval=PROGRESS_UPDATE_INTERVAL_SECONDS)
 
     try:
         async with async_session_maker() as session:
@@ -98,7 +158,10 @@ async def handle_category_chosen(callback: CallbackQuery) -> None:
                 session=session,
                 district_name=district_name,
                 category_key=category_key,
-                twogis_api_key=settings.TWOGIS_API_KEY,
+                twogis_api_key=(
+                    settings.TWOGIS_API_KEY.get_secret_value() if settings.TWOGIS_API_KEY else None
+                ),
+                progress=progress,
             )
         report = (
             "🏁 <b>Сбор завершен!</b>\n\n"
@@ -111,14 +174,16 @@ async def handle_category_chosen(callback: CallbackQuery) -> None:
             f"• Дубликатов пропущено: <b>{stats['duplicates_skipped']}</b>"
         )
     except Exception as exc:
-        logger.exception("Error during harvest: %s", exc)
-        report = f"⚠️ Ошибка при выполнении сбора: <code>{exc}</code>"
+        logger.exception("Error during harvest")
+        report = f"⚠️ Ошибка при выполнении сбора: <code>{html.escape(str(exc))}</code>"
 
-    if callback.message:
-        await callback.message.edit_text(report, parse_mode="HTML")
+    if status_message is not None:
+        await status_message.edit_text(report, parse_mode="HTML")
+    else:
+        await _edit_or_send(callback, report)
 
 
-@router.message(F.document, F.document.file_name.endswith(".csv"))
+@router.message(F.document, F.document.file_name.lower().endswith(".csv"))
 async def handle_csv_upload(message: Message, bot: Bot) -> None:
     """Download and process uploaded CSV file with raw places."""
     if not message.document:
@@ -130,8 +195,9 @@ async def handle_csv_upload(message: Message, bot: Bot) -> None:
         await bot.download(message.document, destination=file_io)
         file_bytes = file_io.getvalue()
 
+        progress = ProgressReporter(status_msg, "⏳ Анализирую CSV файл и проверяю сайты...")
         async with async_session_maker() as session:
-            stats = await import_csv_harvest(session, file_bytes)
+            stats = await import_csv_harvest(session, file_bytes, progress=progress)
 
         report = (
             "📁 <b>Импорт CSV завершен!</b>\n\n"
@@ -140,7 +206,15 @@ async def handle_csv_upload(message: Message, bot: Bot) -> None:
             f"• Новых сохранено: <b>{stats['saved_new']}</b>\n"
             f"• Дубликатов пропущено: <b>{stats['duplicates_skipped']}</b>"
         )
+        if stats.get("over_limit"):
+            report += (
+                f"\n\n⚠️ Обработаны первые <b>{MAX_CSV_PLACES}</b> записей, "
+                f"ещё <b>{stats['over_limit']}</b> пропущено. Разбейте файл на части."
+            )
         await status_msg.edit_text(report, parse_mode="HTML")
     except Exception as exc:
-        logger.exception("Error during CSV import: %s", exc)
-        await status_msg.edit_text(f"⚠️ Ошибка при обработке CSV: <code>{exc}</code>", parse_mode="HTML")
+        logger.exception("Error during CSV import")
+        await status_msg.edit_text(
+            f"⚠️ Ошибка при обработке CSV: <code>{html.escape(str(exc))}</code>",
+            parse_mode="HTML",
+        )

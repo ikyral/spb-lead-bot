@@ -3,11 +3,10 @@
 import csv
 import hashlib
 import io
-import httpx
 
-from src.services.checker import is_social_domain
+from src.services.checker import is_social_domain, url_host
 from src.services.providers.base import RawPlace
-from src.services.scorer import HIGH_MARGIN_KEYWORDS
+from src.services.scorer import is_high_margin_category
 
 COLUMN_MAPPING: dict[str, str] = {
     "name": "name",
@@ -93,24 +92,15 @@ def parse_csv_leads(file_bytes: bytes) -> list[RawPlace]:
         raw_website = collected["website"][0] if collected["website"] else None
         socials = ", ".join(collected["socials"]) if collected["socials"] else None
 
-        if not socials and raw_website:
-            host = None
-            try:
-                url_to_parse = (
-                    raw_website if raw_website.startswith(("http://", "https://"))
-                    else f"https://{raw_website}"
-                )
-                host = httpx.URL(url_to_parse).host
-            except Exception:
-                pass
-            if is_social_domain(host):
-                socials = raw_website
+        if not socials and raw_website and is_social_domain(url_host(raw_website)):
+            socials = raw_website
 
-        norm_cat = category.lower()
-        is_high = any(keyword in norm_cat for keyword in HIGH_MARGIN_KEYWORDS)
+        is_high = is_high_margin_category(category)
 
         key_str = f"{name}_{phone}_{address}"
-        external_id = f"csv_{hashlib.md5(key_str.encode('utf-8')).hexdigest()[:12]}"
+        # Stable lead ID, not a security measure (hence usedforsecurity=False).
+        digest = hashlib.md5(key_str.encode("utf-8"), usedforsecurity=False).hexdigest()
+        external_id = f"csv_{digest[:12]}"
         if external_id in seen_ids:
             continue
         seen_ids.add(external_id)

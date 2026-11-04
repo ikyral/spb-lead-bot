@@ -4,7 +4,7 @@
 Find local businesses in Saint Petersburg (SPb) that need website development services:
 - `no_site`: No website specified in map card.
 - `social_only`: Only VK, Telegram, Taplink, YClients, or Dikidi link instead of a standalone website.
-- `dead_site`: Website URL returns HTTP 4xx/5xx, SSL error, DNS failure, or timeout (>7s).
+- `dead_site`: Website URL returns HTTP 4xx/5xx (except 401/403/429), SSL error, DNS failure, or timeout.
 
 ## 2. Database Schema (leads table in SQLite)
 - `id`: Integer, Primary Key, Autoincrement
@@ -83,8 +83,10 @@ Format: `(south_lat, west_lon, north_lat, east_lon)`
 ## 5. Website Classification Rules (src/services/checker.py)
 - Social/Aggregator domains (`social_only`): `vk.com`, `vk.ru`, `t.me`, `taplink.cc`, `wa.me`, `instagram.com`, `yclients.com`, `dikidi.net`, `linktr.ee`.
 - If URL is empty/None -> `no_site`.
-- Perform `GET` request with `httpx.AsyncClient(timeout=7.0, follow_redirects=True)` and standard browser `User-Agent`.
-- If status code >= 400 or raises `httpx.HTTPError` -> `dead_site`.
+- Perform `GET` request with `httpx.AsyncClient(timeout=7.0, follow_redirects=True)` and standard browser `User-Agent`; the whole check is capped at 20s. The response body is not downloaded.
+- URL without scheme is tried as `https://` first; if that fails with a connection/SSL error or a dead status, it is retried as `http://` (no retry after a timeout).
+- If status code >= 400 (except `401`, `403`, `429`: the server is alive but blocks bots / requires auth / rate-limits) or raises `httpx.HTTPError` -> `dead_site`.
+- Connections to non-public addresses (loopback, private, link-local incl. `169.254.169.254`, CGNAT, multicast, reserved; IPv4 and IPv6) are refused for every hop including redirects, after DNS resolution -> treated as a connection error (`dead_site`). Env proxies are ignored. See `src/services/safe_http.py`.
 - If final redirected URL host matches social/aggregator domains -> `social_only`.
 - Otherwise -> `has_site`.
 
@@ -99,5 +101,9 @@ Format: `(south_lat, west_lon, north_lat, east_lon)`
   - Has `socials`: `+15`
   - Neither `phone` nor `socials`: `-30`
 - Category bonus:
-  - High-margin category: `+15`
+  - High-margin category: `+15` (category key with `high_margin: True`, or a free-text category such as a CSV
+    `Рубрика` containing a keyword from `HIGH_MARGIN_KEYWORDS`).
+  - Small repair shops (`ремонт обуви / одежды / телефонов / часов / ноутбуков / бытовой техники`, incl.
+    `ремонт и пошив одежды`) get no bonus: these phrases are removed before keyword matching, so
+    `Ремонт под ключ`, `Кузовной ремонт` and `Автосервис, ремонт телефонов` keep it.
 - Clamp final score between `0` and `100`. Only save leads with `score >= 30`.

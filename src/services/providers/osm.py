@@ -2,9 +2,10 @@
 
 import logging
 from typing import Any
+
 import httpx
 
-from src.services.checker import is_social_domain
+from src.services.checker import is_social_domain, url_host
 from src.services.providers.base import (
     SPB_DISTRICTS,
     TARGET_CATEGORIES,
@@ -60,6 +61,9 @@ class OSMOverpassProvider(BaseMapProvider):
         query = self.build_query(bbox, osm_tags)
         high_margin = bool(cat_info.get("high_margin", False))
 
+        # Best incomplete result, used only if no endpoint returns a complete one.
+        partial: list[RawPlace] = []
+
         for endpoint in self.endpoints:
             try:
                 if self._client is not None:
@@ -70,15 +74,36 @@ class OSMOverpassProvider(BaseMapProvider):
                     async with httpx.AsyncClient(timeout=self.timeout) as client:
                         response = await client.post(endpoint, data={"data": query})
 
-                if response.status_code == 200:
-                    data = response.json()
-                    return self._parse_elements(data, district_name, category_key, high_margin)
+                if response.status_code != 200:
+                    logger.warning("Overpass endpoint %s returned status %d", endpoint, response.status_code)
+                    continue
 
-                logger.warning("Overpass endpoint %s returned status %d", endpoint, response.status_code)
-            except (httpx.HTTPError, ValueError, KeyError) as exc:
+                data = response.json()
+                places = self._parse_elements(data, district_name, category_key, high_margin)
+
+                # Timeouts and memory exhaustion come with HTTP 200 and a 'remark' starting with
+                # 'runtime error:'; elements may then be missing. 'runtime remark:' is informational.
+                remark = str(data.get("remark") or "")
+                if remark.startswith("runtime error"):
+                    logger.warning(
+                        "Overpass endpoint %s returned an incomplete result (%d places): %s",
+                        endpoint, len(places), remark,
+                    )
+                    if len(places) > len(partial):
+                        partial = places
+                    continue
+
+                return places
+            except (httpx.HTTPError, ValueError, KeyError, AttributeError) as exc:
                 logger.warning("Overpass endpoint %s failed: %s", endpoint, exc)
 
-        return []
+        if partial:
+            logger.warning(
+                "All Overpass endpoints failed to complete the query for %s / %s; "
+                "using an incomplete result with %d places",
+                district_name, category_key, len(partial),
+            )
+        return partial
 
     def _parse_elements(
         self,
@@ -110,7 +135,19 @@ class OSMOverpassProvider(BaseMapProvider):
             phone_str = str(phone).strip() if phone and str(phone).strip() else None
 
             raw_site = tags.get("website") or tags.get("contact:website") or tags.get("url")
-            raw_website = str(raw_site).strip() if raw_site and str(raw_site).strip() else None
+            # OSM separates multiple values with ';'. Prefer the first real website,
+            # so a social link listed first does not hide it.
+            site_candidates = [
+                part.strip() for part in str(raw_site or "").split(";") if part.strip()
+            ]
+            real_sites = [u for u in site_candidates if not is_social_domain(url_host(u))]
+            social_sites = [u for u in site_candidates if is_social_domain(url_host(u))]
+            if real_sites:
+                raw_website = real_sites[0]
+            elif social_sites:
+                raw_website = social_sites[0]
+            else:
+                raw_website = None
 
             social_parts: list[str] = []
             for s_key in ("contact:vk", "contact:telegram", "contact:instagram", "vk", "telegram"):
@@ -121,18 +158,8 @@ class OSMOverpassProvider(BaseMapProvider):
                         social_parts.append(v_str)
 
             socials = ", ".join(social_parts) if social_parts else None
-            if not socials and raw_website:
-                host = None
-                try:
-                    url_to_parse = (
-                        raw_website if raw_website.startswith(("http://", "https://"))
-                        else f"https://{raw_website}"
-                    )
-                    host = httpx.URL(url_to_parse).host
-                except Exception:
-                    pass
-                if is_social_domain(host):
-                    socials = raw_website
+            if not socials and social_sites:
+                socials = ", ".join(social_sites)
 
             street = tags.get("addr:street")
             house = tags.get("addr:housenumber")

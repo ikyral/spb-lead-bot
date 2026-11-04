@@ -4,12 +4,15 @@ import csv
 import html
 import io
 import logging
+import re
+from datetime import UTC, datetime, timedelta, timezone
+
 from aiogram import F, Router
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.bot.formatters import format_lead_card, generate_pitch_text
-from src.bot.keyboards import get_export_keyboard, get_lead_card_keyboard
+from src.bot.keyboards import STALE_BUTTON_TEXT, get_export_keyboard, get_lead_card_keyboard
 from src.database.models import Lead
 from src.database.repo import (
     async_session_maker,
@@ -22,10 +25,46 @@ from src.database.repo import (
 logger = logging.getLogger(__name__)
 router = Router(name="leads")
 
+LEAD_ACTIONS: frozenset[str] = frozenset({"work", "reject", "pitch", "prev", "next"})
+# Statuses accepted by export_leads_by_status ('all' exports everything).
+EXPORT_STATUSES: frozenset[str] = frozenset({"new", "in_work", "rejected", "all"})
+
+# Human-readable CRM status names (internal values must not leak into messages).
+STATUS_NAMES: dict[str, str] = {"new": "Новые", "in_work": "В работе", "rejected": "В отказе", "all": "Все"}
+# Moscow has had no DST since 2014, so a fixed offset is exact and needs no tz database.
+MSK = timezone(timedelta(hours=3), "MSK")
+
+
+def _format_msk(value: datetime | None) -> str:
+    """Format a UTC timestamp as Moscow time for the CSV export (Excel-friendly)."""
+    if value is None:
+        return ""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(MSK).strftime("%Y-%m-%d %H:%M")
+
+
+CARD_TITLES: dict[str, str] = {"new": "📋 Новый лид", "in_work": "💼 В работе", "rejected": "🗑 В отказе"}
+
+# Spreadsheet apps treat cells starting with these characters as formulas (CSV injection).
+_FORMULA_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@", "\t", "\r")
+# Phone-like values ("+7 (812) 555-01-01, +7 ...") contain no function names and are left as is.
+_PHONE_LIKE_RE = re.compile(r"[+\-][\d\s().,+\-]*")
+
+
+def _csv_safe(value: object) -> object:
+    """Neutralize spreadsheet formula injection in exported cells."""
+    if not isinstance(value, str) or not value.startswith(_FORMULA_PREFIXES):
+        return value
+    if _PHONE_LIKE_RE.fullmatch(value):
+        return value
+    return "'" + value
+
 
 async def _reply(target: Message | CallbackQuery, text: str, kb=None, edit: bool = False) -> None:
     """Helper to reply to message or edit callback message."""
-    if edit and isinstance(target, CallbackQuery) and target.message:
+    # Messages older than 48h arrive as InaccessibleMessage (no edit_text): send a new one instead.
+    if edit and isinstance(target, CallbackQuery) and isinstance(target.message, Message):
         await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     elif isinstance(target, Message):
         await target.answer(text, reply_markup=kb, parse_mode="HTML")
@@ -43,13 +82,14 @@ async def render_lead_page(
     """Render a single lead card with pagination controls."""
     leads = await get_leads(session, crm_status=crm_status, limit=1, offset=offset)
     if not leads:
-        msg = f"📋 Лидов со статусом «{crm_status}» пока нет." if offset == 0 else "🏁 Больше нет лидов в списке."
+        status_name = STATUS_NAMES.get(crm_status, crm_status)
+        msg = f"📋 Лидов со статусом «{status_name}» пока нет." if offset == 0 else "🏁 Больше нет лидов в списке."
         await _reply(target, msg, edit=edit)
         return
 
     lead = leads[0]
     next_leads = await get_leads(session, crm_status=crm_status, limit=1, offset=offset + 1)
-    status_title = "📋 Новый лид" if crm_status == "new" else "💼 В работе"
+    status_title = CARD_TITLES.get(crm_status, "📋 Лид")
     card_text = f"<b>{status_title} #{offset + 1}</b>\n\n" + format_lead_card(lead)
     kb = get_lead_card_keyboard(
         lead_id=lead.id,
@@ -78,7 +118,16 @@ async def handle_in_work_leads(message: Message) -> None:
 @router.callback_query(F.data.startswith("lead:"))
 async def handle_lead_action(callback: CallbackQuery) -> None:
     """Handle card actions: work, reject, pitch, prev, next."""
-    _, lead_id_str, action, offset_str = callback.data.split(":")
+    parts = (callback.data or "").split(":")
+    if (
+        len(parts) != 4
+        or not parts[1].isdigit()
+        or parts[2] not in LEAD_ACTIONS
+        or not parts[3].isdigit()
+    ):
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    _, lead_id_str, action, offset_str = parts
     lead_id, offset = int(lead_id_str), int(offset_str)
 
     async with async_session_maker() as session:
@@ -109,7 +158,9 @@ async def handle_lead_action(callback: CallbackQuery) -> None:
                     f"💡 <b>Текст КП:</b>\n\n<code>{html.escape(pitch)}</code>",
                     parse_mode="HTML",
                 )
-            await render_lead_page(callback, session, crm_status="new", offset=offset, edit=True)
+            # Stay in the list the card was opened from ("В работе" cards keep their position).
+            list_status = "in_work" if current_status == "in_work" else "new"
+            await render_lead_page(callback, session, crm_status=list_status, offset=offset, edit=True)
             return
 
         if action == "reject":
@@ -143,34 +194,37 @@ async def handle_stats(message: Message) -> None:
 @router.callback_query(F.data.startswith("export:"))
 async def handle_export_csv(callback: CallbackQuery) -> None:
     """Export selected leads to Excel-friendly CSV file."""
-    crm_status = callback.data.split(":")[1]
+    crm_status = (callback.data or "").removeprefix("export:")
+    if crm_status not in EXPORT_STATUSES:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
     async with async_session_maker() as session:
         leads = await export_leads_by_status(session, crm_status)
 
     if not leads:
-        await callback.answer(f"Нет лидов со статусом «{crm_status}»", show_alert=True)
+        await callback.answer(f"Нет лидов со статусом «{STATUS_NAMES[crm_status]}»", show_alert=True)
         return
 
     output = io.StringIO()
     writer = csv.writer(output, delimiter=";")
     writer.writerow([
         "ID", "Источник", "Название", "Категория", "Район", "Адрес", "Телефон",
-        "Соцсети", "Сайт", "Статус сайта", "Оценка", "CRM статус", "Карта", "Дата добавления"
+        "Соцсети", "Сайт", "Статус сайта", "Оценка", "CRM статус", "Карта", "Дата добавления (МСК)"
     ])
-    for l in leads:
-        writer.writerow([
-            l.id, l.source, l.name, l.category, l.district or "", l.address or "",
-            l.phone or "", l.socials or "", l.raw_website or "", l.site_status,
-            l.score, l.crm_status, l.map_url or "",
-            l.created_at.isoformat() if l.created_at else "",
-        ])
+    for lead in leads:
+        writer.writerow([_csv_safe(value) for value in (
+            lead.id, lead.source, lead.name, lead.category, lead.district or "", lead.address or "",
+            lead.phone or "", lead.socials or "", lead.raw_website or "", lead.site_status,
+            lead.score, lead.crm_status, lead.map_url or "",
+            _format_msk(lead.created_at),
+        )])
 
     csv_bytes = output.getvalue().encode("utf-8-sig")
     file = BufferedInputFile(csv_bytes, filename=f"spb_leads_{crm_status}.csv")
     if callback.message:
         await callback.message.answer_document(
             document=file,
-            caption=f"📥 Выгрузка лидов: <b>{crm_status}</b> ({len(leads)} шт.)",
+            caption=f"📥 Выгрузка лидов: <b>{STATUS_NAMES[crm_status]}</b> ({len(leads)} шт.)",
             parse_mode="HTML",
         )
     await callback.answer()
