@@ -242,3 +242,66 @@ async def test_search_handlers_navigation():
     cb.message.edit_text.assert_awaited_once()
     assert "Центральный" in cb.message.edit_text.call_args[0][0]
 
+
+
+class _DummySessionCtx:
+    """Async context manager standing in for async_session_maker() in handler tests."""
+
+    async def __aenter__(self) -> object:
+        return object()
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_category_harvest_error_text_is_html_escaped(monkeypatch: pytest.MonkeyPatch):
+    """Exception text with '<' or '&' must be escaped, otherwise Telegram rejects the error report."""
+    from src.bot.handlers import search
+
+    async def failing_harvest(**kwargs):
+        raise ValueError("Unsupported lead_data type: <class 'dict'> & more")
+
+    monkeypatch.setattr(search, "run_lead_harvest", failing_harvest)
+    monkeypatch.setattr(search, "async_session_maker", _DummySessionCtx)
+
+    cb = MagicMock(spec=CallbackQuery)
+    cb.data = "cat:0:0"
+    cb.answer = AsyncMock()
+    cb.message = MagicMock(spec=Message)
+    cb.message.edit_text = AsyncMock()
+
+    await search.handle_category_chosen(cb)
+
+    report = cb.message.edit_text.call_args[0][0]
+    assert "<class" not in report
+    assert "&lt;class &#x27;dict&#x27;&gt; &amp; more" in report
+
+
+@pytest.mark.asyncio
+async def test_handlers_survive_inaccessible_message():
+    """Buttons under messages older than 48h arrive as InaccessibleMessage, which has no edit_text."""
+    from aiogram.types import Chat, InaccessibleMessage
+
+    from src.bot.handlers.leads import _reply
+    from src.bot.handlers.search import handle_district_chosen
+
+    old_msg = InaccessibleMessage(chat=Chat(id=1, type="private"), message_id=10)
+
+    cb = MagicMock(spec=CallbackQuery)
+    cb.data = "dist:0"
+    cb.answer = AsyncMock()
+    cb.message = old_msg
+
+    sent: list[str] = []
+
+    async def fake_answer(self, text, **kwargs):
+        sent.append(text)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(InaccessibleMessage, "answer", fake_answer)
+        await handle_district_chosen(cb)
+        await _reply(cb, "card text", edit=True)
+
+    assert any("Центральный" in text for text in sent)
+    assert "card text" in sent

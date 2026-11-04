@@ -1,10 +1,11 @@
 """Search handlers for finding leads in SPb and importing CSV data."""
 
+import html
 import io
 import logging
 from aiogram import Bot, F, Router
 from aiogram.filters import CommandStart
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from src.bot.keyboards import (
     CATEGORY_KEYS,
@@ -20,6 +21,18 @@ from src.services.providers.base import TARGET_CATEGORIES
 
 logger = logging.getLogger(__name__)
 router = Router(name="search")
+
+
+async def _edit_or_send(
+    callback: CallbackQuery,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    """Edit the callback message, or send a new one if it is too old to edit (InaccessibleMessage)."""
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+    elif callback.message:
+        await callback.message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
 
 
 @router.message(CommandStart())
@@ -50,12 +63,11 @@ async def handle_search_menu(message: Message) -> None:
 async def handle_dist_back(callback: CallbackQuery) -> None:
     """Return to districts selection list."""
     await callback.answer()
-    if callback.message:
-        await callback.message.edit_text(
-            "📍 <b>Выберите район Санкт-Петербурга:</b>",
-            reply_markup=get_districts_keyboard(),
-            parse_mode="HTML",
-        )
+    await _edit_or_send(
+        callback,
+        "📍 <b>Выберите район Санкт-Петербурга:</b>",
+        reply_markup=get_districts_keyboard(),
+    )
 
 
 @router.callback_query(F.data.startswith("dist:"))
@@ -65,13 +77,12 @@ async def handle_district_chosen(callback: CallbackQuery) -> None:
     dist_idx = int(callback.data.split(":")[1])
     district_name = DISTRICT_NAMES[dist_idx]
 
-    if callback.message:
-        await callback.message.edit_text(
-            f"📍 Район: <b>{district_name}</b>\n\n"
-            "Выберите категорию бизнеса для сбора лидов:",
-            reply_markup=get_categories_keyboard(dist_idx),
-            parse_mode="HTML",
-        )
+    await _edit_or_send(
+        callback,
+        f"📍 Район: <b>{district_name}</b>\n\n"
+        "Выберите категорию бизнеса для сбора лидов:",
+        reply_markup=get_categories_keyboard(dist_idx),
+    )
 
 
 @router.callback_query(F.data.startswith("cat:"))
@@ -85,12 +96,11 @@ async def handle_category_chosen(callback: CallbackQuery) -> None:
     category_title = TARGET_CATEGORIES[category_key]["title"]
 
     await callback.answer()
-    if callback.message:
-        await callback.message.edit_text(
-            f"⏳ Сканирую район <b>{district_name}</b> ({category_title}) "
-            "и проверяю сайты...\nЭто может занять 10-30 секунд.",
-            parse_mode="HTML",
-        )
+    await _edit_or_send(
+        callback,
+        f"⏳ Сканирую район <b>{district_name}</b> ({category_title}) "
+        "и проверяю сайты...\nЭто может занять 10-30 секунд.",
+    )
 
     try:
         async with async_session_maker() as session:
@@ -111,11 +121,10 @@ async def handle_category_chosen(callback: CallbackQuery) -> None:
             f"• Дубликатов пропущено: <b>{stats['duplicates_skipped']}</b>"
         )
     except Exception as exc:
-        logger.exception("Error during harvest: %s", exc)
-        report = f"⚠️ Ошибка при выполнении сбора: <code>{exc}</code>"
+        logger.exception("Error during harvest")
+        report = f"⚠️ Ошибка при выполнении сбора: <code>{html.escape(str(exc))}</code>"
 
-    if callback.message:
-        await callback.message.edit_text(report, parse_mode="HTML")
+    await _edit_or_send(callback, report)
 
 
 @router.message(F.document, F.document.file_name.endswith(".csv"))
@@ -142,5 +151,8 @@ async def handle_csv_upload(message: Message, bot: Bot) -> None:
         )
         await status_msg.edit_text(report, parse_mode="HTML")
     except Exception as exc:
-        logger.exception("Error during CSV import: %s", exc)
-        await status_msg.edit_text(f"⚠️ Ошибка при обработке CSV: <code>{exc}</code>", parse_mode="HTML")
+        logger.exception("Error during CSV import")
+        await status_msg.edit_text(
+            f"⚠️ Ошибка при обработке CSV: <code>{html.escape(str(exc))}</code>",
+            parse_mode="HTML",
+        )

@@ -25,7 +25,8 @@ router = Router(name="leads")
 
 async def _reply(target: Message | CallbackQuery, text: str, kb=None, edit: bool = False) -> None:
     """Helper to reply to message or edit callback message."""
-    if edit and isinstance(target, CallbackQuery) and target.message:
+    # Messages older than 48h arrive as InaccessibleMessage (no edit_text): send a new one instead.
+    if edit and isinstance(target, CallbackQuery) and isinstance(target.message, Message):
         await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     elif isinstance(target, Message):
         await target.answer(text, reply_markup=kb, parse_mode="HTML")
