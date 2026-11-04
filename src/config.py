@@ -16,8 +16,12 @@ class Settings(BaseSettings):
     )
 
 
+settings_error: Exception | None = None
+
 try:
     settings = Settings()
-except Exception:
-    # Fallback default settings when running in environments without .env configured
+except Exception as exc:
+    # Fallback keeps modules importable without .env (e.g. in tests);
+    # main.py refuses to start the bot while settings_error is set.
+    settings_error = exc
     settings = Settings(BOT_TOKEN="", ADMIN_TG_ID=0)
