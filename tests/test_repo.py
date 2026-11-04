@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 from sqlalchemy.pool import StaticPool
 
 from src.database.models import Lead
-from src.database.repo import get_leads, init_db, save_new_leads, upsert_lead
+from src.database.repo import get_leads, init_db, save_new_leads, update_crm_status, upsert_lead
 
 LEAD_LIST_INDEX = "ix_leads_crm_status_score"
 
@@ -208,3 +208,12 @@ async def test_save_new_leads_handles_large_batches(session) -> None:
     saved, duplicates = await save_new_leads(session, [_lead_data(i) for i in range(2500)])
     assert (saved, duplicates) == (2500, 0)
     assert await save_new_leads(session, [_lead_data(i) for i in range(2500)]) == (0, 2500)
+
+
+@pytest.mark.asyncio
+async def test_update_crm_status_reports_whether_a_lead_was_updated(session) -> None:
+    await upsert_lead(session, _lead_data(1))
+    lead_id = (await session.execute(text("SELECT id FROM leads"))).scalar_one()
+
+    assert await update_crm_status(session, lead_id, "in_work") is True
+    assert await update_crm_status(session, 999_999, "in_work") is False

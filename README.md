@@ -29,6 +29,11 @@
 
     pytest
 
+5. Проверка типов (настройки в `mypy.ini`; mypy в `requirements.txt` не входит):
+
+    pip install mypy
+    mypy
+
 ### Запуск в Docker
 
     docker compose up -d --build

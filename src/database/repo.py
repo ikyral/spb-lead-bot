@@ -1,6 +1,6 @@
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import Connection, func, select, update
+from sqlalchemy import Connection, CursorResult, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -50,6 +50,7 @@ async def upsert_lead(
     Existing leads are NOT overwritten to preserve user CRM status and edits.
     Returns True if the lead is newly inserted, False if it already exists.
     """
+    external_id: str | None
     if isinstance(lead_data, Lead):
         external_id = lead_data.external_id
     elif isinstance(lead_data, dict):
@@ -185,7 +186,8 @@ async def update_crm_status(
         .where(Lead.id == lead_id)
         .values(crm_status=new_status)
     )
-    result = await session.execute(stmt)
+    # UPDATE returns a CursorResult at runtime; Session.execute is typed as the generic Result.
+    result = cast("CursorResult[Any]", await session.execute(stmt))
     await session.commit()
     return result.rowcount > 0
 
