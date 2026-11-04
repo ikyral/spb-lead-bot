@@ -101,5 +101,9 @@ Format: `(south_lat, west_lon, north_lat, east_lon)`
   - Has `socials`: `+15`
   - Neither `phone` nor `socials`: `-30`
 - Category bonus:
-  - High-margin category: `+15`
+  - High-margin category: `+15` (category key with `high_margin: True`, or a free-text category such as a CSV
+    `Рубрика` containing a keyword from `HIGH_MARGIN_KEYWORDS`).
+  - Small repair shops (`ремонт обуви / одежды / телефонов / часов / ноутбуков / бытовой техники`, incl.
+    `ремонт и пошив одежды`) get no bonus: these phrases are removed before keyword matching, so
+    `Ремонт под ключ`, `Кузовной ремонт` and `Автосервис, ремонт телефонов` keep it.
 - Clamp final score between `0` and `100`. Only save leads with `score >= 30`.
