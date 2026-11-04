@@ -20,6 +20,15 @@ DEFAULT_OVERPASS_ENDPOINTS: list[str] = [
 ]
 
 
+def _url_host(value: str) -> str | None:
+    """Return the host of a URL that may lack a scheme, or None if it cannot be parsed."""
+    url_to_parse = value if value.startswith(("http://", "https://")) else f"https://{value}"
+    try:
+        return httpx.URL(url_to_parse).host
+    except Exception:
+        return None
+
+
 class OSMOverpassProvider(BaseMapProvider):
     """Fetches places via OSM Overpass API with server fallback."""
 
@@ -110,7 +119,19 @@ class OSMOverpassProvider(BaseMapProvider):
             phone_str = str(phone).strip() if phone and str(phone).strip() else None
 
             raw_site = tags.get("website") or tags.get("contact:website") or tags.get("url")
-            raw_website = str(raw_site).strip() if raw_site and str(raw_site).strip() else None
+            # OSM separates multiple values with ';'. Prefer the first real website,
+            # so a social link listed first does not hide it.
+            site_candidates = [
+                part.strip() for part in str(raw_site or "").split(";") if part.strip()
+            ]
+            real_sites = [u for u in site_candidates if not is_social_domain(_url_host(u))]
+            social_sites = [u for u in site_candidates if is_social_domain(_url_host(u))]
+            if real_sites:
+                raw_website = real_sites[0]
+            elif social_sites:
+                raw_website = social_sites[0]
+            else:
+                raw_website = None
 
             social_parts: list[str] = []
             for s_key in ("contact:vk", "contact:telegram", "contact:instagram", "vk", "telegram"):
@@ -121,18 +142,8 @@ class OSMOverpassProvider(BaseMapProvider):
                         social_parts.append(v_str)
 
             socials = ", ".join(social_parts) if social_parts else None
-            if not socials and raw_website:
-                host = None
-                try:
-                    url_to_parse = (
-                        raw_website if raw_website.startswith(("http://", "https://"))
-                        else f"https://{raw_website}"
-                    )
-                    host = httpx.URL(url_to_parse).host
-                except Exception:
-                    pass
-                if is_social_domain(host):
-                    socials = raw_website
+            if not socials and social_sites:
+                socials = ", ".join(social_sites)
 
             street = tags.get("addr:street")
             house = tags.get("addr:housenumber")

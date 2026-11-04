@@ -91,6 +91,46 @@ async def test_osm_overpass_mock_parsing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_osm_multiple_websites_separated_by_semicolon() -> None:
+    """OSM multi-value tags use ';': the joined string must not be checked as one (invalid) URL."""
+
+    def node(elem_id: int, website: str, **extra_tags: str) -> dict:
+        return {"type": "node", "id": elem_id, "tags": {"name": f"Место {elem_id}", "website": website, **extra_tags}}
+
+    mock_payload = {
+        "elements": [
+            node(1, "https://first-site.ru;https://second-site.ru"),
+            node(2, "https://vk.com/clinic; https://real-clinic.ru"),
+            node(3, "https://vk.com/clinic;https://t.me/clinic"),
+            node(4, " ; "),
+            node(5, "https://vk.com/from_website;https://site5.ru", **{"contact:vk": "https://vk.com/contact_vk"}),
+        ]
+    }
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=mock_payload)))
+    places = {
+        p.external_id: p
+        for p in await OSMOverpassProvider(client=client).search_places("Центральный", "dentist_clinic")
+    }
+
+    # First real website wins
+    assert (places["osm_1"].raw_website, places["osm_1"].socials) == ("https://first-site.ru", None)
+    # A social link listed first must not hide the real website; it is kept as a social contact
+    assert (places["osm_2"].raw_website, places["osm_2"].socials) == (
+        "https://real-clinic.ru", "https://vk.com/clinic"
+    )
+    # Only social links: the first one is checked (-> social_only), all are kept as socials
+    assert (places["osm_3"].raw_website, places["osm_3"].socials) == (
+        "https://vk.com/clinic", "https://vk.com/clinic, https://t.me/clinic"
+    )
+    # Separators only -> no website at all
+    assert (places["osm_4"].raw_website, places["osm_4"].socials) == (None, None)
+    # Explicit contact:* socials take precedence, as for single-value tags
+    assert (places["osm_5"].raw_website, places["osm_5"].socials) == (
+        "https://site5.ru", "https://vk.com/contact_vk"
+    )
+
+
+@pytest.mark.asyncio
 async def test_osm_overpass_fallback_and_failure() -> None:
     """Verify fallback from first failing endpoint to second, and handling when all fail."""
     attempts = 0
