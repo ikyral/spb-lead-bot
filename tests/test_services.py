@@ -123,7 +123,7 @@ def test_csv_loader_uses_the_same_margin_rules() -> None:
         "Название;Рубрика;Телефон\n"
         "Сапожник;Ремонт обуви;+7 999 000-00-01\n"
         "РемСтрой;Ремонт квартир;+7 999 000-00-02\n"
-    ).encode("utf-8")
+    ).encode()
     shoe, renovation = parse_csv_leads(csv_bytes)
     assert (shoe.high_margin, renovation.high_margin) == (False, True)
 
@@ -392,3 +392,20 @@ async def test_analyze_website_no_http_fallback_after_timeout_or_explicit_https(
         res = await analyze_website("https://explicit-https.ru", client=client)
     assert res == ("dead_site", "HTTP/Connection error")
     assert requested == ["https://explicit-https.ru"]
+
+
+@pytest.mark.parametrize(
+    "value", ["https://xn--zz.ru", "xn--zz.ru", "https://::invalid::url", "https://[::1", "exa​mple.ru"]
+)
+def test_url_host_returns_none_for_unparsable_urls(value: str) -> None:
+    """Invalid IDN hosts raise idna.IDNAError (a ValueError), not httpx.InvalidURL: both must be handled."""
+    from src.services.checker import url_host
+
+    assert url_host(value) is None
+
+
+def test_url_host_parses_urls_without_scheme() -> None:
+    from src.services.checker import url_host
+
+    assert url_host("vk.com/club1") == "vk.com"
+    assert url_host("http://Пример.рф/путь") == "пример.рф"  # httpx returns IDN hosts in Unicode form

@@ -5,7 +5,7 @@ import html
 import io
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 from aiogram import F, Router
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
@@ -40,7 +40,7 @@ def _format_msk(value: datetime | None) -> str:
     if value is None:
         return ""
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
+        value = value.replace(tzinfo=UTC)
     return value.astimezone(MSK).strftime("%Y-%m-%d %H:%M")
 
 

@@ -152,8 +152,9 @@ async def run_lead_harvest(
     async def _search_osm() -> list[RawPlace]:
         try:
             return await OSMOverpassProvider().search_places(district_name, category_key)
-        except Exception as exc:
-            logger.warning("OSM lead harvest failed for district %s: %s", district_name, exc)
+        except Exception:
+            # Providers handle network/API errors themselves; this only catches bugs, with a traceback.
+            logger.exception("OSM lead harvest failed for district %s", district_name)
             return []
 
     async def _search_2gis() -> list[RawPlace]:
@@ -161,8 +162,8 @@ async def run_lead_harvest(
             return []
         try:
             return await TwoGisProvider(twogis_api_key.strip()).search_places(district_name, category_key)
-        except Exception as exc:
-            logger.warning("2GIS lead harvest failed for district %s: %s", district_name, exc)
+        except Exception:
+            logger.exception("2GIS lead harvest failed for district %s", district_name)
             return []
 
     # gather keeps the order (OSM first), so duplicate merging keeps the OSM identity as before.

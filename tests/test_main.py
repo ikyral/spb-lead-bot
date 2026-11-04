@@ -100,4 +100,4 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 )
 def test_relative_sqlite_path_is_resolved_against_project_root(db_url: str, expected: str) -> None:
     """'./leads.db' used to depend on the current directory: started elsewhere, the bot got an empty DB."""
-    assert Settings(BOT_TOKEN="t", ADMIN_TG_ID=1, DB_URL=db_url).DB_URL == expected
+    assert expected == Settings(BOT_TOKEN="t", ADMIN_TG_ID=1, DB_URL=db_url).DB_URL

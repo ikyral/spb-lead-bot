@@ -1,5 +1,6 @@
 """Tests for bot formatters, pitch generation, keyboards, and middleware."""
 
+from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -339,7 +340,7 @@ async def test_export_csv_neutralizes_formula_injection(monkeypatch: pytest.Monk
     document = cb.message.answer_document.call_args.kwargs["document"]
     rows = list(csv.reader(io.StringIO(document.data.decode("utf-8-sig")), delimiter=";"))
     header, row = rows[0], rows[1]
-    values = dict(zip(header, row))
+    values = dict(zip(header, row, strict=True))
 
     assert values["Название"] == "'" + evil_lead.name
     assert values["Адрес"] == "'@SUM(1+1)"
@@ -495,11 +496,11 @@ async def test_csv_upload_reports_rows_over_limit(monkeypatch: pytest.MonkeyPatc
 async def test_export_csv_shows_moscow_time(monkeypatch: pytest.MonkeyPatch):
     import csv
     import io
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from src.bot.handlers import leads as leads_handlers
 
-    lead = _make_dummy_lead(created_at=datetime(2026, 11, 4, 17, 15, 42, tzinfo=timezone.utc))
+    lead = _make_dummy_lead(created_at=datetime(2026, 11, 4, 17, 15, 42, tzinfo=UTC))
 
     async def fake_export(session, crm_status):
         return [lead]
@@ -516,4 +517,4 @@ async def test_export_csv_shows_moscow_time(monkeypatch: pytest.MonkeyPatch):
 
     document = cb.message.answer_document.call_args.kwargs["document"]
     header, row = list(csv.reader(io.StringIO(document.data.decode("utf-8-sig")), delimiter=";"))[:2]
-    assert dict(zip(header, row))["Дата добавления (МСК)"] == "2026-11-04 20:15"
+    assert dict(zip(header, row, strict=True))["Дата добавления (МСК)"] == "2026-11-04 20:15"

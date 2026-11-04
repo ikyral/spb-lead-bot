@@ -247,7 +247,7 @@ async def test_import_skips_business_already_saved_from_another_source(
     csv_bytes = (
         "Название;Рубрика;Телефон\n"
         "Гараж 78 детейлинг-центр;Автосервис;8 (999) 111 22 33\n"
-    ).encode("utf-8")
+    ).encode()
 
     res = await import_csv_harvest(session, csv_bytes)
     assert res == {"total_found": 1, "qualified": 1, "saved_new": 0, "duplicates_skipped": 1, "over_limit": 0}
@@ -348,7 +348,7 @@ async def test_csv_import_is_capped(session: AsyncSession, monkeypatch: pytest.M
         "Клиника 1;Стоматология;+7 999 000-00-01\n"
         "Клиника 2;Стоматология;+7 999 000-00-02\n"
         "Клиника 3;Стоматология;+7 999 000-00-03\n"
-    ).encode("utf-8")
+    ).encode()
 
     res = await import_csv_harvest(session, csv_bytes)
     assert res == {"total_found": 2, "qualified": 2, "saved_new": 2, "duplicates_skipped": 0, "over_limit": 1}

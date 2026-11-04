@@ -1,5 +1,7 @@
 """Tests for database schema initialization and query plans."""
 
+from datetime import UTC
+
 import pytest
 from sqlalchemy import event, text
 from sqlalchemy.exc import IntegrityError
@@ -239,9 +241,9 @@ async def test_created_at_is_read_back_as_aware_utc(engine: AsyncEngine, session
     async with async_sessionmaker(engine)() as fresh:
         rows = dict((await fresh.execute(select(Lead.external_id, Lead.created_at))).all())
 
-    assert rows["osm_1"] == datetime(2026, 11, 4, 9, 0, tzinfo=timezone.utc)
+    assert rows["osm_1"] == datetime(2026, 11, 4, 9, 0, tzinfo=UTC)
     for value in rows.values():
         assert value.utcoffset() == timedelta(0)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     assert abs(now - rows["osm_2"]) < timedelta(minutes=5)
     assert abs(now - rows["osm_3"]) < timedelta(minutes=5)

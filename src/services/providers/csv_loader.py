@@ -4,9 +4,7 @@ import csv
 import hashlib
 import io
 
-import httpx
-
-from src.services.checker import is_social_domain
+from src.services.checker import is_social_domain, url_host
 from src.services.providers.base import RawPlace
 from src.services.scorer import is_high_margin_category
 
@@ -94,18 +92,8 @@ def parse_csv_leads(file_bytes: bytes) -> list[RawPlace]:
         raw_website = collected["website"][0] if collected["website"] else None
         socials = ", ".join(collected["socials"]) if collected["socials"] else None
 
-        if not socials and raw_website:
-            host = None
-            try:
-                url_to_parse = (
-                    raw_website if raw_website.startswith(("http://", "https://"))
-                    else f"https://{raw_website}"
-                )
-                host = httpx.URL(url_to_parse).host
-            except Exception:
-                pass
-            if is_social_domain(host):
-                socials = raw_website
+        if not socials and raw_website and is_social_domain(url_host(raw_website)):
+            socials = raw_website
 
         is_high = is_high_margin_category(category)
 

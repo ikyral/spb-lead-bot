@@ -74,7 +74,7 @@ def url_host(value: str) -> str | None:
     url_to_parse = value if value.startswith(("http://", "https://")) else f"https://{value}"
     try:
         return httpx.URL(url_to_parse).host
-    except Exception:
+    except (httpx.InvalidURL, ValueError):  # ValueError: e.g. idna.IDNAError for bad IDN hosts
         return None
 
 

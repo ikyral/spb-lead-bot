@@ -103,8 +103,7 @@ class PublicOnlyNetworkBackend(httpcore.AsyncNetworkBackend):
                 )
             except httpcore.ConnectError as exc:
                 last_error = exc
-        assert last_error is not None
-        raise last_error
+        raise last_error or httpcore.ConnectError(f"Could not connect to {host}")
 
     async def connect_unix_socket(
         self,

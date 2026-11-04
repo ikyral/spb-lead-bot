@@ -50,7 +50,7 @@ settings_error: Exception | None = None
 
 try:
     settings = Settings()
-except Exception as exc:
+except Exception as exc:  # noqa: BLE001 - any config error is reported by main() before startup
     # Fallback keeps modules importable without .env (e.g. in tests);
     # main.py refuses to start the bot while settings_error is set.
     settings_error = exc

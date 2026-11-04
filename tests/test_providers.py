@@ -262,7 +262,8 @@ async def test_twogis_provider() -> None:
     assert p.high_margin is True
 
     err_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(500, text="Error")))
-    assert await TwoGisProvider(api_key="test_key", client=err_client).search_places("Петроградский", "auto_repair") == []
+    err_provider = TwoGisProvider(api_key="test_key", client=err_client)
+    assert await err_provider.search_places("Петроградский", "auto_repair") == []
 
 
 def _twogis_page(start_id: int, count: int, total: int | None) -> dict:

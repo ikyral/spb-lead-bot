@@ -64,10 +64,7 @@ async def upsert_lead(
     if await _external_id_exists(session, external_id):
         return False
 
-    if isinstance(lead_data, Lead):
-        lead = lead_data
-    else:
-        lead = Lead(**lead_data)
+    lead = lead_data if isinstance(lead_data, Lead) else Lead(**lead_data)
 
     try:
         session.add(lead)

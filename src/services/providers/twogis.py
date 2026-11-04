@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from src.services.checker import is_social_domain
+from src.services.checker import is_social_domain, url_host
 from src.services.providers.base import (
     SPB_DISTRICTS,
     TARGET_CATEGORIES,
@@ -172,18 +172,8 @@ class TwoGisProvider(BaseMapProvider):
             raw_website = websites[0] if websites else None
             socials_str = ", ".join(socials_list) if socials_list else None
 
-            if not socials_str and raw_website:
-                host = None
-                try:
-                    url_to_parse = (
-                        raw_website if raw_website.startswith(("http://", "https://"))
-                        else f"https://{raw_website}"
-                    )
-                    host = httpx.URL(url_to_parse).host
-                except Exception:
-                    pass
-                if is_social_domain(host):
-                    socials_str = raw_website
+            if not socials_str and raw_website and is_social_domain(url_host(raw_website)):
+                socials_str = raw_website
 
             places.append(
                 RawPlace(
@@ -223,23 +213,13 @@ class TwoGisProvider(BaseMapProvider):
                     if val_str not in phones:
                         phones.append(val_str)
                 elif c_type in ("website", "url"):
-                    host = None
-                    try:
-                        url_parsed = (
-                            val_str if val_str.startswith(("http://", "https://"))
-                            else f"https://{val_str}"
-                        )
-                        host = httpx.URL(url_parsed).host
-                    except Exception:
-                        pass
-                    if is_social_domain(host):
-                        if val_str not in socials:
-                            socials.append(val_str)
-                    else:
-                        if val_str not in websites:
-                            websites.append(val_str)
-                elif c_type in ("vkontakte", "vk", "telegram", "instagram", "whatsapp", "social"):
-                    if val_str not in socials:
-                        socials.append(val_str)
+                    target = socials if is_social_domain(url_host(val_str)) else websites
+                    if val_str not in target:
+                        target.append(val_str)
+                elif (
+                    c_type in ("vkontakte", "vk", "telegram", "instagram", "whatsapp", "social")
+                    and val_str not in socials
+                ):
+                    socials.append(val_str)
 
         return phones, websites, socials

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import DateTime, Dialect, Index, Integer, String, func
@@ -20,19 +20,17 @@ class UTCDateTime(TypeDecorator[datetime]):
 
     def process_bind_param(self, value: datetime | None, dialect: Dialect) -> datetime | None:
         if value is not None and value.tzinfo is not None:
-            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+            value = value.astimezone(UTC).replace(tzinfo=None)
         return value
 
     def process_result_value(self, value: Any, dialect: Dialect) -> datetime | None:
         if value is not None and value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
+            value = value.replace(tzinfo=UTC)
         return value
 
 
 class Base(DeclarativeBase):
     """Base declarative class for all SQLAlchemy models."""
-
-    pass
 
 
 class Lead(Base):
@@ -61,7 +59,7 @@ class Lead(Base):
     map_url: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
         server_default=func.now(),
     )
 
