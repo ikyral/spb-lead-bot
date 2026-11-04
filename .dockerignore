@@ -1,0 +1,25 @@
+# Секреты: передаются в контейнер через env_file, в образ попадать не должны
+.env
+.env.*
+!.env.example
+
+# Окружения, VCS и IDE
+.venv/
+venv/
+env/
+.git/
+.idea/
+.vscode/
+
+# База данных монтируется томом
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# Кэш Python и тестов
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
