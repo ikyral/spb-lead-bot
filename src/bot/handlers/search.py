@@ -127,7 +127,7 @@ async def handle_category_chosen(callback: CallbackQuery) -> None:
     await _edit_or_send(callback, report)
 
 
-@router.message(F.document, F.document.file_name.endswith(".csv"))
+@router.message(F.document, F.document.file_name.lower().endswith(".csv"))
 async def handle_csv_upload(message: Message, bot: Bot) -> None:
     """Download and process uploaded CSV file with raw places."""
     if not message.document:

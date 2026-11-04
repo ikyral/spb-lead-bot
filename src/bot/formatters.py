@@ -42,7 +42,7 @@ def format_lead_card(lead: Lead) -> str:
 
 def generate_pitch_text(lead: Lead) -> str:
     """Generate ready personalized outreach text for the business owner."""
-    district_str = lead.district or "Санкт-Петербурге"
+    location_str = f"в районе {lead.district}" if lead.district else "в Санкт-Петербурге"
     if lead.site_status == "dead_site":
         website = lead.raw_website or "указанный на картах"
         return (
@@ -56,7 +56,7 @@ def generate_pitch_text(lead: Lead) -> str:
 
     if lead.site_status == "social_only":
         return (
-            f"Здравствуйте! У компании «{lead.name}» отличная карточка в районе {district_str}, "
+            f"Здравствуйте! У компании «{lead.name}» отличная карточка {location_str}, "
             "но вместо полноценного сайта указана только соцсеть. "
             "Из-за отсутствия сайта теряется целевой поисковый трафик из Яндекса и Google, "
             "где клиенты ищут услуги напрямую.\n\n"

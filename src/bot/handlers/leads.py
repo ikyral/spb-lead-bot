@@ -125,7 +125,9 @@ async def handle_lead_action(callback: CallbackQuery) -> None:
                     f"💡 <b>Текст КП:</b>\n\n<code>{html.escape(pitch)}</code>",
                     parse_mode="HTML",
                 )
-            await render_lead_page(callback, session, crm_status="new", offset=offset, edit=True)
+            # Stay in the list the card was opened from ("В работе" cards keep their position).
+            list_status = "in_work" if current_status == "in_work" else "new"
+            await render_lead_page(callback, session, crm_status=list_status, offset=offset, edit=True)
             return
 
         if action == "reject":

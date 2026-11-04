@@ -345,3 +345,55 @@ async def test_export_csv_neutralizes_formula_injection(monkeypatch: pytest.Monk
     assert values["Адрес"] == "'@SUM(1+1)"
     assert values["Соцсети"].startswith("'-2+3+cmd")
     assert values["Телефон"] == "+7 (812) 555-01-01, +7 999 111-22-33"
+
+
+def test_pitch_without_district_reads_naturally():
+    """Without district the pitch must say 'в Санкт-Петербурге', not 'в районе Санкт-Петербурге'."""
+    pitch = generate_pitch_text(_make_dummy_lead(site_status="social_only", district=None))
+    assert "в районе Санкт-Петербурге" not in pitch
+    assert "отличная карточка в Санкт-Петербурге" in pitch
+
+
+@pytest.mark.asyncio
+async def test_work_action_on_in_work_card_stays_in_in_work_list(monkeypatch: pytest.MonkeyPatch):
+    """Pressing 'В работу' on a card from the 'В работе' list must not jump to the 'Новые' list."""
+    from src.bot.handlers import leads as leads_handlers
+
+    lead = _make_dummy_lead(id=7, crm_status="in_work")
+
+    class FakeSession:
+        async def get(self, model, lead_id):
+            return lead
+
+    class FakeSessionCtx:
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, *exc):
+            return None
+
+    rendered: list[str] = []
+
+    async def fake_render(target, session, crm_status, offset, edit=False):
+        rendered.append(crm_status)
+
+    async def fake_update(session, lead_id, new_status):
+        return True
+
+    monkeypatch.setattr(leads_handlers, "async_session_maker", FakeSessionCtx)
+    monkeypatch.setattr(leads_handlers, "render_lead_page", fake_render)
+    monkeypatch.setattr(leads_handlers, "update_crm_status", fake_update)
+
+    cb = MagicMock(spec=CallbackQuery)
+    cb.data = "lead:7:work:2"
+    cb.answer = AsyncMock()
+    cb.message = MagicMock(spec=Message)
+    cb.message.answer = AsyncMock()
+
+    await leads_handlers.handle_lead_action(cb)
+    assert rendered == ["in_work"]
+
+    lead.crm_status = "new"
+    rendered.clear()
+    await leads_handlers.handle_lead_action(cb)
+    assert rendered == ["new"]
