@@ -14,11 +14,16 @@
 
 ## 🛠 Быстрый старт
 
-1. Создайте виртуальное окружение и установите зависимости:
+1. Создайте виртуальное окружение (целевая версия — Python 3.11, как в Docker-образе) и установите зависимости:
 
     python -m venv .venv
     source .venv/bin/activate
-    pip install -r requirements.txt
+    pip install -r requirements-dev.txt
+
+   Файлы зависимостей:
+   - `requirements.txt` — прямые зависимости бота с закреплёнными версиями;
+   - `requirements-dev.txt` — то же плюс pytest, mypy и ruff (для разработки и CI);
+   - `requirements.lock` — полный закреплённый набор для Docker-образа. После изменения `requirements.txt` пересоберите его командой `python scripts/lock_requirements.py`.
 
 2. Скопируйте `.env.example` в `.env` и укажите `BOT_TOKEN` и ваш `ADMIN_TG_ID`.
 3. Запустите бота:
@@ -29,9 +34,8 @@
 
     pytest
 
-5. Проверка типов (настройки в `mypy.ini`; mypy в `requirements.txt` не входит):
+5. Проверка типов (настройки в `mypy.ini`):
 
-    pip install mypy
     mypy
 
 ### Запуск в Docker

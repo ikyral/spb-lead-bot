@@ -1,8 +1,10 @@
-aiogram>=3.10.0
-httpx>=0.28.0
-httpcore>=1.0.0
-sqlalchemy[asyncio]>=2.0.0
-aiosqlite>=0.20.0
-pydantic-settings>=2.2.0
-pytest
-pytest-asyncio
+# Runtime dependencies (direct), pinned to the versions the test suite passes with.
+# Full pinned set incl. transitive packages for the Docker image: requirements.lock.
+# Dev/test tools: requirements-dev.txt.
+aiogram==3.31.0
+httpx==0.28.1
+httpcore==1.0.9
+sqlalchemy[asyncio]==2.1.8
+aiosqlite==0.22.1
+pydantic==2.13.5
+pydantic-settings==2.16.2

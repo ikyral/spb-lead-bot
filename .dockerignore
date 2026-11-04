@@ -24,3 +24,8 @@ db/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Не нужны в рантайме (pytest в образ не ставится)
+tests/
+scripts/
+requirements-dev.txt
