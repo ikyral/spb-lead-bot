@@ -1,6 +1,6 @@
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -69,7 +69,7 @@ async def upsert_lead(
 async def get_leads(
     session: AsyncSession,
     crm_status: str = "new",
-    min_score: int = 40,
+    min_score: int = 30,
     limit: int = 1,
     offset: int = 0,
 ) -> list[Lead]:
@@ -83,6 +83,18 @@ async def get_leads(
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def get_leads_stats(session: AsyncSession) -> dict[str, int]:
+    """Return lead counts grouped by CRM status ('new', 'in_work', 'rejected')."""
+    stmt = select(Lead.crm_status, func.count(Lead.id)).group_by(Lead.crm_status)
+    result = await session.execute(stmt)
+    counts = dict(result.all())
+    return {
+        "new": counts.get("new", 0),
+        "in_work": counts.get("in_work", 0),
+        "rejected": counts.get("rejected", 0),
+    }
 
 
 async def update_crm_status(
