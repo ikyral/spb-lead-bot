@@ -4,6 +4,7 @@ import csv
 import html
 import io
 import logging
+import re
 from aiogram import F, Router
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,20 @@ from src.database.repo import (
 
 logger = logging.getLogger(__name__)
 router = Router(name="leads")
+
+# Spreadsheet apps treat cells starting with these characters as formulas (CSV injection).
+_FORMULA_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@", "\t", "\r")
+# Phone-like values ("+7 (812) 555-01-01, +7 ...") contain no function names and are left as is.
+_PHONE_LIKE_RE = re.compile(r"[+\-][\d\s().,+\-]*")
+
+
+def _csv_safe(value: object) -> object:
+    """Neutralize spreadsheet formula injection in exported cells."""
+    if not isinstance(value, str) or not value.startswith(_FORMULA_PREFIXES):
+        return value
+    if _PHONE_LIKE_RE.fullmatch(value):
+        return value
+    return "'" + value
 
 
 async def _reply(target: Message | CallbackQuery, text: str, kb=None, edit: bool = False) -> None:
@@ -158,13 +173,13 @@ async def handle_export_csv(callback: CallbackQuery) -> None:
         "ID", "Источник", "Название", "Категория", "Район", "Адрес", "Телефон",
         "Соцсети", "Сайт", "Статус сайта", "Оценка", "CRM статус", "Карта", "Дата добавления"
     ])
-    for l in leads:
-        writer.writerow([
-            l.id, l.source, l.name, l.category, l.district or "", l.address or "",
-            l.phone or "", l.socials or "", l.raw_website or "", l.site_status,
-            l.score, l.crm_status, l.map_url or "",
-            l.created_at.isoformat() if l.created_at else "",
-        ])
+    for lead in leads:
+        writer.writerow([_csv_safe(value) for value in (
+            lead.id, lead.source, lead.name, lead.category, lead.district or "", lead.address or "",
+            lead.phone or "", lead.socials or "", lead.raw_website or "", lead.site_status,
+            lead.score, lead.crm_status, lead.map_url or "",
+            lead.created_at.isoformat() if lead.created_at else "",
+        )])
 
     csv_bytes = output.getvalue().encode("utf-8-sig")
     file = BufferedInputFile(csv_bytes, filename=f"spb_leads_{crm_status}.csv")

