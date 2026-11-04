@@ -1,9 +1,29 @@
 """Tests for application entrypoint configuration checks."""
 
+import logging
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 import main
 from src.config import Settings
+
+
+def test_httpx_request_urls_are_not_logged_at_info() -> None:
+    """httpx logs full request URLs at INFO, and 2GIS URLs carry the API key in '?key=...'."""
+    # A fresh process: under pytest the root logger already has handlers and basicConfig is a no-op.
+    code = "import logging, main; print(logging.getLogger('httpx').getEffectiveLevel())"
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    assert int(result.stdout.strip().splitlines()[-1]) >= logging.WARNING
 
 
 @pytest.mark.asyncio

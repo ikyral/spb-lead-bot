@@ -17,6 +17,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+# httpx logs every request URL at INFO: 2GIS URLs contain the API key ('?key=...'),
+# and website checks would flood the log.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
