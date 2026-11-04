@@ -1,6 +1,11 @@
 services:
   spb-lead-bot:
-    build: .
+    build:
+      context: .
+      args:
+        # The bot runs as this unprivileged user; set to `id -u` / `id -g` of the host user owning ./db.
+        APP_UID: ${APP_UID:-1000}
+        APP_GID: ${APP_GID:-1000}
     container_name: spb-lead-bot
     restart: unless-stopped
     env_file:
