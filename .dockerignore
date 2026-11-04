@@ -11,15 +11,16 @@ env/
 .idea/
 .vscode/
 
-# База данных монтируется томом
-*.db
-*.sqlite
-*.sqlite3
-*.db-journal
+# База данных монтируется томом (./db)
+db/
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/*.db-journal
 
-# Кэш Python и тестов
-__pycache__/
-*.py[cod]
+# Кэш Python и тестов (в .dockerignore шаблоны без **/ действуют только в корне)
+**/__pycache__/
+**/*.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
