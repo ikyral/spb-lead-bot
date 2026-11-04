@@ -488,3 +488,31 @@ async def test_csv_upload_reports_rows_over_limit(monkeypatch: pytest.MonkeyPatc
     report = status_msg.edit_text.call_args[0][0]
     assert "Импорт CSV завершен" in report
     assert "500" in report and "2000" in report
+
+
+@pytest.mark.asyncio
+async def test_export_csv_shows_moscow_time(monkeypatch: pytest.MonkeyPatch):
+    import csv
+    import io
+    from datetime import datetime, timezone
+
+    from src.bot.handlers import leads as leads_handlers
+
+    lead = _make_dummy_lead(created_at=datetime(2026, 11, 4, 17, 15, 42, tzinfo=timezone.utc))
+
+    async def fake_export(session, crm_status):
+        return [lead]
+
+    monkeypatch.setattr(leads_handlers, "export_leads_by_status", fake_export)
+    monkeypatch.setattr(leads_handlers, "async_session_maker", _DummySessionCtx)
+
+    cb = MagicMock(spec=CallbackQuery)
+    cb.data = "export:new"
+    cb.answer = AsyncMock()
+    cb.message = MagicMock(spec=Message)
+    cb.message.answer_document = AsyncMock()
+    await leads_handlers.handle_export_csv(cb)
+
+    document = cb.message.answer_document.call_args.kwargs["document"]
+    header, row = list(csv.reader(io.StringIO(document.data.decode("utf-8-sig")), delimiter=";"))[:2]
+    assert dict(zip(header, row))["Дата добавления (МСК)"] == "2026-11-04 20:15"

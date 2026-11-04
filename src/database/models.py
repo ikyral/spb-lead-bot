@@ -1,7 +1,32 @@
 from datetime import datetime, timezone
+from typing import Any
 
-from sqlalchemy import DateTime, Index, Integer, String, func
+from sqlalchemy import DateTime, Dialect, Index, Integer, String, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.types import TypeDecorator
+
+
+class UTCDateTime(TypeDecorator[datetime]):
+    """
+    Timezone-aware UTC datetime that also works on SQLite.
+
+    SQLite has no time zones: tzinfo is dropped on write (without converting) and values
+    come back naive. Here aware values are converted to UTC before storing, and values
+    read back are marked as UTC. The column DDL stays DATETIME, so no migration is needed.
+    """
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect: Dialect) -> datetime | None:
+        if value is not None and value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+
+    def process_result_value(self, value: Any, dialect: Dialect) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value
 
 
 class Base(DeclarativeBase):
@@ -35,7 +60,7 @@ class Lead(Base):
     crm_status: Mapped[str] = mapped_column(String(32), default="new")
     map_url: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UTCDateTime(),
         default=lambda: datetime.now(timezone.utc),
         server_default=func.now(),
     )

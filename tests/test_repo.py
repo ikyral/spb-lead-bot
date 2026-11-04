@@ -217,3 +217,31 @@ async def test_update_crm_status_reports_whether_a_lead_was_updated(session) -> 
 
     assert await update_crm_status(session, lead_id, "in_work") is True
     assert await update_crm_status(session, 999_999, "in_work") is False
+
+
+@pytest.mark.asyncio
+async def test_created_at_is_read_back_as_aware_utc(engine: AsyncEngine, session) -> None:
+    """SQLite drops tzinfo: values came back naive, and non-UTC input was stored without conversion."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    msk = timezone(timedelta(hours=3))
+    session.add(Lead(**_lead_data(1), created_at=datetime(2026, 11, 4, 12, 0, tzinfo=msk)))
+    session.add(Lead(**_lead_data(2)))  # Python default: now(UTC)
+    await session.commit()
+    async with engine.begin() as conn:  # server default: CURRENT_TIMESTAMP (UTC)
+        await conn.execute(text(
+            "INSERT INTO leads (external_id, source, name, category, site_status, score, crm_status) "
+            "VALUES ('osm_3', 'osm', 'Raw', 'horeca', 'no_site', 60, 'new')"
+        ))
+
+    async with async_sessionmaker(engine)() as fresh:
+        rows = dict((await fresh.execute(select(Lead.external_id, Lead.created_at))).all())
+
+    assert rows["osm_1"] == datetime(2026, 11, 4, 9, 0, tzinfo=timezone.utc)
+    for value in rows.values():
+        assert value.utcoffset() == timedelta(0)
+    now = datetime.now(timezone.utc)
+    assert abs(now - rows["osm_2"]) < timedelta(minutes=5)
+    assert abs(now - rows["osm_3"]) < timedelta(minutes=5)

@@ -5,6 +5,7 @@ import html
 import io
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from aiogram import F, Router
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +30,19 @@ EXPORT_STATUSES: frozenset[str] = frozenset({"new", "in_work", "rejected", "all"
 
 # Human-readable CRM status names (internal values must not leak into messages).
 STATUS_NAMES: dict[str, str] = {"new": "Новые", "in_work": "В работе", "rejected": "В отказе", "all": "Все"}
+# Moscow has had no DST since 2014, so a fixed offset is exact and needs no tz database.
+MSK = timezone(timedelta(hours=3), "MSK")
+
+
+def _format_msk(value: datetime | None) -> str:
+    """Format a UTC timestamp as Moscow time for the CSV export (Excel-friendly)."""
+    if value is None:
+        return ""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(MSK).strftime("%Y-%m-%d %H:%M")
+
+
 CARD_TITLES: dict[str, str] = {"new": "📋 Новый лид", "in_work": "💼 В работе", "rejected": "🗑 В отказе"}
 
 # Spreadsheet apps treat cells starting with these characters as formulas (CSV injection).
@@ -194,14 +208,14 @@ async def handle_export_csv(callback: CallbackQuery) -> None:
     writer = csv.writer(output, delimiter=";")
     writer.writerow([
         "ID", "Источник", "Название", "Категория", "Район", "Адрес", "Телефон",
-        "Соцсети", "Сайт", "Статус сайта", "Оценка", "CRM статус", "Карта", "Дата добавления"
+        "Соцсети", "Сайт", "Статус сайта", "Оценка", "CRM статус", "Карта", "Дата добавления (МСК)"
     ])
     for lead in leads:
         writer.writerow([_csv_safe(value) for value in (
             lead.id, lead.source, lead.name, lead.category, lead.district or "", lead.address or "",
             lead.phone or "", lead.socials or "", lead.raw_website or "", lead.site_status,
             lead.score, lead.crm_status, lead.map_url or "",
-            lead.created_at.isoformat() if lead.created_at else "",
+            _format_msk(lead.created_at),
         )])
 
     csv_bytes = output.getvalue().encode("utf-8-sig")
