@@ -7,7 +7,7 @@ import httpx
 
 from src.services.checker import is_social_domain
 from src.services.providers.base import RawPlace
-from src.services.scorer import HIGH_MARGIN_KEYWORDS
+from src.services.scorer import is_high_margin_category
 
 COLUMN_MAPPING: dict[str, str] = {
     "name": "name",
@@ -106,8 +106,7 @@ def parse_csv_leads(file_bytes: bytes) -> list[RawPlace]:
             if is_social_domain(host):
                 socials = raw_website
 
-        norm_cat = category.lower()
-        is_high = any(keyword in norm_cat for keyword in HIGH_MARGIN_KEYWORDS)
+        is_high = is_high_margin_category(category)
 
         key_str = f"{name}_{phone}_{address}"
         # Stable lead ID, not a security measure (hence usedforsecurity=False).

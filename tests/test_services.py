@@ -7,7 +7,7 @@ import pytest
 
 from src.services import checker
 from src.services.checker import SOCIAL_DOMAINS, analyze_website, is_social_domain
-from src.services.scorer import calculate_lead_score
+from src.services.scorer import calculate_lead_score, is_high_margin_category
 
 
 # --- Scorer Tests ---
@@ -87,6 +87,46 @@ def test_score_high_margin_keywords_detection(category: str) -> None:
         high_margin=False,
     )
     assert score == 85
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        "Ремонт обуви",
+        "Мастерская по ремонту обуви и изготовлению ключей",
+        "Ремонт и пошив одежды",
+        "Ремонт телефонов",
+        "Ремонт смартфонов и планшетов",
+        "Ремонт часов",
+        "Ремонт ноутбуков",
+        "Ремонт бытовой техники",
+    ],
+)
+def test_small_repair_shops_get_no_high_margin_bonus(category: str) -> None:
+    """'ремонт' is a high-margin keyword (renovation, car repair), but small repair shops are not."""
+    # dead_site (45) + phone (25), no margin bonus = 70
+    assert calculate_lead_score(category, "dead_site", "+79991112233", None, False) == 70
+    assert is_high_margin_category(category) is False
+
+
+@pytest.mark.parametrize(
+    "category",
+    ["Ремонт под ключ", "Ремонт квартир", "Кузовной ремонт", "Автосервис, ремонт телефонов"],
+)
+def test_renovation_and_car_repair_keep_high_margin(category: str) -> None:
+    assert is_high_margin_category(category) is True
+
+
+def test_csv_loader_uses_the_same_margin_rules() -> None:
+    from src.services.providers.csv_loader import parse_csv_leads
+
+    csv_bytes = (
+        "Название;Рубрика;Телефон\n"
+        "Сапожник;Ремонт обуви;+7 999 000-00-01\n"
+        "РемСтрой;Ремонт квартир;+7 999 000-00-02\n"
+    ).encode("utf-8")
+    shoe, renovation = parse_csv_leads(csv_bytes)
+    assert (shoe.high_margin, renovation.high_margin) == (False, True)
 
 
 # --- Checker Tests ---
