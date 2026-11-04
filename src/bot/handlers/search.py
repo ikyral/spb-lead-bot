@@ -10,8 +10,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from src.bot.keyboards import (
-    CATEGORY_KEYS,
-    DISTRICT_NAMES,
+    STALE_BUTTON_TEXT,
     get_categories_keyboard,
     get_districts_keyboard,
     get_main_menu_keyboard,
@@ -19,7 +18,7 @@ from src.bot.keyboards import (
 from src.config import settings
 from src.database.repo import async_session_maker
 from src.services.pipeline import MAX_CSV_PLACES, import_csv_harvest, run_lead_harvest
-from src.services.providers.base import TARGET_CATEGORIES
+from src.services.providers.base import SPB_DISTRICTS, TARGET_CATEGORIES
 
 logger = logging.getLogger(__name__)
 router = Router(name="search")
@@ -116,26 +115,32 @@ async def handle_dist_back(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("dist:"))
 async def handle_district_chosen(callback: CallbackQuery) -> None:
     """Show business categories for the chosen district."""
-    await callback.answer()
-    dist_idx = int(callback.data.split(":")[1])
-    district_name = DISTRICT_NAMES[dist_idx]
+    district_name = (callback.data or "").removeprefix("dist:")
+    if district_name not in SPB_DISTRICTS:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
 
+    await callback.answer()
     await _edit_or_send(
         callback,
         f"📍 Район: <b>{district_name}</b>\n\n"
         "Выберите категорию бизнеса для сбора лидов:",
-        reply_markup=get_categories_keyboard(dist_idx),
+        reply_markup=get_categories_keyboard(district_name),
     )
 
 
 @router.callback_query(F.data.startswith("cat:"))
 async def handle_category_chosen(callback: CallbackQuery) -> None:
     """Trigger lead harvest for the selected district and category."""
-    parts = callback.data.split(":")
-    dist_idx = int(parts[1])
-    cat_idx = int(parts[2])
-    district_name = DISTRICT_NAMES[dist_idx]
-    category_key = CATEGORY_KEYS[cat_idx]
+    parts = (callback.data or "").split(":")
+    if (
+        len(parts) != 3
+        or parts[1] not in SPB_DISTRICTS
+        or parts[2] not in TARGET_CATEGORIES
+    ):
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    _, district_name, category_key = parts
     category_title = TARGET_CATEGORIES[category_key]["title"]
 
     await callback.answer()

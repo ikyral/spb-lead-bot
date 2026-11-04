@@ -10,7 +10,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.bot.formatters import format_lead_card, generate_pitch_text
-from src.bot.keyboards import get_export_keyboard, get_lead_card_keyboard
+from src.bot.keyboards import STALE_BUTTON_TEXT, get_export_keyboard, get_lead_card_keyboard
 from src.database.models import Lead
 from src.database.repo import (
     async_session_maker,
@@ -22,6 +22,10 @@ from src.database.repo import (
 
 logger = logging.getLogger(__name__)
 router = Router(name="leads")
+
+LEAD_ACTIONS: frozenset[str] = frozenset({"work", "reject", "pitch", "prev", "next"})
+# Statuses accepted by export_leads_by_status ('all' exports everything).
+EXPORT_STATUSES: frozenset[str] = frozenset({"new", "in_work", "rejected", "all"})
 
 # Spreadsheet apps treat cells starting with these characters as formulas (CSV injection).
 _FORMULA_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@", "\t", "\r")
@@ -94,7 +98,16 @@ async def handle_in_work_leads(message: Message) -> None:
 @router.callback_query(F.data.startswith("lead:"))
 async def handle_lead_action(callback: CallbackQuery) -> None:
     """Handle card actions: work, reject, pitch, prev, next."""
-    _, lead_id_str, action, offset_str = callback.data.split(":")
+    parts = (callback.data or "").split(":")
+    if (
+        len(parts) != 4
+        or not parts[1].isdigit()
+        or parts[2] not in LEAD_ACTIONS
+        or not parts[3].isdigit()
+    ):
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    _, lead_id_str, action, offset_str = parts
     lead_id, offset = int(lead_id_str), int(offset_str)
 
     async with async_session_maker() as session:
@@ -161,7 +174,10 @@ async def handle_stats(message: Message) -> None:
 @router.callback_query(F.data.startswith("export:"))
 async def handle_export_csv(callback: CallbackQuery) -> None:
     """Export selected leads to Excel-friendly CSV file."""
-    crm_status = callback.data.split(":")[1]
+    crm_status = (callback.data or "").removeprefix("export:")
+    if crm_status not in EXPORT_STATUSES:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
     async with async_session_maker() as session:
         leads = await export_leads_by_status(session, crm_status)
 

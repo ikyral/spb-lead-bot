@@ -132,8 +132,8 @@ def test_keyboards_callback_data_limits():
             assert btn.callback_data.startswith("dist:")
 
     # 3. Categories keyboard
-    for d_idx in range(len(DISTRICT_NAMES)):
-        cat_kb = get_categories_keyboard(d_idx)
+    for district_name in DISTRICT_NAMES:
+        cat_kb = get_categories_keyboard(district_name)
         for row in cat_kb.inline_keyboard:
             for btn in row:
                 assert btn.callback_data is not None
@@ -233,7 +233,7 @@ async def test_search_handlers_navigation():
     cb.message.edit_text.assert_awaited_once()
 
     # District chosen
-    cb.data = "dist:0"
+    cb.data = "dist:Центральный"
     cb.answer.reset_mock()
     cb.message.edit_text.reset_mock()
     await handle_district_chosen(cb)
@@ -265,7 +265,7 @@ async def test_category_harvest_error_text_is_html_escaped(monkeypatch: pytest.M
     monkeypatch.setattr(search, "async_session_maker", _DummySessionCtx)
 
     cb = MagicMock(spec=CallbackQuery)
-    cb.data = "cat:0:0"
+    cb.data = "cat:Центральный:dentist_clinic"
     cb.answer = AsyncMock()
     cb.message = MagicMock(spec=Message)
     cb.message.edit_text = AsyncMock()
@@ -288,7 +288,7 @@ async def test_handlers_survive_inaccessible_message():
     old_msg = InaccessibleMessage(chat=Chat(id=1, type="private"), message_id=10)
 
     cb = MagicMock(spec=CallbackQuery)
-    cb.data = "dist:0"
+    cb.data = "dist:Центральный"
     cb.answer = AsyncMock()
     cb.message = old_msg
 
@@ -446,7 +446,7 @@ async def test_category_harvest_shows_progress_without_false_eta(monkeypatch: py
     monkeypatch.setattr(search, "PROGRESS_UPDATE_INTERVAL_SECONDS", 0)
 
     cb = MagicMock(spec=CallbackQuery)
-    cb.data = "cat:0:0"
+    cb.data = "cat:Центральный:dentist_clinic"
     cb.answer = AsyncMock()
     cb.message = MagicMock(spec=Message)
     cb.message.edit_text = AsyncMock()
