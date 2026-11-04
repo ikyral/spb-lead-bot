@@ -34,9 +34,12 @@
 
     pytest
 
-5. Проверка типов (настройки в `mypy.ini`):
+5. Линтер и проверка типов (настройки в `ruff.toml` и `mypy.ini`):
 
+    ruff check .
     mypy
+
+   Те же проверки и тесты запускает CI (`.github/workflows/ci.yml`) на Python 3.11 с версиями из `requirements.lock` при каждом push в `main` и pull request.
 
 ### Запуск в Docker
 
