@@ -1,0 +1,12 @@
+version: "3.8"
+
+services:
+  spb-lead-bot:
+    build: .
+    container_name: spb-lead-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./leads.db:/app/leads.db
