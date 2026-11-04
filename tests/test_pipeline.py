@@ -1,5 +1,6 @@
 """Integration tests for lead pipeline and database repository."""
 
+import asyncio
 from pathlib import Path
 from typing import Any
 import httpx
@@ -9,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from src.database.models import Base, Lead
 from src.database.repo import get_leads, get_leads_stats, update_crm_status
+from src.services import pipeline
 from src.services.pipeline import import_csv_harvest, run_lead_harvest
 from src.services.providers.base import RawPlace
 
@@ -68,6 +70,7 @@ async def test_csv_pipeline_full_integration(
         "qualified": 3,
         "saved_new": 3,
         "duplicates_skipped": 0,
+        "over_limit": 0,
     }
 
     # Verify database contents
@@ -104,6 +107,7 @@ async def test_csv_pipeline_full_integration(
         "qualified": 3,
         "saved_new": 0,
         "duplicates_skipped": 3,
+        "over_limit": 0,
     }
 
 
@@ -245,5 +249,106 @@ async def test_import_skips_business_already_saved_from_another_source(
     ).encode("utf-8")
 
     res = await import_csv_harvest(session, csv_bytes)
-    assert res == {"total_found": 1, "qualified": 1, "saved_new": 0, "duplicates_skipped": 1}
+    assert res == {"total_found": 1, "qualified": 1, "saved_new": 0, "duplicates_skipped": 1, "over_limit": 0}
     assert await get_leads_stats(session) == {"new": 0, "in_work": 1, "rejected": 0}
+
+
+@pytest.mark.asyncio
+async def test_website_checks_run_with_higher_concurrency(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Checks used to run 5 at a time; a district with hundreds of dead sites took many minutes."""
+    running = 0
+    max_running = 0
+
+    async def slow_check(url: str | None, client: Any = None) -> tuple[str, str | None]:
+        nonlocal running, max_running
+        running += 1
+        max_running = max(max_running, running)
+        await asyncio.sleep(0.01)
+        running -= 1
+        return ("has_site", url)
+
+    monkeypatch.setattr(pipeline, "analyze_website", slow_check)
+    places = [
+        RawPlace(external_id=f"csv_{i}", source="csv", name=f"Место {i}", category="horeca",
+                 raw_website=f"https://site{i}.ru")
+        for i in range(60)
+    ]
+    await pipeline._process_and_save_places(session, places)
+    assert max_running == pipeline.CHECK_CONCURRENCY == 20
+
+
+@pytest.mark.asyncio
+async def test_progress_callback_reports_checked_sites_and_errors_do_not_break_harvest(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def instant_check(url: str | None, client: Any = None) -> tuple[str, str | None]:
+        return ("no_site", None)
+
+    monkeypatch.setattr(pipeline, "analyze_website", instant_check)
+    places = [
+        RawPlace(external_id=f"csv_{i}", source="csv", name=f"Место {i}", category="dentist_clinic",
+                 phone=f"+7 999 000-00-{i:02d}")
+        for i in range(10)
+    ]
+    reports: list[tuple[int, int]] = []
+
+    async def progress(done: int, total: int) -> None:
+        reports.append((done, total))
+        if done == 5:
+            raise RuntimeError("Telegram is down")
+
+    stats = await pipeline._process_and_save_places(session, places, progress=progress)
+
+    assert reports == [(done, 10) for done in range(1, 11)]
+    assert stats["saved_new"] == 10
+
+
+@pytest.mark.asyncio
+async def test_run_lead_harvest_queries_osm_and_2gis_concurrently(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OSM (up to 30s per endpoint) and 2GIS (up to 10 pages) used to be queried one after another."""
+    twogis_started = asyncio.Event()
+
+    async def osm_waits_for_2gis(self: Any, district: str, category: str) -> list[RawPlace]:
+        await asyncio.wait_for(twogis_started.wait(), timeout=2)
+        return [RawPlace(external_id="osm_1", source="osm", name="Улыбка", category="dentist_clinic",
+                         phone="+7 812 555-01-01")]
+
+    async def twogis_search(self: Any, district: str, category: str) -> list[RawPlace]:
+        twogis_started.set()
+        return [RawPlace(external_id="2gis_1", source="2gis", name="Улыбка, стоматология",
+                         category="dentist_clinic", phone="8 812 555-01-01", socials="https://vk.com/u")]
+
+    from src.services.providers.osm import OSMOverpassProvider
+    from src.services.providers.twogis import TwoGisProvider
+
+    monkeypatch.setattr(OSMOverpassProvider, "search_places", osm_waits_for_2gis)
+    monkeypatch.setattr(TwoGisProvider, "search_places", twogis_search)
+
+    res = await run_lead_harvest(session, "Центральный", "dentist_clinic", twogis_api_key="key")
+
+    assert res["total_found"] == 2 and res["saved_new"] == 1
+    # Source order is preserved: the OSM record keeps its identity after merging
+    assert [lead.external_id for lead in await get_leads(session, limit=10)] == ["osm_1"]
+
+
+@pytest.mark.asyncio
+async def test_csv_import_is_capped(session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A huge CSV must not turn into hours of website checks; the rest is reported, not silently dropped."""
+    monkeypatch.setattr(pipeline, "MAX_CSV_PLACES", 2)
+    csv_bytes = (
+        "Название;Рубрика;Телефон\n"
+        "Клиника 1;Стоматология;+7 999 000-00-01\n"
+        "Клиника 2;Стоматология;+7 999 000-00-02\n"
+        "Клиника 3;Стоматология;+7 999 000-00-03\n"
+    ).encode("utf-8")
+
+    res = await import_csv_harvest(session, csv_bytes)
+    assert res == {"total_found": 2, "qualified": 2, "saved_new": 2, "duplicates_skipped": 0, "over_limit": 1}
+

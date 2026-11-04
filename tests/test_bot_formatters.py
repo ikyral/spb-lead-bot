@@ -396,3 +396,95 @@ async def test_work_action_on_in_work_card_stays_in_in_work_list(monkeypatch: py
     rendered.clear()
     await leads_handlers.handle_lead_action(cb)
     assert rendered == ["new"]
+
+
+_HARVEST_STATS = {"total_found": 10, "qualified": 4, "saved_new": 3, "duplicates_skipped": 1}
+
+
+@pytest.mark.asyncio
+async def test_progress_reporter_edits_throttles_and_swallows_errors():
+    from aiogram.exceptions import TelegramBadRequest
+
+    from src.bot.handlers.search import ProgressReporter
+
+    msg = MagicMock(spec=Message)
+    msg.edit_text = AsyncMock()
+
+    reporter = ProgressReporter(msg, "⏳ Сканирую", min_interval=0)
+    await reporter(5, 10)
+    assert "Проверено сайтов: <b>5/10</b>" in msg.edit_text.call_args[0][0]
+    assert msg.edit_text.call_args[0][0].startswith("⏳ Сканирую")
+
+    # The final count is not shown: the result report replaces the message right away
+    msg.edit_text.reset_mock()
+    await reporter(10, 10)
+    msg.edit_text.assert_not_awaited()
+
+    # Throttled: no edit within the interval after creation
+    throttled = ProgressReporter(msg, "⏳", min_interval=60)
+    await throttled(1, 10)
+    msg.edit_text.assert_not_awaited()
+
+    # Telegram errors (e.g. flood control, 'message is not modified') never break the harvest
+    msg.edit_text = AsyncMock(side_effect=TelegramBadRequest(method=MagicMock(), message="message is not modified"))
+    await reporter(6, 10)
+
+    # No message to edit (nothing to show the progress in) -> no-op
+    await ProgressReporter(None, "⏳", min_interval=0)(1, 10)
+
+
+@pytest.mark.asyncio
+async def test_category_harvest_shows_progress_without_false_eta(monkeypatch: pytest.MonkeyPatch):
+    from src.bot.handlers import search
+
+    async def harvest_with_progress(**kwargs):
+        await kwargs["progress"](5, 10)
+        return _HARVEST_STATS
+
+    monkeypatch.setattr(search, "run_lead_harvest", harvest_with_progress)
+    monkeypatch.setattr(search, "async_session_maker", _DummySessionCtx)
+    monkeypatch.setattr(search, "PROGRESS_UPDATE_INTERVAL_SECONDS", 0)
+
+    cb = MagicMock(spec=CallbackQuery)
+    cb.data = "cat:0:0"
+    cb.answer = AsyncMock()
+    cb.message = MagicMock(spec=Message)
+    cb.message.edit_text = AsyncMock()
+
+    await search.handle_category_chosen(cb)
+
+    texts = [call.args[0] for call in cb.message.edit_text.call_args_list]
+    assert "10-30 секунд" not in texts[0]
+    assert any("5/10" in text for text in texts)
+    assert "Сбор завершен" in texts[-1]
+
+
+@pytest.mark.asyncio
+async def test_csv_upload_reports_rows_over_limit(monkeypatch: pytest.MonkeyPatch):
+    from aiogram.types import Document
+
+    from src.bot.handlers import search
+
+    received_kwargs: dict = {}
+
+    async def fake_import(session, file_bytes, **kwargs):
+        received_kwargs.update(kwargs)
+        return {**_HARVEST_STATS, "over_limit": 500}
+
+    monkeypatch.setattr(search, "import_csv_harvest", fake_import)
+    monkeypatch.setattr(search, "async_session_maker", _DummySessionCtx)
+
+    status_msg = MagicMock(spec=Message)
+    status_msg.edit_text = AsyncMock()
+    msg = MagicMock(spec=Message)
+    msg.document = Document(file_id="f", file_unique_id="u", file_name="leads.csv")
+    msg.answer = AsyncMock(return_value=status_msg)
+    bot = MagicMock()
+    bot.download = AsyncMock()
+
+    await search.handle_csv_upload(msg, bot)
+
+    assert "progress" in received_kwargs
+    report = status_msg.edit_text.call_args[0][0]
+    assert "Импорт CSV завершен" in report
+    assert "500" in report and "2000" in report

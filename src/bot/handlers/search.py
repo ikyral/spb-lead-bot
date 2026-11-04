@@ -3,7 +3,9 @@
 import html
 import io
 import logging
+import time
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
@@ -16,23 +18,64 @@ from src.bot.keyboards import (
 )
 from src.config import settings
 from src.database.repo import async_session_maker
-from src.services.pipeline import import_csv_harvest, run_lead_harvest
+from src.services.pipeline import MAX_CSV_PLACES, import_csv_harvest, run_lead_harvest
 from src.services.providers.base import TARGET_CATEGORIES
 
 logger = logging.getLogger(__name__)
 router = Router(name="search")
 
 
+# Telegram limits message edits; progress is refreshed at most this often.
+PROGRESS_UPDATE_INTERVAL_SECONDS: float = 3.0
+
+
 async def _edit_or_send(
     callback: CallbackQuery,
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
-) -> None:
-    """Edit the callback message, or send a new one if it is too old to edit (InaccessibleMessage)."""
+) -> Message | None:
+    """
+    Edit the callback message, or send a new one if it is too old to edit (InaccessibleMessage).
+
+    Returns the message that now shows the text, so it can be edited later.
+    """
     if isinstance(callback.message, Message):
         await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
-    elif callback.message:
-        await callback.message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+        return callback.message
+    if callback.message:
+        return await callback.message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+    return None
+
+
+class ProgressReporter:
+    """Pipeline progress callback that shows 'checked N/M' in a status message (throttled)."""
+
+    def __init__(
+        self,
+        message: Message | None,
+        header: str,
+        min_interval: float = PROGRESS_UPDATE_INTERVAL_SECONDS,
+    ) -> None:
+        self._message = message
+        self._header = header
+        self._min_interval = min_interval
+        self._last_update = time.monotonic()
+
+    async def __call__(self, done: int, total: int) -> None:
+        # The final count is skipped: the result report replaces the message right away.
+        if self._message is None or done >= total:
+            return
+        now = time.monotonic()
+        if now - self._last_update < self._min_interval:
+            return
+        self._last_update = now
+        try:
+            await self._message.edit_text(
+                f"{self._header}\n\nПроверено сайтов: <b>{done}/{total}</b>",
+                parse_mode="HTML",
+            )
+        except TelegramAPIError as exc:
+            logger.debug("Progress update skipped: %s", exc)
 
 
 @router.message(CommandStart())
@@ -96,11 +139,12 @@ async def handle_category_chosen(callback: CallbackQuery) -> None:
     category_title = TARGET_CATEGORIES[category_key]["title"]
 
     await callback.answer()
-    await _edit_or_send(
-        callback,
-        f"⏳ Сканирую район <b>{district_name}</b> ({category_title}) "
-        "и проверяю сайты...\nЭто может занять 10-30 секунд.",
+    header = (
+        f"⏳ Сканирую район <b>{district_name}</b> ({category_title}) и проверяю сайты...\n"
+        "В больших районах это может занять несколько минут."
     )
+    status_message = await _edit_or_send(callback, header)
+    progress = ProgressReporter(status_message, header, min_interval=PROGRESS_UPDATE_INTERVAL_SECONDS)
 
     try:
         async with async_session_maker() as session:
@@ -109,6 +153,7 @@ async def handle_category_chosen(callback: CallbackQuery) -> None:
                 district_name=district_name,
                 category_key=category_key,
                 twogis_api_key=settings.TWOGIS_API_KEY,
+                progress=progress,
             )
         report = (
             "🏁 <b>Сбор завершен!</b>\n\n"
@@ -124,7 +169,10 @@ async def handle_category_chosen(callback: CallbackQuery) -> None:
         logger.exception("Error during harvest")
         report = f"⚠️ Ошибка при выполнении сбора: <code>{html.escape(str(exc))}</code>"
 
-    await _edit_or_send(callback, report)
+    if status_message is not None:
+        await status_message.edit_text(report, parse_mode="HTML")
+    else:
+        await _edit_or_send(callback, report)
 
 
 @router.message(F.document, F.document.file_name.lower().endswith(".csv"))
@@ -139,8 +187,9 @@ async def handle_csv_upload(message: Message, bot: Bot) -> None:
         await bot.download(message.document, destination=file_io)
         file_bytes = file_io.getvalue()
 
+        progress = ProgressReporter(status_msg, "⏳ Анализирую CSV файл и проверяю сайты...")
         async with async_session_maker() as session:
-            stats = await import_csv_harvest(session, file_bytes)
+            stats = await import_csv_harvest(session, file_bytes, progress=progress)
 
         report = (
             "📁 <b>Импорт CSV завершен!</b>\n\n"
@@ -149,6 +198,11 @@ async def handle_csv_upload(message: Message, bot: Bot) -> None:
             f"• Новых сохранено: <b>{stats['saved_new']}</b>\n"
             f"• Дубликатов пропущено: <b>{stats['duplicates_skipped']}</b>"
         )
+        if stats.get("over_limit"):
+            report += (
+                f"\n\n⚠️ Обработаны первые <b>{MAX_CSV_PLACES}</b> записей, "
+                f"ещё <b>{stats['over_limit']}</b> пропущено. Разбейте файл на части."
+            )
         await status_msg.edit_text(report, parse_mode="HTML")
     except Exception as exc:
         logger.exception("Error during CSV import")

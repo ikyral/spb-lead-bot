@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,17 +18,28 @@ from src.services.scorer import calculate_lead_score
 
 logger = logging.getLogger(__name__)
 
+# Simultaneous website checks. They target different hosts and mostly wait on the
+# network (up to TOTAL_CHECK_TIMEOUT_SECONDS for a dead site), so 20 is safe.
+CHECK_CONCURRENCY: int = 20
+# Upper bound for one CSV import (each row may need a website check).
+MAX_CSV_PLACES: int = 2000
+
+# Called as progress(done, total) after each website check.
+ProgressCallback = Callable[[int, int], Awaitable[None]]
+
 
 async def _process_and_save_places(
     session: AsyncSession,
     places: list[RawPlace],
-    concurrency: int = 5,
+    concurrency: int = CHECK_CONCURRENCY,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, int]:
     """
     Verify places concurrently, score them, and persist qualified leads.
 
     The same business found by several sources is merged before checking websites;
     a qualified place matching an already saved lead counts as a duplicate.
+    `progress` is notified after every check; its errors never break the harvest.
     """
     total_found = len(places)
     places = merge_duplicate_places(places)
@@ -40,11 +52,14 @@ async def _process_and_save_places(
         }
 
     semaphore = asyncio.Semaphore(concurrency)
+    checks_total = len(places)
+    checks_done = 0
 
     async def _check_place(
         client: httpx.AsyncClient,
         place: RawPlace,
     ) -> tuple[RawPlace, str, str | None]:
+        nonlocal checks_done
         async with semaphore:
             try:
                 site_status, details = await analyze_website(
@@ -53,7 +68,13 @@ async def _process_and_save_places(
             except Exception:
                 logger.exception("Website check crashed for %r", place.raw_website)
                 site_status, details = "dead_site", "Website check error"
-            return place, site_status, details
+        checks_done += 1
+        if progress is not None:
+            try:
+                await progress(checks_done, checks_total)
+            except Exception:
+                logger.warning("Progress callback failed", exc_info=True)
+        return place, site_status, details
 
     async with create_check_client() as client:
         results = await asyncio.gather(
@@ -125,32 +146,45 @@ async def run_lead_harvest(
     district_name: str,
     category_key: str,
     twogis_api_key: str | None = None,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, int]:
-    """Harvest leads from OSM and optionally 2GIS, then verify and save them."""
-    places: list[RawPlace] = []
+    """Harvest leads from OSM and optionally 2GIS (queried concurrently), then verify and save them."""
 
-    try:
-        osm_provider = OSMOverpassProvider()
-        osm_places = await osm_provider.search_places(district_name, category_key)
-        places.extend(osm_places)
-    except Exception as exc:
-        logger.warning("OSM lead harvest failed for district %s: %s", district_name, exc)
-
-    if twogis_api_key and twogis_api_key.strip():
+    async def _search_osm() -> list[RawPlace]:
         try:
-            twogis_provider = TwoGisProvider(twogis_api_key.strip())
-            twogis_places = await twogis_provider.search_places(district_name, category_key)
-            places.extend(twogis_places)
+            return await OSMOverpassProvider().search_places(district_name, category_key)
+        except Exception as exc:
+            logger.warning("OSM lead harvest failed for district %s: %s", district_name, exc)
+            return []
+
+    async def _search_2gis() -> list[RawPlace]:
+        if not twogis_api_key or not twogis_api_key.strip():
+            return []
+        try:
+            return await TwoGisProvider(twogis_api_key.strip()).search_places(district_name, category_key)
         except Exception as exc:
             logger.warning("2GIS lead harvest failed for district %s: %s", district_name, exc)
+            return []
 
-    return await _process_and_save_places(session, places)
+    # gather keeps the order (OSM first), so duplicate merging keeps the OSM identity as before.
+    osm_places, twogis_places = await asyncio.gather(_search_osm(), _search_2gis())
+    return await _process_and_save_places(session, osm_places + twogis_places, progress=progress)
 
 
 async def import_csv_harvest(
     session: AsyncSession,
     file_bytes: bytes,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, int]:
-    """Parse leads from CSV file bytes, verify websites, score, and save them."""
+    """
+    Parse leads from CSV file bytes, verify websites, score, and save them.
+
+    Only the first MAX_CSV_PLACES places are processed; the rest is reported as `over_limit`.
+    """
     places = parse_csv_leads(file_bytes)
-    return await _process_and_save_places(session, places)
+    over_limit = max(0, len(places) - MAX_CSV_PLACES)
+    stats: dict[str, int] = await _process_and_save_places(
+        session, places[:MAX_CSV_PLACES], progress=progress
+    )
+    stats["over_limit"] = over_limit
+    return stats
