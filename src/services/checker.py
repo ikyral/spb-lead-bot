@@ -1,6 +1,14 @@
 """Website analysis service to detect no-site, dead-site, social-only, or active site."""
 
+import asyncio
+
 import httpx
+
+# httpx applies this per network operation (connect / read / write / pool).
+CHECK_TIMEOUT_SECONDS: float = 7.0
+# Hard cap for the whole check incl. redirects, so a slowly trickling server
+# cannot stall the harvest indefinitely.
+TOTAL_CHECK_TIMEOUT_SECONDS: float = 20.0
 
 SOCIAL_DOMAINS: tuple[str, ...] = (
     "vk.com",
@@ -68,26 +76,38 @@ async def analyze_website(
     try:
         if client is None:
             async with httpx.AsyncClient(
-                timeout=7.0,
+                timeout=CHECK_TIMEOUT_SECONDS,
                 follow_redirects=True,
                 headers=DEFAULT_HEADERS,
             ) as client_to_use:
-                response = await client_to_use.get(cleaned_url)
+                status_code, final_url = await asyncio.wait_for(
+                    _fetch_status(client_to_use, cleaned_url),
+                    timeout=TOTAL_CHECK_TIMEOUT_SECONDS,
+                )
         else:
-            response = await client.get(
-                cleaned_url,
-                follow_redirects=True,
-                headers=DEFAULT_HEADERS,
+            status_code, final_url = await asyncio.wait_for(
+                _fetch_status(client, cleaned_url),
+                timeout=TOTAL_CHECK_TIMEOUT_SECONDS,
             )
 
-        if response.status_code >= 400:
+        if status_code >= 400:
             return ("dead_site", "HTTP/Connection error")
 
-        final_host = response.url.host
-        if is_social_domain(final_host):
-            return ("social_only", str(response.url))
+        if is_social_domain(final_url.host):
+            return ("social_only", str(final_url))
 
-        return ("has_site", str(response.url))
+        return ("has_site", str(final_url))
 
-    except (httpx.HTTPError, httpx.InvalidURL):
+    except (httpx.HTTPError, httpx.InvalidURL, TimeoutError):
         return ("dead_site", "HTTP/Connection error")
+
+
+async def _fetch_status(client: httpx.AsyncClient, url: str) -> tuple[int, httpx.URL]:
+    """Request the URL following redirects; return status and final URL without reading the body."""
+    async with client.stream(
+        "GET",
+        url,
+        follow_redirects=True,
+        headers=DEFAULT_HEADERS,
+    ) as response:
+        return response.status_code, response.url

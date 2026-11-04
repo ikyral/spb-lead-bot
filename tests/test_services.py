@@ -1,8 +1,11 @@
 """Unit tests for checker and scorer services."""
 
+import asyncio
+
 import httpx
 import pytest
 
+from src.services import checker
 from src.services.checker import SOCIAL_DOMAINS, analyze_website, is_social_domain
 from src.services.scorer import calculate_lead_score
 
@@ -207,3 +210,34 @@ async def test_analyze_website_dead_site_exceptions() -> None:
     # Malformed URL
     res_malformed = await analyze_website("https://::invalid::url")
     assert res_malformed == ("dead_site", "HTTP/Connection error")
+
+
+@pytest.mark.asyncio
+async def test_analyze_website_total_timeout_marks_dead(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A site that never finishes responding must not stall the check beyond the total deadline."""
+    monkeypatch.setattr(checker, "TOTAL_CHECK_TIMEOUT_SECONDS", 0.05)
+
+    async def hanging_handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return httpx.Response(200, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(hanging_handler)) as client:
+        res = await asyncio.wait_for(analyze_website("https://slow-site.ru", client=client), timeout=2)
+    assert res == ("dead_site", "HTTP/Connection error")
+
+
+@pytest.mark.asyncio
+async def test_analyze_website_does_not_download_body() -> None:
+    """Only status and final URL are needed, so the response body must not be read."""
+
+    class ExplodingStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            raise AssertionError("Response body should not be downloaded")
+            yield b""  # pragma: no cover
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=ExplodingStream(), request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        res = await analyze_website("https://big-file-site.ru", client=client)
+    assert res == ("has_site", "https://big-file-site.ru")

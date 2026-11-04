@@ -7,7 +7,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database.repo import upsert_lead
-from src.services.checker import DEFAULT_HEADERS, analyze_website
+from src.services.checker import CHECK_TIMEOUT_SECONDS, DEFAULT_HEADERS, analyze_website
 from src.services.providers.base import RawPlace
 from src.services.providers.csv_loader import parse_csv_leads
 from src.services.providers.osm import OSMOverpassProvider
@@ -44,11 +44,12 @@ async def _process_and_save_places(
                     place.raw_website, client=client
                 )
             except Exception:
+                logger.exception("Website check crashed for %r", place.raw_website)
                 site_status, details = "dead_site", "Website check error"
             return place, site_status, details
 
     async with httpx.AsyncClient(
-        timeout=7.0,
+        timeout=CHECK_TIMEOUT_SECONDS,
         follow_redirects=True,
         headers=DEFAULT_HEADERS,
     ) as client:

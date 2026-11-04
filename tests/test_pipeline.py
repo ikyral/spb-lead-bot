@@ -49,17 +49,15 @@ async def test_csv_pipeline_full_integration(
     - 1 cafe with active site (ya.ru) -> dropped.
     - Repeated run detects all 3 as duplicates.
     """
-    async def mock_get(self: httpx.AsyncClient, url: Any, *args: Any, **kwargs: Any) -> httpx.Response:
-        url_str = str(url)
-        if "broken-domain-dentist-spb-404.ru" in url_str:
-            raise httpx.ConnectError("Connection failed: DNS resolution error")
-        if "ya.ru" in url_str:
-            req = httpx.Request("GET", url_str)
-            return httpx.Response(status_code=200, request=req)
-        req = httpx.Request("GET", url_str)
-        return httpx.Response(status_code=200, request=req)
+    # Patch `send`: both `get` and `stream` go through it, so no real network calls are made.
+    async def mock_send(
+        self: httpx.AsyncClient, request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        if "broken-domain-dentist-spb-404.ru" in str(request.url):
+            raise httpx.ConnectError("Connection failed: DNS resolution error", request=request)
+        return httpx.Response(status_code=200, request=request)
 
-    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+    monkeypatch.setattr(httpx.AsyncClient, "send", mock_send)
 
     csv_bytes = Path("data/test_leads.csv").read_bytes()
 
