@@ -241,3 +241,115 @@ async def test_analyze_website_does_not_download_body() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         res = await analyze_website("https://big-file-site.ru", client=client)
     assert res == ("has_site", "https://big-file-site.ru")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403, 429])
+async def test_analyze_website_bot_protection_statuses_mean_site_is_alive(status_code: int) -> None:
+    """401/403/429 come from a live server that blocks bots or rate-limits us, not from a dead site."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        res = await analyze_website("https://cloudflare-protected.ru", client=client)
+    assert res == ("has_site", "https://cloudflare-protected.ru")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [404, 410, 500, 502, 503])
+async def test_analyze_website_real_error_statuses_stay_dead(status_code: int) -> None:
+    """Other 4xx/5xx statuses still mean the site is broken."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        res = await analyze_website("https://broken.ru", client=client)
+    assert res == ("dead_site", "HTTP/Connection error")
+
+
+@pytest.mark.asyncio
+async def test_analyze_website_bot_protection_redirect_to_social_is_social_only() -> None:
+    """A protected social page reached via redirect is still classified as social_only."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "short-link.ru":
+            return httpx.Response(302, headers={"Location": "https://vk.com/page"}, request=request)
+        return httpx.Response(403, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        res = await analyze_website("https://short-link.ru", client=client)
+    assert res == ("social_only", "https://vk.com/page")
+
+
+@pytest.mark.asyncio
+async def test_analyze_website_schemeless_falls_back_to_http_on_ssl_error() -> None:
+    """A schemeless URL whose site only works over plain http must not be reported as dead."""
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if request.url.scheme == "https":
+            raise httpx.ConnectError("SSL: WRONG_VERSION_NUMBER", request=request)
+        return httpx.Response(200, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        res = await analyze_website("legacy-site.ru", client=client)
+    assert res == ("has_site", "http://legacy-site.ru")
+    assert requested == ["https://legacy-site.ru", "http://legacy-site.ru"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_website_schemeless_falls_back_to_http_on_https_error_status() -> None:
+    """https served by a wrong default vhost (404) while http works must not be reported as dead."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.scheme == "https":
+            return httpx.Response(404, request=request)
+        return httpx.Response(200, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        res = await analyze_website("www.legacy-site.ru/contacts", client=client)
+    assert res == ("has_site", "http://www.legacy-site.ru/contacts")
+
+
+@pytest.mark.asyncio
+async def test_analyze_website_schemeless_dead_on_both_schemes() -> None:
+    """If both https and http fail, the site is dead."""
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.scheme)
+        raise httpx.ConnectError("Failed to resolve host", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        res = await analyze_website("no-such-domain-spb.ru", client=client)
+    assert res == ("dead_site", "HTTP/Connection error")
+    assert requested == ["https", "http"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_website_no_http_fallback_after_timeout_or_explicit_https() -> None:
+    """Timeouts are not retried over http (host is unreachable), nor are URLs with an explicit scheme."""
+    requested: list[str] = []
+
+    def timeout_handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        raise httpx.ConnectTimeout("timed out", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(timeout_handler)) as client:
+        res = await analyze_website("slow-host.ru", client=client)
+    assert res == ("dead_site", "HTTP/Connection error")
+    assert requested == ["https://slow-host.ru"]
+
+    requested.clear()
+
+    def ssl_error_handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        raise httpx.ConnectError("SSL error", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(ssl_error_handler)) as client:
+        res = await analyze_website("https://explicit-https.ru", client=client)
+    assert res == ("dead_site", "HTTP/Connection error")
+    assert requested == ["https://explicit-https.ru"]

@@ -4,7 +4,7 @@
 Find local businesses in Saint Petersburg (SPb) that need website development services:
 - `no_site`: No website specified in map card.
 - `social_only`: Only VK, Telegram, Taplink, YClients, or Dikidi link instead of a standalone website.
-- `dead_site`: Website URL returns HTTP 4xx/5xx, SSL error, DNS failure, or timeout (>7s).
+- `dead_site`: Website URL returns HTTP 4xx/5xx (except 401/403/429), SSL error, DNS failure, or timeout.
 
 ## 2. Database Schema (leads table in SQLite)
 - `id`: Integer, Primary Key, Autoincrement
@@ -83,8 +83,9 @@ Format: `(south_lat, west_lon, north_lat, east_lon)`
 ## 5. Website Classification Rules (src/services/checker.py)
 - Social/Aggregator domains (`social_only`): `vk.com`, `vk.ru`, `t.me`, `taplink.cc`, `wa.me`, `instagram.com`, `yclients.com`, `dikidi.net`, `linktr.ee`.
 - If URL is empty/None -> `no_site`.
-- Perform `GET` request with `httpx.AsyncClient(timeout=7.0, follow_redirects=True)` and standard browser `User-Agent`.
-- If status code >= 400 or raises `httpx.HTTPError` -> `dead_site`.
+- Perform `GET` request with `httpx.AsyncClient(timeout=7.0, follow_redirects=True)` and standard browser `User-Agent`; the whole check is capped at 20s. The response body is not downloaded.
+- URL without scheme is tried as `https://` first; if that fails with a connection/SSL error or a dead status, it is retried as `http://` (no retry after a timeout).
+- If status code >= 400 (except `401`, `403`, `429`: the server is alive but blocks bots / requires auth / rate-limits) or raises `httpx.HTTPError` -> `dead_site`.
 - If final redirected URL host matches social/aggregator domains -> `social_only`.
 - Otherwise -> `has_site`.
 
