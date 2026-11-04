@@ -2,11 +2,12 @@
 
 import pytest
 from sqlalchemy import event, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from src.database.models import Lead
-from src.database.repo import get_leads, init_db
+from src.database.repo import get_leads, init_db, save_new_leads, upsert_lead
 
 LEAD_LIST_INDEX = "ix_leads_crm_status_score"
 
@@ -108,3 +109,102 @@ async def test_lead_card_query_uses_index_without_sorting(engine: AsyncEngine) -
 def test_index_is_declared_on_model() -> None:
     names = {index.name for index in Lead.__table__.indexes}
     assert LEAD_LIST_INDEX in names
+
+
+def _lead_data(i: int, **overrides) -> dict:
+    data = {
+        "external_id": f"osm_{i}", "source": "osm", "name": f"Lead {i}", "category": "horeca",
+        "site_status": "no_site", "score": 60, "crm_status": "new",
+    }
+    data.update(overrides)
+    return data
+
+
+@pytest.fixture
+async def session(engine: AsyncEngine):
+    await init_db(engine)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as s:
+        yield s
+
+
+async def _count_leads(session) -> int:
+    return (await session.execute(text("SELECT count(*) FROM leads"))).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_upsert_lead_does_not_hide_non_duplicate_integrity_errors(session) -> None:
+    """A NOT NULL violation is a bug, not a duplicate: it must not be counted as 'duplicates_skipped'."""
+    with pytest.raises(IntegrityError):
+        await upsert_lead(session, _lead_data(1, name=None))
+    assert await _count_leads(session) == 0
+
+
+@pytest.mark.asyncio
+async def test_upsert_lead_concurrent_duplicate_is_still_a_duplicate(session, monkeypatch) -> None:
+    """If another harvest inserts the same external_id between the check and the commit, it is a duplicate."""
+    from src.database import repo
+
+    await upsert_lead(session, _lead_data(1))
+    real_exists = repo._external_id_exists
+    calls = 0
+
+    async def stale_first_check(sess, external_id):
+        nonlocal calls
+        calls += 1
+        return False if calls == 1 else await real_exists(sess, external_id)
+
+    monkeypatch.setattr(repo, "_external_id_exists", stale_first_check)
+    assert await upsert_lead(session, _lead_data(1, name="Другое имя")) is False
+    assert await _count_leads(session) == 1
+
+
+@pytest.mark.asyncio
+async def test_save_new_leads_uses_one_commit_and_skips_existing(session) -> None:
+    await upsert_lead(session, _lead_data(0))
+    commits = 0
+
+    def count_commit(sess):
+        nonlocal commits
+        commits += 1
+
+    event.listen(session.sync_session, "after_commit", count_commit)
+    batch = [_lead_data(i) for i in range(50)] + [_lead_data(7, name="Повтор в пачке")]
+    saved, duplicates = await save_new_leads(session, batch)
+    event.remove(session.sync_session, "after_commit", count_commit)
+
+    assert (saved, duplicates) == (49, 2)  # osm_0 already saved, osm_7 repeated in the batch
+    assert commits == 1
+    assert await _count_leads(session) == 50
+    names = dict((await session.execute(text("SELECT external_id, name FROM leads"))).all())
+    assert names["osm_0"] == "Lead 0" and names["osm_7"] == "Lead 7"  # existing data never overwritten
+
+
+@pytest.mark.asyncio
+async def test_save_new_leads_falls_back_when_a_concurrent_insert_wins(session, monkeypatch) -> None:
+    """A stale existence check makes the batch commit fail; leads are then saved one by one."""
+    from src.database import repo
+
+    await upsert_lead(session, _lead_data(3))
+
+    async def stale_existing(sess, external_ids):
+        return set()
+
+    monkeypatch.setattr(repo, "_existing_external_ids", stale_existing)
+    saved, duplicates = await save_new_leads(session, [_lead_data(i) for i in range(5)])
+
+    assert (saved, duplicates) == (4, 1)
+    assert await _count_leads(session) == 5
+
+
+@pytest.mark.asyncio
+async def test_save_new_leads_raises_on_invalid_lead(session) -> None:
+    with pytest.raises(IntegrityError):
+        await save_new_leads(session, [_lead_data(1), _lead_data(2, name=None)])
+
+
+@pytest.mark.asyncio
+async def test_save_new_leads_handles_large_batches(session) -> None:
+    """The existence check must not exceed SQLite's bound-parameter limit on big CSV imports."""
+    saved, duplicates = await save_new_leads(session, [_lead_data(i) for i in range(2500)])
+    assert (saved, duplicates) == (2500, 0)
+    assert await save_new_leads(session, [_lead_data(i) for i in range(2500)]) == (0, 2500)

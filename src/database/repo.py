@@ -60,9 +60,7 @@ async def upsert_lead(
     if not external_id:
         raise ValueError("Lead data must contain a non-empty external_id")
 
-    stmt = select(Lead.id).where(Lead.external_id == external_id)
-    result = await session.execute(stmt)
-    if result.scalar_one_or_none() is not None:
+    if await _external_id_exists(session, external_id):
         return False
 
     if isinstance(lead_data, Lead):
@@ -76,7 +74,65 @@ async def upsert_lead(
         return True
     except IntegrityError:
         await session.rollback()
-        return False
+        # Only a concurrent insert of the same external_id is a duplicate;
+        # any other constraint violation (e.g. NOT NULL) is a bug and must surface.
+        if await _external_id_exists(session, external_id):
+            return False
+        raise
+
+
+async def _external_id_exists(session: AsyncSession, external_id: str) -> bool:
+    result = await session.execute(select(Lead.id).where(Lead.external_id == external_id))
+    return result.scalar_one_or_none() is not None
+
+
+# Keeps IN (...) lists well below SQLite's bound-parameter limit (999 on old builds).
+_EXISTENCE_CHECK_CHUNK = 500
+
+
+async def _existing_external_ids(session: AsyncSession, external_ids: list[str]) -> set[str]:
+    existing: set[str] = set()
+    for start in range(0, len(external_ids), _EXISTENCE_CHECK_CHUNK):
+        chunk = external_ids[start:start + _EXISTENCE_CHECK_CHUNK]
+        result = await session.execute(select(Lead.external_id).where(Lead.external_id.in_(chunk)))
+        existing.update(result.scalars())
+    return existing
+
+
+async def save_new_leads(
+    session: AsyncSession,
+    leads_data: list[dict[str, Any]],
+) -> tuple[int, int]:
+    """
+    Insert leads whose external_id is not saved yet, in a single transaction.
+
+    Existing leads are never overwritten. Returns (saved, duplicates). If a concurrent
+    harvest inserts some of the same leads in the meantime, the batch is rolled back and
+    the leads are saved one by one with upsert_lead. Non-duplicate errors are raised.
+    """
+    if not leads_data:
+        return 0, 0
+
+    existing = await _existing_external_ids(session, [data["external_id"] for data in leads_data])
+    seen = set(existing)
+    new_leads: list[dict[str, Any]] = []
+    for data in leads_data:
+        if data["external_id"] not in seen:
+            seen.add(data["external_id"])
+            new_leads.append(data)
+
+    try:
+        session.add_all([Lead(**data) for data in new_leads])
+        await session.commit()
+        saved = len(new_leads)
+    except IntegrityError:
+        await session.rollback()
+        saved = 0
+        for data in new_leads:
+            if await upsert_lead(session, data):
+                saved += 1
+
+    return saved, len(leads_data) - saved
 
 
 async def get_lead_fingerprints(

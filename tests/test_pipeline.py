@@ -352,3 +352,33 @@ async def test_csv_import_is_capped(session: AsyncSession, monkeypatch: pytest.M
     res = await import_csv_harvest(session, csv_bytes)
     assert res == {"total_found": 2, "qualified": 2, "saved_new": 2, "duplicates_skipped": 0, "over_limit": 1}
 
+
+
+@pytest.mark.asyncio
+async def test_harvest_saves_all_leads_in_one_commit(session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A commit per lead took ~1.9 s per 500 leads on SQLite; the whole batch must be one transaction."""
+    from sqlalchemy import event
+
+    async def instant_check(url: str | None, client: Any = None) -> tuple[str, str | None]:
+        return ("no_site", None)
+
+    monkeypatch.setattr(pipeline, "analyze_website", instant_check)
+    places = [
+        RawPlace(external_id=f"osm_{i}", source="osm", name=f"Lead {i}", category="dentist_clinic",
+                 phone=f"+7 999 100-{i:02d}-00")
+        for i in range(30)
+    ]
+    commits = 0
+
+    def count_commit(sess: Any) -> None:
+        nonlocal commits
+        commits += 1
+
+    event.listen(session.sync_session, "after_commit", count_commit)
+    try:
+        stats = await pipeline._process_and_save_places(session, places)
+    finally:
+        event.remove(session.sync_session, "after_commit", count_commit)
+
+    assert stats["saved_new"] == 30
+    assert commits == 1
