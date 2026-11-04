@@ -6,7 +6,6 @@ from aiogram.types import CallbackQuery, Message, User
 
 from src.bot.formatters import format_lead_card, generate_pitch_text
 from src.bot.keyboards import (
-    CATEGORY_KEYS,
     DISTRICT_NAMES,
     get_categories_keyboard,
     get_districts_keyboard,
