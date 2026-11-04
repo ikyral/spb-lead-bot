@@ -53,3 +53,12 @@ async def test_main_refuses_to_start_without_token_or_admin(monkeypatch: pytest.
 
     with pytest.raises(SystemExit, match="BOT_TOKEN and ADMIN_TG_ID must be set"):
         await main.main()
+
+
+def test_secrets_are_not_exposed_in_settings_repr() -> None:
+    """Settings may end up in logs or tracebacks; tokens must be masked there."""
+    s = Settings(BOT_TOKEN="123456:SECRET-BOT-TOKEN", ADMIN_TG_ID=1, TWOGIS_API_KEY="SECRET-2GIS-KEY")
+    for text in (repr(s), str(s), repr(s.model_dump())):
+        assert "SECRET-BOT-TOKEN" not in text
+        assert "SECRET-2GIS-KEY" not in text
+    assert s.BOT_TOKEN.get_secret_value() == "123456:SECRET-BOT-TOKEN"

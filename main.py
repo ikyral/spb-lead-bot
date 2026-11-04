@@ -27,13 +27,14 @@ async def main() -> None:
     """Initialize database and start bot polling."""
     if settings_error is not None:
         raise SystemExit(f"Invalid configuration in .env / environment: {settings_error}")
-    if not settings.BOT_TOKEN.strip() or settings.ADMIN_TG_ID <= 0:
+    bot_token = settings.BOT_TOKEN.get_secret_value().strip()
+    if not bot_token or settings.ADMIN_TG_ID <= 0:
         raise SystemExit("BOT_TOKEN and ADMIN_TG_ID must be set (see .env.example)")
 
     await init_db()
 
     bot = Bot(
-        token=settings.BOT_TOKEN,
+        token=bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()

@@ -177,3 +177,29 @@ async def test_empty_list_and_export_messages_use_human_status_names(monkeypatch
     await leads_handlers.handle_export_csv(cb)
     alert = cb.answer.call_args[0][0]
     assert "«В работе»" in alert and "in_work" not in alert
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["real-2gis-key", None])
+async def test_harvest_receives_plain_2gis_key(monkeypatch: pytest.MonkeyPatch, key: str | None) -> None:
+    from src.config import Settings
+
+    calls: list[dict] = []
+
+    async def fake_harvest(**kwargs):
+        calls.append(kwargs)
+        return {"total_found": 0, "qualified": 0, "saved_new": 0, "duplicates_skipped": 0}
+
+    class _Session:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *exc):
+            return None
+
+    monkeypatch.setattr(search, "settings", Settings(BOT_TOKEN="t", ADMIN_TG_ID=1, TWOGIS_API_KEY=key))
+    monkeypatch.setattr(search, "run_lead_harvest", fake_harvest)
+    monkeypatch.setattr(search, "async_session_maker", _Session)
+
+    await search.handle_category_chosen(_callback("cat:Невский:hotels"))
+    assert calls[0]["twogis_api_key"] == key

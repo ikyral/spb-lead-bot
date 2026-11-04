@@ -157,7 +157,9 @@ async def handle_category_chosen(callback: CallbackQuery) -> None:
                 session=session,
                 district_name=district_name,
                 category_key=category_key,
-                twogis_api_key=settings.TWOGIS_API_KEY,
+                twogis_api_key=(
+                    settings.TWOGIS_API_KEY.get_secret_value() if settings.TWOGIS_API_KEY else None
+                ),
                 progress=progress,
             )
         report = (

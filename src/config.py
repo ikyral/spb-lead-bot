@@ -1,12 +1,14 @@
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Application configuration loaded from environment variables and .env file."""
 
-    BOT_TOKEN: str
+    # SecretStr masks the values in repr()/str(), logs and tracebacks; use .get_secret_value().
+    BOT_TOKEN: SecretStr
     ADMIN_TG_ID: int
-    TWOGIS_API_KEY: str | None = None
+    TWOGIS_API_KEY: SecretStr | None = None
     DB_URL: str = "sqlite+aiosqlite:///./leads.db"
 
     model_config = SettingsConfigDict(
