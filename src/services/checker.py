@@ -2,7 +2,10 @@
 
 import asyncio
 
+import httpcore
 import httpx
+
+from src.services.safe_http import PublicOnlyTransport
 
 # httpx applies this per network operation (connect / read / write / pool).
 CHECK_TIMEOUT_SECONDS: float = 7.0
@@ -46,6 +49,23 @@ def is_social_domain(host: str | None) -> bool:
     return any(
         normalized_host == domain or normalized_host.endswith(f".{domain}")
         for domain in SOCIAL_DOMAINS
+    )
+
+
+def create_check_client(
+    network_backend: httpcore.AsyncNetworkBackend | None = None,
+) -> httpx.AsyncClient:
+    """
+    HTTP client for website checks that refuses non-public addresses (SSRF protection).
+
+    Env proxies are ignored on purpose: with a proxy only the proxy host would be validated.
+    """
+    return httpx.AsyncClient(
+        timeout=CHECK_TIMEOUT_SECONDS,
+        follow_redirects=True,
+        headers=DEFAULT_HEADERS,
+        transport=PublicOnlyTransport(network_backend=network_backend),
+        trust_env=False,
     )
 
 
@@ -94,11 +114,7 @@ async def analyze_website(
         return ("social_only", cleaned_url)
 
     if client is None:
-        async with httpx.AsyncClient(
-            timeout=CHECK_TIMEOUT_SECONDS,
-            follow_redirects=True,
-            headers=DEFAULT_HEADERS,
-        ) as own_client:
+        async with create_check_client() as own_client:
             return await _check_with_http_fallback(own_client, cleaned_url, retry_http=not has_scheme)
     return await _check_with_http_fallback(client, cleaned_url, retry_http=not has_scheme)
 

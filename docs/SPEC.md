@@ -86,6 +86,7 @@ Format: `(south_lat, west_lon, north_lat, east_lon)`
 - Perform `GET` request with `httpx.AsyncClient(timeout=7.0, follow_redirects=True)` and standard browser `User-Agent`; the whole check is capped at 20s. The response body is not downloaded.
 - URL without scheme is tried as `https://` first; if that fails with a connection/SSL error or a dead status, it is retried as `http://` (no retry after a timeout).
 - If status code >= 400 (except `401`, `403`, `429`: the server is alive but blocks bots / requires auth / rate-limits) or raises `httpx.HTTPError` -> `dead_site`.
+- Connections to non-public addresses (loopback, private, link-local incl. `169.254.169.254`, CGNAT, multicast, reserved; IPv4 and IPv6) are refused for every hop including redirects, after DNS resolution -> treated as a connection error (`dead_site`). Env proxies are ignored. See `src/services/safe_http.py`.
 - If final redirected URL host matches social/aggregator domains -> `social_only`.
 - Otherwise -> `has_site`.
 
