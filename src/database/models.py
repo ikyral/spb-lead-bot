@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Integer, String, func
+from sqlalchemy import DateTime, Index, Integer, String, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -14,6 +14,11 @@ class Lead(Base):
     """Lead model representing a local business entity."""
 
     __tablename__ = "leads"
+    __table_args__ = (
+        # Lead cards: WHERE crm_status = ? AND score >= ? ORDER BY score DESC, id DESC.
+        # SQLite stores the rowid (id) in the index, so the ORDER BY needs no extra sort.
+        Index("ix_leads_crm_status_score", "crm_status", "score"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     external_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)

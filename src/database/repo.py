@@ -1,6 +1,6 @@
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import Connection, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -21,10 +21,23 @@ async_session_maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
 
 
 async def init_db(target_engine: AsyncEngine | None = None) -> None:
-    """Initialize database tables."""
+    """Initialize database tables and indexes (idempotent, safe on existing databases)."""
     current_engine = target_engine or engine
     async with current_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_create_missing_indexes)
+
+
+def _create_missing_indexes(sync_conn: Connection) -> None:
+    """
+    Create indexes added to models after the table already existed.
+
+    create_all() skips existing tables together with their indexes, so databases
+    created by older versions would never get new indexes otherwise.
+    """
+    for table in Base.metadata.sorted_tables:
+        for index in table.indexes:
+            index.create(sync_conn, checkfirst=True)
 
 
 async def upsert_lead(
