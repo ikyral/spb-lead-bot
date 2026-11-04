@@ -191,3 +191,128 @@ async def test_twogis_provider() -> None:
 
     err_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(500, text="Error")))
     assert await TwoGisProvider(api_key="test_key", client=err_client).search_places("Петроградский", "auto_repair") == []
+
+
+def _twogis_page(start_id: int, count: int, total: int | None) -> dict:
+    """Successful 2GIS response with `count` items starting at id `start_id`."""
+    result: dict = {"items": [{"id": str(start_id + i), "name": f"Место {start_id + i}"} for i in range(count)]}
+    if total is not None:
+        result["total"] = total
+    return {"meta": {"code": 200}, "result": result}
+
+
+def _twogis_error(code: int, error_type: str, message: str) -> dict:
+    return {"meta": {"code": code, "error": {"type": error_type, "message": message}}}
+
+
+def _paged_client(pages: dict[int, httpx.Response], requested: list[dict]) -> httpx.AsyncClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        requested.append(params)
+        return pages[int(params["page"])]
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.asyncio
+async def test_twogis_fetches_all_pages_until_total() -> None:
+    """Results beyond the first 50 must not be lost: pages are requested until result.total is reached."""
+    requested: list[dict] = []
+    pages = {
+        1: httpx.Response(200, json=_twogis_page(1, 50, total=120)),
+        2: httpx.Response(200, json=_twogis_page(51, 50, total=120)),
+        3: httpx.Response(200, json=_twogis_page(101, 20, total=120)),
+    }
+    provider = TwoGisProvider(api_key="test_key", client=_paged_client(pages, requested))
+    places = await provider.search_places("Центральный", "dentist_clinic")
+
+    assert len(places) == 120
+    assert [p["page"] for p in requested] == ["1", "2", "3"]
+    assert all(p["page_size"] == "50" for p in requested)
+    assert places[0].external_id == "2gis_1" and places[-1].external_id == "2gis_120"
+
+
+@pytest.mark.asyncio
+async def test_twogis_stops_on_short_page_or_not_found() -> None:
+    """A page shorter than page_size, or meta.code 404 ('Results not found'), ends pagination quietly."""
+    requested: list[dict] = []
+    pages = {1: httpx.Response(200, json=_twogis_page(1, 7, total=None))}
+    places = await TwoGisProvider(api_key="k", client=_paged_client(pages, requested)).search_places(
+        "Центральный", "dentist_clinic"
+    )
+    assert (len(places), len(requested)) == (7, 1)
+
+    requested.clear()
+    pages = {
+        1: httpx.Response(200, json=_twogis_page(1, 50, total=None)),
+        2: httpx.Response(200, json=_twogis_error(404, "itemNotFound", "Results not found")),
+    }
+    places = await TwoGisProvider(api_key="k", client=_paged_client(pages, requested)).search_places(
+        "Центральный", "dentist_clinic"
+    )
+    assert (len(places), len(requested)) == (50, 2)
+
+
+@pytest.mark.asyncio
+async def test_twogis_page_cap_limits_billable_requests(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    """Every page is a paid request, so the number of pages per harvest is capped."""
+    from src.services.providers import twogis
+
+    monkeypatch.setattr(twogis, "TWOGIS_MAX_PAGES", 2)
+    requested: list[dict] = []
+    pages = {n: httpx.Response(200, json=_twogis_page(n * 100, 50, total=1000)) for n in range(1, 5)}
+    places = await TwoGisProvider(api_key="k", client=_paged_client(pages, requested)).search_places(
+        "Центральный", "dentist_clinic"
+    )
+    assert (len(places), len(requested)) == (100, 2)
+    assert "truncated" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_twogis_api_error_in_meta_is_logged_without_leaking_key(caplog) -> None:
+    """2GIS reports errors in meta.code/meta.error; they must be logged (not silently ignored), key masked."""
+    requested: list[dict] = []
+    pages = {1: httpx.Response(200, json=_twogis_error(403, "keyIsBlocked", "Key is blocked"))}
+    places = await TwoGisProvider(api_key="SECRET-KEY", client=_paged_client(pages, requested)).search_places(
+        "Центральный", "dentist_clinic"
+    )
+    assert places == []
+    assert "403" in caplog.text and "keyIsBlocked" in caplog.text and "Key is blocked" in caplog.text
+    assert "SECRET-KEY" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_twogis_error_on_later_page_keeps_collected_results(caplog) -> None:
+    """A failure on page 2 must not throw away the results of page 1."""
+    requested: list[dict] = []
+    pages = {
+        1: httpx.Response(200, json=_twogis_page(1, 50, total=120)),
+        2: httpx.Response(200, json=_twogis_error(400, "paramIsOutsideSet", "Param 'page' is invalid")),
+    }
+    places = await TwoGisProvider(api_key="k", client=_paged_client(pages, requested)).search_places(
+        "Центральный", "dentist_clinic"
+    )
+    assert len(places) == 50
+    assert "paramIsOutsideSet" in caplog.text
+
+    requested.clear()
+    pages[2] = httpx.Response(502, text="Bad Gateway")
+    places = await TwoGisProvider(api_key="k", client=_paged_client(pages, requested)).search_places(
+        "Центральный", "dentist_clinic"
+    )
+    assert len(places) == 50
+
+
+@pytest.mark.asyncio
+async def test_twogis_deduplicates_items_repeated_across_pages() -> None:
+    """Results may shift between page requests; the same id must not be returned twice."""
+    requested: list[dict] = []
+    pages = {
+        1: httpx.Response(200, json=_twogis_page(1, 50, total=60)),
+        2: httpx.Response(200, json=_twogis_page(45, 15, total=60)),  # ids 45..50 repeat
+    }
+    places = await TwoGisProvider(api_key="k", client=_paged_client(pages, requested)).search_places(
+        "Центральный", "dentist_clinic"
+    )
+    ids = [p.external_id for p in places]
+    assert len(ids) == len(set(ids)) == 59
