@@ -60,6 +60,9 @@ class OSMOverpassProvider(BaseMapProvider):
         query = self.build_query(bbox, osm_tags)
         high_margin = bool(cat_info.get("high_margin", False))
 
+        # Best incomplete result, used only if no endpoint returns a complete one.
+        partial: list[RawPlace] = []
+
         for endpoint in self.endpoints:
             try:
                 if self._client is not None:
@@ -70,15 +73,36 @@ class OSMOverpassProvider(BaseMapProvider):
                     async with httpx.AsyncClient(timeout=self.timeout) as client:
                         response = await client.post(endpoint, data={"data": query})
 
-                if response.status_code == 200:
-                    data = response.json()
-                    return self._parse_elements(data, district_name, category_key, high_margin)
+                if response.status_code != 200:
+                    logger.warning("Overpass endpoint %s returned status %d", endpoint, response.status_code)
+                    continue
 
-                logger.warning("Overpass endpoint %s returned status %d", endpoint, response.status_code)
-            except (httpx.HTTPError, ValueError, KeyError) as exc:
+                data = response.json()
+                places = self._parse_elements(data, district_name, category_key, high_margin)
+
+                # Timeouts and memory exhaustion come with HTTP 200 and a 'remark' starting with
+                # 'runtime error:'; elements may then be missing. 'runtime remark:' is informational.
+                remark = str(data.get("remark") or "")
+                if remark.startswith("runtime error"):
+                    logger.warning(
+                        "Overpass endpoint %s returned an incomplete result (%d places): %s",
+                        endpoint, len(places), remark,
+                    )
+                    if len(places) > len(partial):
+                        partial = places
+                    continue
+
+                return places
+            except (httpx.HTTPError, ValueError, KeyError, AttributeError) as exc:
                 logger.warning("Overpass endpoint %s failed: %s", endpoint, exc)
 
-        return []
+        if partial:
+            logger.warning(
+                "All Overpass endpoints failed to complete the query for %s / %s; "
+                "using an incomplete result with %d places",
+                district_name, category_key, len(partial),
+            )
+        return partial
 
     def _parse_elements(
         self,

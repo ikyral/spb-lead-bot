@@ -150,6 +150,69 @@ async def test_osm_overpass_fallback_and_failure() -> None:
     assert await OSMOverpassProvider(client=fail_client).search_places("Центральный", "dentist_clinic") == []
 
 
+def _overpass_payload(ids: range, remark: str | None = None) -> dict:
+    payload: dict = {"elements": [{"type": "node", "id": i, "tags": {"name": f"Место {i}"}} for i in ids]}
+    if remark is not None:
+        payload["remark"] = remark
+    return payload
+
+
+TIMEOUT_REMARK = 'runtime error: Query timed out in "query" at line 3 after 26 seconds.'
+MEMORY_REMARK = 'runtime error: Query ran out of memory in "query" at line 5.'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remark", [TIMEOUT_REMARK, MEMORY_REMARK])
+async def test_osm_runtime_error_remark_falls_back_to_next_endpoint(remark: str, caplog) -> None:
+    """Overpass reports timeouts/OOM with HTTP 200 and a 'remark'; such (partial) data must not be trusted."""
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.host)
+        if "mail.ru" in str(request.url):
+            return httpx.Response(200, json=_overpass_payload(range(1, 4), remark=remark))
+        return httpx.Response(200, json=_overpass_payload(range(1, 11)))
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    places = await OSMOverpassProvider(client=client).search_places("Центральный", "dentist_clinic")
+
+    assert len(places) == 10
+    assert requested == ["maps.mail.ru", "overpass-api.de"]
+    assert "runtime error" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_osm_all_endpoints_incomplete_returns_largest_partial_result(caplog) -> None:
+    """If every endpoint fails mid-query, an incomplete list is still better than nothing, with a warning."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "mail.ru" in str(request.url):
+            return httpx.Response(200, json=_overpass_payload(range(1, 4), remark=TIMEOUT_REMARK))
+        return httpx.Response(200, json=_overpass_payload(range(1, 7), remark=TIMEOUT_REMARK))
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    places = await OSMOverpassProvider(client=client).search_places("Центральный", "dentist_clinic")
+
+    assert len(places) == 6
+    assert "incomplete" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_osm_runtime_remark_is_not_an_error() -> None:
+    """'runtime remark:' is informational; the result is complete and no fallback is needed."""
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.host)
+        return httpx.Response(200, json=_overpass_payload(range(1, 6), remark="runtime remark: Timeout is ignored."))
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    places = await OSMOverpassProvider(client=client).search_places("Центральный", "dentist_clinic")
+
+    assert len(places) == 5
+    assert requested == ["maps.mail.ru"]
+
+
 @pytest.mark.asyncio
 async def test_twogis_provider() -> None:
     """Verify 2GIS provider empty key behavior, parsing items, and error handling."""
