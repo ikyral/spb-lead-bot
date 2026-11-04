@@ -6,8 +6,9 @@ from typing import Any
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.database.repo import upsert_lead
+from src.database.repo import get_lead_fingerprints, upsert_lead
 from src.services.checker import CHECK_TIMEOUT_SECONDS, DEFAULT_HEADERS, analyze_website
+from src.services.dedup import DuplicateIndex, merge_duplicate_places
 from src.services.providers.base import RawPlace
 from src.services.providers.csv_loader import parse_csv_leads
 from src.services.providers.osm import OSMOverpassProvider
@@ -22,8 +23,14 @@ async def _process_and_save_places(
     places: list[RawPlace],
     concurrency: int = 5,
 ) -> dict[str, int]:
-    """Verify places concurrently, score them, and persist qualified leads."""
+    """
+    Verify places concurrently, score them, and persist qualified leads.
+
+    The same business found by several sources is merged before checking websites;
+    a qualified place matching an already saved lead counts as a duplicate.
+    """
     total_found = len(places)
+    places = merge_duplicate_places(places)
     if not places:
         return {
             "total_found": 0,
@@ -61,6 +68,10 @@ async def _process_and_save_places(
     saved_new = 0
     duplicates_skipped = 0
 
+    known_leads = DuplicateIndex()
+    for key, (name, phone, map_url) in enumerate(await get_lead_fingerprints(session)):
+        known_leads.add(key, name, phone, map_url)
+
     for place, site_status, details in results:
         socials = place.socials
         if site_status == "social_only" and (not socials or not socials.strip()):
@@ -78,6 +89,10 @@ async def _process_and_save_places(
             continue
 
         qualified += 1
+
+        if known_leads.find(place.name, place.phone, place.map_url) is not None:
+            duplicates_skipped += 1
+            continue
 
         lead_data: dict[str, Any] = {
             "external_id": place.external_id,

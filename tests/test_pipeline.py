@@ -187,3 +187,63 @@ async def test_run_lead_harvest_with_providers(
     assert res["qualified"] == 2
     assert res["saved_new"] == 2
     assert res["duplicates_skipped"] == 0
+
+
+@pytest.mark.asyncio
+async def test_run_lead_harvest_merges_same_business_from_osm_and_2gis(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same business returned by OSM and 2GIS must be saved once, enriched with 2GIS contacts."""
+    osm_place = RawPlace(
+        external_id="osm_501", source="osm", name="Стоматология Улыбка", category="dentist_clinic",
+        phone="+7 812 555-01-01", high_margin=True,
+    )
+    twogis_place = RawPlace(
+        external_id="2gis_701", source="2gis", name="Улыбка, стоматология", category="dentist_clinic",
+        phone="8 (812) 555-01-01", socials="https://vk.com/ulybka", address="Невский проспект, 22",
+        high_margin=True,
+    )
+
+    async def mock_osm_search(self: Any, district: str, category: str) -> list[RawPlace]:
+        return [osm_place]
+
+    async def mock_2gis_search(self: Any, district: str, category: str) -> list[RawPlace]:
+        return [twogis_place]
+
+    from src.services.providers.osm import OSMOverpassProvider
+    from src.services.providers.twogis import TwoGisProvider
+
+    monkeypatch.setattr(OSMOverpassProvider, "search_places", mock_osm_search)
+    monkeypatch.setattr(TwoGisProvider, "search_places", mock_2gis_search)
+
+    res = await run_lead_harvest(session, "Центральный", "dentist_clinic", twogis_api_key="key")
+    assert res == {"total_found": 2, "qualified": 1, "saved_new": 1, "duplicates_skipped": 0}
+
+    leads = await get_leads(session, limit=10)
+    assert len(leads) == 1
+    lead = leads[0]
+    assert (lead.external_id, lead.socials, lead.address) == (
+        "osm_501", "https://vk.com/ulybka", "Невский проспект, 22"
+    )
+
+
+@pytest.mark.asyncio
+async def test_import_skips_business_already_saved_from_another_source(
+    session: AsyncSession,
+) -> None:
+    """A CSV row for a business already saved from OSM (same phone) is a duplicate, not a new lead."""
+    session.add(Lead(
+        external_id="osm_900", source="osm", name="Детейлинг Гараж", category="auto_repair",
+        phone="+7 999 111-22-33", site_status="no_site", score=65, crm_status="in_work",
+    ))
+    await session.commit()
+
+    csv_bytes = (
+        "Название;Рубрика;Телефон\n"
+        "Гараж 78 детейлинг-центр;Автосервис;8 (999) 111 22 33\n"
+    ).encode("utf-8")
+
+    res = await import_csv_harvest(session, csv_bytes)
+    assert res == {"total_found": 1, "qualified": 1, "saved_new": 0, "duplicates_skipped": 1}
+    assert await get_leads_stats(session) == {"new": 0, "in_work": 1, "rejected": 0}

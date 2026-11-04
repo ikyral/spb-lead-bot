@@ -49,6 +49,15 @@ def is_social_domain(host: str | None) -> bool:
     )
 
 
+def url_host(value: str) -> str | None:
+    """Return the host of a URL that may lack a scheme, or None if it cannot be parsed."""
+    url_to_parse = value if value.startswith(("http://", "https://")) else f"https://{value}"
+    try:
+        return httpx.URL(url_to_parse).host
+    except Exception:
+        return None
+
+
 async def analyze_website(
     url: str | None,
     client: httpx.AsyncClient | None = None,

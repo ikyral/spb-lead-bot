@@ -66,6 +66,14 @@ async def upsert_lead(
         return False
 
 
+async def get_lead_fingerprints(
+    session: AsyncSession,
+) -> list[tuple[str, str | None, str | None]]:
+    """Return (name, phone, map_url) of all leads, used to detect cross-source duplicates."""
+    result = await session.execute(select(Lead.name, Lead.phone, Lead.map_url))
+    return [(name, phone, map_url) for name, phone, map_url in result.all()]
+
+
 async def get_leads(
     session: AsyncSession,
     crm_status: str = "new",

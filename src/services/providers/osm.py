@@ -4,7 +4,7 @@ import logging
 from typing import Any
 import httpx
 
-from src.services.checker import is_social_domain
+from src.services.checker import is_social_domain, url_host
 from src.services.providers.base import (
     SPB_DISTRICTS,
     TARGET_CATEGORIES,
@@ -18,15 +18,6 @@ DEFAULT_OVERPASS_ENDPOINTS: list[str] = [
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
     "https://overpass-api.de/api/interpreter",
 ]
-
-
-def _url_host(value: str) -> str | None:
-    """Return the host of a URL that may lack a scheme, or None if it cannot be parsed."""
-    url_to_parse = value if value.startswith(("http://", "https://")) else f"https://{value}"
-    try:
-        return httpx.URL(url_to_parse).host
-    except Exception:
-        return None
 
 
 class OSMOverpassProvider(BaseMapProvider):
@@ -124,8 +115,8 @@ class OSMOverpassProvider(BaseMapProvider):
             site_candidates = [
                 part.strip() for part in str(raw_site or "").split(";") if part.strip()
             ]
-            real_sites = [u for u in site_candidates if not is_social_domain(_url_host(u))]
-            social_sites = [u for u in site_candidates if is_social_domain(_url_host(u))]
+            real_sites = [u for u in site_candidates if not is_social_domain(url_host(u))]
+            social_sites = [u for u in site_candidates if is_social_domain(url_host(u))]
             if real_sites:
                 raw_website = real_sites[0]
             elif social_sites:
