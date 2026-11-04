@@ -1,6 +1,7 @@
 """Tests for bot formatters, pitch generation, keyboards, and middleware."""
 
 from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from aiogram.types import CallbackQuery, Message, User
 

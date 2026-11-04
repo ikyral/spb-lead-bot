@@ -1,6 +1,7 @@
 """Message and lead card formatters with HTML escaping."""
 
 import html
+
 from src.database.models import Lead
 from src.services.providers.base import TARGET_CATEGORIES
 

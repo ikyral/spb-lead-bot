@@ -1,6 +1,7 @@
 """Unit tests for SPb map and CSV data providers."""
 
 from pathlib import Path
+
 import httpx
 import pytest
 

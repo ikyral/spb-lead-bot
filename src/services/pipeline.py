@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
+
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 

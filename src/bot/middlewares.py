@@ -1,6 +1,7 @@
 """Bot middlewares for security and access control."""
 
 from typing import Any, Awaitable, Callable
+
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 

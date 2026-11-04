@@ -2,6 +2,7 @@
 
 import logging
 from typing import Any
+
 import httpx
 
 from src.services.checker import is_social_domain

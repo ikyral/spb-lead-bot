@@ -9,7 +9,6 @@ from src.services import checker
 from src.services.checker import SOCIAL_DOMAINS, analyze_website, is_social_domain
 from src.services.scorer import calculate_lead_score, is_high_margin_category
 
-
 # --- Scorer Tests ---
 
 def test_score_has_site_returns_zero() -> None:
