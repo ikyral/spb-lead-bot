@@ -27,6 +27,10 @@ LEAD_ACTIONS: frozenset[str] = frozenset({"work", "reject", "pitch", "prev", "ne
 # Statuses accepted by export_leads_by_status ('all' exports everything).
 EXPORT_STATUSES: frozenset[str] = frozenset({"new", "in_work", "rejected", "all"})
 
+# Human-readable CRM status names (internal values must not leak into messages).
+STATUS_NAMES: dict[str, str] = {"new": "Новые", "in_work": "В работе", "rejected": "В отказе", "all": "Все"}
+CARD_TITLES: dict[str, str] = {"new": "📋 Новый лид", "in_work": "💼 В работе", "rejected": "🗑 В отказе"}
+
 # Spreadsheet apps treat cells starting with these characters as formulas (CSV injection).
 _FORMULA_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@", "\t", "\r")
 # Phone-like values ("+7 (812) 555-01-01, +7 ...") contain no function names and are left as is.
@@ -63,13 +67,14 @@ async def render_lead_page(
     """Render a single lead card with pagination controls."""
     leads = await get_leads(session, crm_status=crm_status, limit=1, offset=offset)
     if not leads:
-        msg = f"📋 Лидов со статусом «{crm_status}» пока нет." if offset == 0 else "🏁 Больше нет лидов в списке."
+        status_name = STATUS_NAMES.get(crm_status, crm_status)
+        msg = f"📋 Лидов со статусом «{status_name}» пока нет." if offset == 0 else "🏁 Больше нет лидов в списке."
         await _reply(target, msg, edit=edit)
         return
 
     lead = leads[0]
     next_leads = await get_leads(session, crm_status=crm_status, limit=1, offset=offset + 1)
-    status_title = "📋 Новый лид" if crm_status == "new" else "💼 В работе"
+    status_title = CARD_TITLES.get(crm_status, "📋 Лид")
     card_text = f"<b>{status_title} #{offset + 1}</b>\n\n" + format_lead_card(lead)
     kb = get_lead_card_keyboard(
         lead_id=lead.id,
@@ -182,7 +187,7 @@ async def handle_export_csv(callback: CallbackQuery) -> None:
         leads = await export_leads_by_status(session, crm_status)
 
     if not leads:
-        await callback.answer(f"Нет лидов со статусом «{crm_status}»", show_alert=True)
+        await callback.answer(f"Нет лидов со статусом «{STATUS_NAMES[crm_status]}»", show_alert=True)
         return
 
     output = io.StringIO()
@@ -204,7 +209,7 @@ async def handle_export_csv(callback: CallbackQuery) -> None:
     if callback.message:
         await callback.message.answer_document(
             document=file,
-            caption=f"📥 Выгрузка лидов: <b>{crm_status}</b> ({len(leads)} шт.)",
+            caption=f"📥 Выгрузка лидов: <b>{STATUS_NAMES[crm_status]}</b> ({len(leads)} шт.)",
             parse_mode="HTML",
         )
     await callback.answer()

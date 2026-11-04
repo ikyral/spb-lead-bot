@@ -127,3 +127,53 @@ async def test_invalid_export_button_is_rejected(monkeypatch: pytest.MonkeyPatch
     await leads_handlers.handle_export_csv(cb)
     cb.answer.assert_awaited_once_with(STALE_BUTTON_TEXT, show_alert=True)
     cb.message.answer_document.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("crm_status", "title"),
+    [("new", "📋 Новый лид"), ("in_work", "💼 В работе"), ("rejected", "🗑 В отказе")],
+)
+async def test_lead_card_title_matches_status(monkeypatch: pytest.MonkeyPatch, crm_status: str, title: str) -> None:
+    """A stale card of a rejected lead used to be titled '💼 В работе'."""
+    from src.database.models import Lead
+
+    lead = Lead(id=1, external_id="osm_1", source="osm", name="Улыбка", category="dentist_clinic",
+                site_status="no_site", score=70, crm_status=crm_status)
+
+    async def fake_get_leads(session, crm_status, limit, offset):
+        return [lead] if offset == 0 else []
+
+    monkeypatch.setattr(leads_handlers, "get_leads", fake_get_leads)
+    cb = _callback("lead:1:next:0")
+    await leads_handlers.render_lead_page(cb, session=None, crm_status=crm_status, offset=0, edit=True)
+    assert cb.message.edit_text.call_args[0][0].startswith(f"<b>{title} #1</b>")
+
+
+@pytest.mark.asyncio
+async def test_empty_list_and_export_messages_use_human_status_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Users saw raw internal values like «in_work»."""
+
+    async def no_leads(*args, **kwargs):
+        return []
+
+    class _Session:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *exc):
+            return None
+
+    monkeypatch.setattr(leads_handlers, "get_leads", no_leads)
+    msg = MagicMock(spec=Message)
+    msg.answer = AsyncMock()
+    await leads_handlers.render_lead_page(msg, session=None, crm_status="in_work", offset=0)
+    text = msg.answer.call_args[0][0]
+    assert "«В работе»" in text and "in_work" not in text
+
+    monkeypatch.setattr(leads_handlers, "export_leads_by_status", no_leads)
+    monkeypatch.setattr(leads_handlers, "async_session_maker", _Session)
+    cb = _callback("export:in_work")
+    await leads_handlers.handle_export_csv(cb)
+    alert = cb.answer.call_args[0][0]
+    assert "«В работе»" in alert and "in_work" not in alert
