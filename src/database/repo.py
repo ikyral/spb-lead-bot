@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy import Connection, CursorResult, func, inspect, select, text, update
@@ -11,7 +11,18 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from src.config import settings
-from src.database.models import STATUS_ISSUED, STATUS_NEW, Base, CollectorState, Lead
+from src.database.models import (
+    CONTACT_CONTACTED,
+    CONTACT_NO_ANSWER,
+    CONTACT_REJECTED,
+    CONTACT_REPLIED,
+    STATUS_ISSUED,
+    STATUS_NEW,
+    Base,
+    CollectorState,
+    Lead,
+    ProviderState,
+)
 
 engine: AsyncEngine = create_async_engine(settings.DB_URL, echo=False)
 async_session_maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
@@ -31,7 +42,9 @@ async def init_db(target_engine: AsyncEngine | None = None) -> None:
 
 
 # Nullable columns added to `leads` after the first release. Old rows need no backfill.
-NEW_LEAD_COLUMNS: tuple[str, ...] = ("email", "source_url", "issued_at")
+NEW_LEAD_COLUMNS: tuple[str, ...] = ("email", "source_url", "issued_at", "contact_status")
+# Blocks in a row after which a provider stays off until an admin turns it on.
+MAX_CONSECUTIVE_BLOCKS: int = 3
 
 
 def _add_missing_columns(sync_conn: Connection) -> None:
@@ -41,6 +54,20 @@ def _add_missing_columns(sync_conn: Connection) -> None:
         if name not in existing:
             ddl_type = Lead.__table__.c[name].type.compile(dialect=sync_conn.dialect)
             sync_conn.execute(text(f"ALTER TABLE leads ADD COLUMN {name} {ddl_type}"))
+            if name == "contact_status":
+                _move_contact_results_out_of_crm_status(sync_conn)
+
+
+def _move_contact_results_out_of_crm_status(sync_conn: Connection) -> None:
+    """Before contact_status existed, these results were stored in crm_status of handed-out leads."""
+    for status in (CONTACT_CONTACTED, CONTACT_REPLIED, CONTACT_NO_ANSWER, CONTACT_REJECTED):
+        sync_conn.execute(
+            text(
+                "UPDATE leads SET contact_status = :status, crm_status = :issued "
+                "WHERE crm_status = :status AND issued_at IS NOT NULL"
+            ),
+            {"status": status, "issued": STATUS_ISSUED},
+        )
 
 
 def _create_missing_indexes(sync_conn: Connection) -> None:
@@ -212,7 +239,7 @@ async def return_undelivered_leads(session: AsyncSession, lead_ids: list[int]) -
         return
     await session.execute(
         update(Lead)
-        .where(Lead.id.in_(lead_ids), Lead.crm_status == STATUS_ISSUED)
+        .where(Lead.id.in_(lead_ids), Lead.crm_status == STATUS_ISSUED, Lead.contact_status.is_(None))
         .values(crm_status=STATUS_NEW, issued_at=None)
     )
     await session.commit()
@@ -234,6 +261,80 @@ async def count_issued_leads(session: AsyncSession) -> int:
     """Number of leads ever handed out, whatever their status is now."""
     result = await session.execute(select(func.count(Lead.id)).where(Lead.issued_at.is_not(None)))
     return int(result.scalar_one())
+
+
+async def set_contact_status(session: AsyncSession, lead_id: int, status: str) -> None:
+    """Save what came of contacting a handed-out lead."""
+    await session.execute(update(Lead).where(Lead.id == lead_id).values(contact_status=status))
+    await session.commit()
+
+
+async def get_contact_status_counts(session: AsyncSession) -> dict[str, int]:
+    """Lead counts by the result of contacting them."""
+    result = await session.execute(
+        select(Lead.contact_status, func.count(Lead.id))
+        .where(Lead.contact_status.is_not(None))
+        .group_by(Lead.contact_status)
+    )
+    return {str(status): int(count) for status, count in result.all()}
+
+
+async def get_provider_states(session: AsyncSession) -> dict[str, ProviderState]:
+    """Known states of providers by name; a provider that has had no problems may have none."""
+    return {state.name: state for state in (await session.scalars(select(ProviderState))).all()}
+
+
+async def _provider_state(session: AsyncSession, name: str) -> ProviderState:
+    state = await session.get(ProviderState, name)
+    if state is None:
+        state = ProviderState(name=name, consecutive_blocks=0)
+        session.add(state)
+        await session.flush()
+    return state
+
+
+async def record_provider_run(session: AsyncSession, name: str) -> None:
+    """Remember when a provider that must not run often was started."""
+    state = await _provider_state(session, name)
+    state.last_run_at = datetime.now(UTC)
+    await session.commit()
+
+
+async def record_provider_success(session: AsyncSession, name: str) -> None:
+    """The site answered normally: blocks are no longer 'in a row'."""
+    state = await session.get(ProviderState, name)
+    if state is not None and (state.consecutive_blocks or state.blocked_until is not None):
+        state.consecutive_blocks = 0
+        state.blocked_until = None
+        await session.commit()
+
+
+async def record_provider_block(
+    session: AsyncSession, name: str, reason: str, backoff_hours: float
+) -> ProviderState:
+    """
+    Register a refusal from a site: the pause doubles with every block in a row,
+    and after MAX_CONSECUTIVE_BLOCKS the provider stays off until an admin turns it on.
+    """
+    state = await _provider_state(session, name)
+    now = datetime.now(UTC)
+    state.consecutive_blocks += 1
+    state.last_block_reason = reason[:512]
+    state.last_block_at = now
+    state.blocked_until = now + timedelta(hours=backoff_hours * 2 ** (state.consecutive_blocks - 1))
+    if state.consecutive_blocks >= MAX_CONSECUTIVE_BLOCKS:
+        state.disabled_at = now
+    await session.commit()
+    return state
+
+
+async def enable_provider(session: AsyncSession, name: str) -> None:
+    """An admin's decision: forget the blocks and the pause."""
+    state = await _provider_state(session, name)
+    state.consecutive_blocks = 0
+    state.blocked_until = None
+    state.disabled_at = None
+    await session.commit()
 
 
 async def get_collector_state(session: AsyncSession) -> CollectorState:

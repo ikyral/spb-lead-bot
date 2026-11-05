@@ -10,9 +10,12 @@ STATUS_NEW = "new"
 STATUS_IN_WORK = "in_work"
 STATUS_REJECTED = "rejected"
 STATUS_ISSUED = "issued"
-STATUS_CONTACTED = "contacted"
-STATUS_REPLIED = "replied"
-STATUS_NO_ANSWER = "no_answer"
+
+# What came of contacting a handed-out lead (leads.contact_status).
+CONTACT_CONTACTED = "contacted"
+CONTACT_REPLIED = "replied"
+CONTACT_REJECTED = "rejected"
+CONTACT_NO_ANSWER = "no_answer"
 
 
 class UTCDateTime(TypeDecorator[datetime]):
@@ -77,12 +80,28 @@ class Lead(Base):
     email: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
     source_url: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
     issued_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    contact_status: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
 
     def __repr__(self) -> str:
         return (
             f"<Lead id={self.id} external_id={self.external_id!r} "
             f"name={self.name!r} score={self.score} crm_status={self.crm_status!r}>"
         )
+
+
+class ProviderState(Base):
+    """How a source has been treating the bot: blocks, the pause after them, automatic switch-off."""
+
+    __tablename__ = "provider_state"
+
+    name: Mapped[str] = mapped_column(String(32), primary_key=True)
+    consecutive_blocks: Mapped[int] = mapped_column(Integer, default=0)
+    blocked_until: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    # Set after too many blocks in a row; only an admin's command clears it.
+    disabled_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    last_block_reason: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
+    last_block_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    last_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
 
 
 class CollectorState(Base):
