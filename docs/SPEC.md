@@ -26,6 +26,9 @@ Find local businesses in Saint Petersburg (SPb) that need website development se
 - `source_url`: String(512), Nullable (the organization's card in the source)
 - `issued_at`: DateTime, Nullable (when the lead was handed out to an admin)
 - `contact_status`: String(32), Nullable (`contacted`, `replied`, `rejected`, `no_answer`)
+- `contact_status_by_id`: BigInteger, Nullable (Telegram ID of the admin who set the status)
+- `contact_status_by`: String(128), Nullable (their @username or name at that moment)
+- `contact_status_at`: DateTime, Nullable (when the status was set)
 
 The `collector_state` table has a single row with the automatic collection switch, the result of the last run, the position in the search targets and the daily request count. The `provider_state` table holds blocks of each source: how many in a row, the pause after them, the automatic switch-off and the last run.
 
