@@ -97,6 +97,8 @@ def _describe_topup(decision: TopupDecision) -> str:
         return "🔄 Сбор уже идёт, итог пришлю."
     if decision.outcome is TopupOutcome.COOLDOWN and decision.retry_at is not None:
         return f"⏳ Внеочередной сбор возможен не чаще раза в час, следующий: {format_msk_time(decision.retry_at)}."
+    if decision.outcome is TopupOutcome.EXTERNAL:
+        return "📥 Лиды приходят с внешнего сборщика: нужен новый файл импорта."
     if decision.outcome is TopupOutcome.DAILY_LIMIT:
         return "🛑 Суточный лимит запросов исчерпан, сбор продолжится завтра."
     return "⏸ Автосбор выключен. Запустить вручную: /collect_now"

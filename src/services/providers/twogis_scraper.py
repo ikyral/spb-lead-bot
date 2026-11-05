@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from src.config import Settings
 from src.services.api_client import (
     ProviderBlockedError,
     ProviderBudgetExhausted,
@@ -44,6 +45,20 @@ class ScraperOptions:
     max_results_per_run: int = 300
     min_hours_between_runs: float = 20.0
     page_timeout_seconds: float = 45.0
+    headless: bool = True
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "ScraperOptions":
+        return cls(
+            city_slug=settings.SCRAPER_CITY_SLUG,
+            min_delay_seconds=settings.SCRAPER_MIN_DELAY_SECONDS,
+            max_delay_seconds=settings.SCRAPER_MAX_DELAY_SECONDS,
+            max_pages_per_run=settings.SCRAPER_MAX_PAGES_PER_RUN,
+            max_results_per_run=settings.SCRAPER_MAX_RESULTS_PER_RUN,
+            min_hours_between_runs=settings.SCRAPER_MIN_HOURS_BETWEEN_RUNS,
+            page_timeout_seconds=settings.SCRAPER_PAGE_TIMEOUT_SECONDS,
+            headless=settings.SCRAPER_HEADLESS,
+        )
 
 
 class BrowserSession(Protocol):
@@ -81,7 +96,9 @@ class TwoGisScraperProvider(BaseMapProvider):
         self._options = options or ScraperOptions()
         self.min_hours_between_runs = self._options.min_hours_between_runs
         self._session_factory = session_factory or (
-            lambda: PlaywrightSession(page_timeout_seconds=self._options.page_timeout_seconds)
+            lambda: PlaywrightSession(
+                page_timeout_seconds=self._options.page_timeout_seconds, headless=self._options.headless
+            )
         )
         self._robots_loader = robots_loader or (lambda: fetch_robots(twogis_site.BASE_URL, ROBOTS_AGENT))
         self._sleep = sleep

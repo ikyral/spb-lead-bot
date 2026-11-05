@@ -20,6 +20,7 @@ from src.database.models import (
     STATUS_NEW,
     Base,
     CollectorState,
+    ImportLog,
     Lead,
     ProviderState,
 )
@@ -50,20 +51,26 @@ NEW_LEAD_COLUMNS: tuple[str, ...] = (
     "contact_status_by_id",
     "contact_status_by",
     "contact_status_at",
+    "exported_at",
+    "imported_at",
 )
+# The same for the collector_state table.
+NEW_STATE_COLUMNS: tuple[str, ...] = ("last_pool_reminder_at",)
 # Blocks in a row after which a provider stays off until an admin turns it on.
 MAX_CONSECUTIVE_BLOCKS: int = 3
 
 
 def _add_missing_columns(sync_conn: Connection) -> None:
     """create_all() does not alter existing tables, so older databases get new columns here."""
-    existing = {column["name"] for column in inspect(sync_conn).get_columns("leads")}
-    for name in NEW_LEAD_COLUMNS:
-        if name not in existing:
-            ddl_type = Lead.__table__.c[name].type.compile(dialect=sync_conn.dialect)
-            sync_conn.execute(text(f"ALTER TABLE leads ADD COLUMN {name} {ddl_type}"))
-            if name == "contact_status":
-                _move_contact_results_out_of_crm_status(sync_conn)
+    for model, names in ((Lead, NEW_LEAD_COLUMNS), (CollectorState, NEW_STATE_COLUMNS)):
+        table_name = model.__tablename__
+        existing = {column["name"] for column in inspect(sync_conn).get_columns(table_name)}
+        for name in names:
+            if name not in existing:
+                ddl_type = model.__table__.c[name].type.compile(dialect=sync_conn.dialect)
+                sync_conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {name} {ddl_type}"))
+                if name == "contact_status":
+                    _move_contact_results_out_of_crm_status(sync_conn)
 
 
 def _move_contact_results_out_of_crm_status(sync_conn: Connection) -> None:
@@ -296,6 +303,58 @@ async def get_contact_status_counts(session: AsyncSession) -> dict[str, int]:
         .group_by(Lead.contact_status)
     )
     return {str(status): int(count) for status, count in result.all()}
+
+
+async def get_unexported_leads(session: AsyncSession, limit: int) -> list[Lead]:
+    """The oldest leads that have not gone into an export file yet."""
+    stmt = select(Lead).where(Lead.exported_at.is_(None)).order_by(Lead.created_at, Lead.id).limit(limit)
+    return list((await session.scalars(stmt)).all())
+
+
+async def mark_leads_exported(session: AsyncSession, lead_ids: list[int], exported_at: datetime) -> None:
+    """Remember that these leads went into a file, so they are not exported again."""
+    for start in range(0, len(lead_ids), _EXISTENCE_CHECK_CHUNK):
+        chunk = lead_ids[start:start + _EXISTENCE_CHECK_CHUNK]
+        await session.execute(update(Lead).where(Lead.id.in_(chunk)).values(exported_at=exported_at))
+    await session.commit()
+
+
+async def add_import_log(
+    session: AsyncSession,
+    source: str,
+    file_name: str,
+    ok: bool,
+    error: str | None,
+    total: int,
+    saved_new: int,
+    duplicates: int,
+    rejected: int,
+) -> None:
+    """Record the outcome of importing a file."""
+    session.add(
+        ImportLog(
+            source=source,
+            file_name=file_name[:255],
+            ok=ok,
+            error=error[:512] if error else None,
+            total=total,
+            saved_new=saved_new,
+            duplicates=duplicates,
+            rejected=rejected,
+        )
+    )
+    await session.commit()
+
+
+async def get_last_import(session: AsyncSession) -> ImportLog | None:
+    """The most recent imported file, if any."""
+    return (await session.scalars(select(ImportLog).order_by(ImportLog.id.desc()).limit(1))).first()
+
+
+async def count_imported_leads(session: AsyncSession) -> int:
+    """Number of leads that came from export files."""
+    result = await session.execute(select(func.count(Lead.id)).where(Lead.imported_at.is_not(None)))
+    return int(result.scalar_one())
 
 
 async def get_provider_states(session: AsyncSession) -> dict[str, ProviderState]:

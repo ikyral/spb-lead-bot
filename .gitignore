@@ -10,6 +10,11 @@ env/
 *.sqlite3
 *.db-journal
 
+# Сборщик и импорт: выгрузки лидов, логи и входящие файлы
+exports/
+logs/
+data/inbox/
+
 # Кэш Python и тестов
 __pycache__/
 *.py[cod]

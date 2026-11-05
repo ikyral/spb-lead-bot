@@ -42,8 +42,9 @@ class PageSnapshot:
 class PlaywrightSession:
     """One browser, one context, one page: requests can only go one at a time."""
 
-    def __init__(self, page_timeout_seconds: float = 45.0) -> None:
+    def __init__(self, page_timeout_seconds: float = 45.0, headless: bool = True) -> None:
         self._timeout_ms = page_timeout_seconds * 1000
+        self._headless = headless
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
@@ -56,7 +57,7 @@ class PlaywrightSession:
 
         try:
             self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(headless=True)
+            self._browser = await self._playwright.chromium.launch(headless=self._headless)
             self._context = await self._browser.new_context(locale="ru-RU")
             self._page = await self._context.new_page()
         except PlaywrightError as exc:

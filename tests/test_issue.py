@@ -630,6 +630,9 @@ def test_collector_status_before_the_first_run_and_after_it() -> None:
         requests_today=3,
         max_requests_per_day=200,
         provider_states={},
+        external_mode=False,
+        last_import=None,
+        imported_total=0,
     )
     text_ = format_collector_status(status)
     assert "06.11.2026 04:00 МСК" in text_
@@ -712,6 +715,9 @@ def test_status_shows_paused_and_switched_off_providers() -> None:
         requests_today=0,
         max_requests_per_day=200,
         provider_states={"2gis_scraper": paused, "other": off},
+        external_mode=False,
+        last_import=None,
+        imported_total=0,
     )
     text_ = format_collector_status(status)
     assert "⏸ 2gis_scraper: пауза до" in text_
@@ -723,6 +729,7 @@ def test_status_shows_paused_and_switched_off_providers() -> None:
 
 async def test_collect_commands_answer_and_switch() -> None:
     runner = MagicMock()
+    runner.external_mode = False
     runner.start_in_background = MagicMock(side_effect=[True, False])
     runner.set_auto_enabled = AsyncMock()
 
@@ -811,6 +818,7 @@ def guarded_dispatcher(monkeypatch: pytest.MonkeyPatch) -> Dispatcher:
 @pytest.mark.parametrize(("user_id", "allowed"), [(100, True), (200, True), (999, False)])
 async def test_commands_reach_only_admins_through_the_real_dispatcher(guarded_dispatcher, user_id, allowed) -> None:
     runner = MagicMock()
+    runner.external_mode = False
     runner.start_in_background = MagicMock(return_value=True)
     await guarded_dispatcher.feed_update(_bot(), _update(1, user_id, "/collect_now"), collector_runner=runner)
     assert runner.start_in_background.called is allowed
@@ -892,6 +900,9 @@ ROLLBACK_SCHEMA = [
     "ALTER TABLE leads DROP COLUMN contact_status_by_id",
     "ALTER TABLE leads DROP COLUMN contact_status_by",
     "ALTER TABLE leads DROP COLUMN contact_status_at",
+    "ALTER TABLE leads DROP COLUMN exported_at",
+    "ALTER TABLE leads DROP COLUMN imported_at",
+    "DROP TABLE import_log",
     "DROP TABLE collector_state",
     "DROP TABLE provider_state",
 ]
