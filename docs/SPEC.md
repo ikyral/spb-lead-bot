@@ -19,9 +19,14 @@ Find local businesses in Saint Petersburg (SPb) that need website development se
 - `raw_website`: String(512), Nullable
 - `site_status`: String(32), Not Null (`no_site`, `social_only`, `dead_site`, `has_site`)
 - `score`: Integer, Not Null, Default 0 (Range: 0..100)
-- `crm_status`: String(32), Not Null, Default `new` (`new`, `in_work`, `rejected`)
+- `crm_status`: String(32), Not Null, Default `new` (`new`, `in_work`, `rejected`, and for handed-out leads `issued`, `contacted`, `replied`, `no_answer`)
 - `map_url`: String(512), Nullable
 - `created_at`: DateTime, Default UTC Now
+- `email`: String(255), Nullable (only an address published in the public card)
+- `source_url`: String(512), Nullable (the organization's card in the source)
+- `issued_at`: DateTime, Nullable (when the lead was handed out to an admin)
+
+The `collector_state` table has a single row with the automatic collection switch, the result of the last run, the position in the search targets and the daily request count.
 
 ## 3. Saint Petersburg Districts Bounding Boxes (SPB_DISTRICTS)
 Format: `(south_lat, west_lon, north_lat, east_lon)`
