@@ -8,8 +8,6 @@ services:
         APP_GID: ${APP_GID:-1000}
     container_name: spb-lead-bot
     restart: unless-stopped
-    # Reaps exited Chromium processes: the bot runs as PID 1 and would leave them as zombies.
-    init: true
     env_file:
       - .env
     environment:
