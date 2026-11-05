@@ -73,7 +73,7 @@ async def test_main_refuses_to_start_with_invalid_schedule(monkeypatch: pytest.M
 
 @pytest.mark.asyncio
 async def test_main_wires_the_collector_into_the_bot_lifetime(monkeypatch: pytest.MonkeyPatch, session_maker) -> None:
-    """Without a 2GIS key the bot starts as usual; the scheduler runs exactly while polling runs."""
+    """By default only OSM is used; the scheduler runs exactly while polling runs."""
     from aiogram import Dispatcher
 
     seen: dict = {}
@@ -104,8 +104,8 @@ async def test_main_wires_the_collector_into_the_bot_lifetime(monkeypatch: pytes
     assert seen["scheduler_running"] is True
     assert seen["scheduler_running_after"] is False
     assert status.next_run_at is not None
-    assert status.active_providers == ["2gis_scraper", "osm"]
-    assert status.disabled_providers == {"2gis": "не задан DGIS_API_KEY"}
+    assert status.active_providers == ["osm"]
+    assert status.disabled_providers == {}
 
 
 def test_invalid_value_in_environment_is_reported_not_a_crash_on_import() -> None:

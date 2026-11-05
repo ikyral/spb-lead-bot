@@ -15,7 +15,8 @@ class Settings(BaseSettings):
     # SecretStr masks the values in repr()/str(), logs and tracebacks; use .get_secret_value().
     BOT_TOKEN: SecretStr
     ADMIN_TG_ID: int
-    # Optional fallback for the scraper. DGIS_API_KEY and the older name TWOGIS_API_KEY both work.
+    # For manual search and, if listed in COLLECT_PROVIDERS, collection.
+    # DGIS_API_KEY and the older name TWOGIS_API_KEY both work.
     TWOGIS_API_KEY: SecretStr | None = Field(
         default=None, validation_alias=AliasChoices("DGIS_API_KEY", "TWOGIS_API_KEY")
     )
@@ -33,7 +34,8 @@ class Settings(BaseSettings):
     COLLECT_INTERVAL_MINUTES: int | None = Field(default=None, ge=1)  # when set, replaces COLLECT_CRON
     COLLECT_TIMEZONE: str = "Europe/Moscow"
     COLLECT_RUN_ON_START: bool = False
-    COLLECT_PROVIDERS: str = "2gis_scraper,2gis,osm"
+    # 2gis_scraper and 2gis are opt-in: the site answers the scraper with a captcha, the API costs money.
+    COLLECT_PROVIDERS: str = "osm"
     COLLECT_QUERIES: str = ""  # category keys and/or free-text queries; empty = all categories
     COLLECT_DISTRICTS: str = ""  # empty = all SPb districts
     COLLECT_BBOX: str = ""  # 'south,west,north,east'; replaces COLLECT_DISTRICTS
