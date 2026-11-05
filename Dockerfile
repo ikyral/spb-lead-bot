@@ -14,6 +14,10 @@ WORKDIR /app
 COPY requirements.txt requirements.lock ./
 RUN pip install --no-cache-dir -r requirements.lock
 
+# Chromium for reading public pages of 2GIS, available to the unprivileged user.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN python -m playwright install --with-deps chromium
+
 RUN groupadd --gid "${APP_GID}" app \
     && useradd --uid "${APP_UID}" --gid app --home-dir /app --no-create-home --shell /usr/sbin/nologin app \
     && mkdir -p /app/db \
