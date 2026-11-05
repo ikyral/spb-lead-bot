@@ -29,8 +29,10 @@ Find local businesses in Saint Petersburg (SPb) that need website development se
 - `contact_status_by_id`: BigInteger, Nullable (Telegram ID of the admin who set the status)
 - `contact_status_by`: String(128), Nullable (their @username or name at that moment)
 - `contact_status_at`: DateTime, Nullable (when the status was set)
+- `exported_at`: DateTime, Nullable (on a collector's computer: when the lead went into an export file)
+- `imported_at`: DateTime, Nullable (on the server: when the lead arrived from an export file)
 
-The `collector_state` table has a single row with the automatic collection switch, the result of the last run, the position in the search targets and the daily request count. The `provider_state` table holds blocks of each source: how many in a row, the pause after them, the automatic switch-off and the last run.
+The `collector_state` table has a single row with the automatic collection switch, the result of the last run, the position in the search targets and the daily request count. The `import_log` table records each imported file with counts only, never the content of leads. The `provider_state` table holds blocks of each source: how many in a row, the pause after them, the automatic switch-off and the last run.
 
 ## 3. Saint Petersburg Districts Bounding Boxes (SPB_DISTRICTS)
 Format: `(south_lat, west_lon, north_lat, east_lon)`
