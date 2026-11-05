@@ -121,7 +121,7 @@ class TwoGisScraperProvider(BaseMapProvider):
         url = twogis_site.build_search_url(self._options.city_slug, text, page)
         snapshot = await self._open(url, twogis_site.is_search_response)
 
-        data = twogis_site.read_search_bodies(snapshot.json_bodies)
+        data = twogis_site.read_search_bodies(snapshot.json_bodies, snapshot.html)
         if data is None:
             raise ProviderBlockedError("страница не распознана: нет данных в ожидаемом формате")
 
@@ -206,7 +206,7 @@ class TwoGisScraperProvider(BaseMapProvider):
             except ProviderBlockedError as exc:
                 result.blocked = str(exc)
                 continue
-            card = twogis_site.read_card_body(snapshot.json_bodies, firm_id)
+            card = twogis_site.read_card_body(snapshot.json_bodies, firm_id, snapshot.html)
             if card is None:
                 result.blocked = "карточка организации не распознана: нет данных в ожидаемом формате"
                 continue
