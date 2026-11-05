@@ -1,6 +1,6 @@
 from pathlib import Path, PurePosixPath
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -13,13 +13,13 @@ class Settings(BaseSettings):
     """Application configuration loaded from environment variables and .env file."""
 
     # SecretStr masks the values in repr()/str(), logs and tracebacks; use .get_secret_value().
-    BOT_TOKEN: SecretStr
-    ADMIN_TG_ID: int
+    # Required by main.py. The collector for a separate computer (collect_cli.py) works without them.
+    BOT_TOKEN: SecretStr = SecretStr("")
+    ADMIN_TG_ID: int = 0
     # For manual search and, if listed in COLLECT_PROVIDERS, collection.
-    # DGIS_API_KEY and the older name TWOGIS_API_KEY both work.
-    TWOGIS_API_KEY: SecretStr | None = Field(
-        default=None, validation_alias=AliasChoices("DGIS_API_KEY", "TWOGIS_API_KEY")
-    )
+    # DGIS_API_KEY and the older name TWOGIS_API_KEY both work; DGIS_API_KEY wins.
+    TWOGIS_API_KEY: SecretStr | None = None
+    DGIS_API_KEY: SecretStr | None = None
     DB_URL: str = "sqlite+aiosqlite:///./leads.db"
     # Additional admins, comma-separated. ADMIN_TG_ID stays required and is always an admin.
     ADMIN_TG_IDS: str = ""
@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     LEADS_MIN_POOL: int = Field(default=60, ge=0)
 
     # Automatic collection. Search targets and the schedule are validated by src.services.collector.
+    # false, or an empty COLLECT_PROVIDERS, means leads come from an external collector as files.
     COLLECT_ENABLED: bool = True
     COLLECT_CRON: str = "0 4 * * *"
     COLLECT_INTERVAL_MINUTES: int | None = Field(default=None, ge=1)  # when set, replaces COLLECT_CRON
@@ -60,13 +61,42 @@ class Settings(BaseSettings):
     SCRAPER_BLOCK_BACKOFF_HOURS: float = Field(default=6.0, ge=2.0)
     SCRAPER_PAGE_TIMEOUT_SECONDS: float = Field(default=45.0, ge=5.0)
 
+    SCRAPER_HEADLESS: bool = True  # false only for manual debugging on a computer with a screen
+
+    # The collector for a separate computer (collect_cli.py). Relative paths are from the project root.
+    COLLECTOR_PROVIDERS: str = "2gis_scraper"
+    COLLECTOR_DB_PATH: str = "data/collector.db"
+    COLLECTOR_EXPORT_DIR: str = "exports"
+
+    # Importing export files on the server. Telegram lets bots download at most 20 MB.
+    IMPORT_MAX_FILE_BYTES: int = Field(default=5 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024)
+    IMPORT_MAX_LEADS: int = Field(default=2000, ge=1)
+    IMPORT_INBOX_DIR: str = "data/inbox"
+    IMPORT_INBOX_INTERVAL_SECONDS: int = Field(default=300, ge=0)  # 0 = do not watch the folder
+
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
-        # 'COLLECT_INTERVAL_MINUTES=' in .env means "not set", not an invalid integer.
-        env_ignore_empty=True,
     )
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _blank_means_default(cls, value: object, info: ValidationInfo) -> object:
+        """
+        'COLLECT_INTERVAL_MINUTES=' in .env means "not set", not an invalid integer.
+
+        The exception is COLLECT_PROVIDERS: an empty list has a meaning of its own.
+        """
+        if value == "" and info.field_name and info.field_name != "COLLECT_PROVIDERS":
+            return cls.model_fields[info.field_name].get_default(call_default_factory=True)
+        return value
+
+    @model_validator(mode="after")
+    def _use_preferred_key_name(self) -> "Settings":
+        if self.DGIS_API_KEY:
+            self.TWOGIS_API_KEY = self.DGIS_API_KEY
+        return self
 
     @field_validator("ADMIN_TG_IDS")
     @classmethod
@@ -117,6 +147,12 @@ class Settings(BaseSettings):
         # URL-escaping a Windows drive ('C:' -> 'C%3A') that render_as_string would do.
         start = value.index(database)
         return value[:start] + resolved + value[start + len(database):]
+
+
+def resolve_path(value: str) -> Path:
+    """A path from the settings, relative ones counted from the project root."""
+    path = Path(value)
+    return path if path.is_absolute() else PROJECT_ROOT / path
 
 
 settings_error: Exception | None = None

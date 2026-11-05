@@ -41,6 +41,7 @@ async def _process_and_save_places(
     places: list[RawPlace],
     concurrency: int = CHECK_CONCURRENCY,
     progress: ProgressCallback | None = None,
+    extra_fields: dict[str, Any] | None = None,
 ) -> dict[str, int]:
     """
     Verify places concurrently, score them, and persist qualified leads.
@@ -133,6 +134,7 @@ async def _process_and_save_places(
             "map_url": place.map_url,
             "email": place.email,
             "source_url": place.source_url,
+            **(extra_fields or {}),
         })
 
     # One transaction for the whole harvest instead of a commit per lead (~30x faster on SQLite).
@@ -147,7 +149,9 @@ async def _process_and_save_places(
     }
 
 
-async def save_collected_places(session: AsyncSession, places: list[RawPlace]) -> dict[str, int]:
+async def save_collected_places(
+    session: AsyncSession, places: list[RawPlace], extra_fields: dict[str, Any] | None = None
+) -> dict[str, int]:
     """
     Verify, score and save places from automatic collection.
 
@@ -163,7 +167,7 @@ async def save_collected_places(session: AsyncSession, places: list[RawPlace]) -
         if place.external_id not in known_ids
         and known_leads.find(place.name, place.phone, place.map_url, place.address) is None
     ]
-    stats = await _process_and_save_places(session, fresh)
+    stats = await _process_and_save_places(session, fresh, extra_fields=extra_fields)
     stats["total_found"] = len(places)
     stats["duplicates_skipped"] += len(places) - len(fresh)
     return stats

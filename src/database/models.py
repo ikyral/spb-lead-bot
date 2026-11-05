@@ -85,6 +85,10 @@ class Lead(Base):
     contact_status_by_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
     contact_status_by: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
     contact_status_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    # On a collector's computer: when the lead went into an export file.
+    exported_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    # On the server: when the lead arrived from an export file.
+    imported_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
 
     def __repr__(self) -> str:
         return (
@@ -106,6 +110,23 @@ class ProviderState(Base):
     last_block_reason: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
     last_block_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
     last_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+
+
+class ImportLog(Base):
+    """One imported file: only counts and fixed reasons, never the content of leads."""
+
+    __tablename__ = "import_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    finished_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=lambda: datetime.now(UTC))
+    source: Mapped[str] = mapped_column(String(32))
+    file_name: Mapped[str] = mapped_column(String(255))
+    ok: Mapped[bool] = mapped_column(Boolean)
+    error: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    saved_new: Mapped[int] = mapped_column(Integer, default=0)
+    duplicates: Mapped[int] = mapped_column(Integer, default=0)
+    rejected: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class CollectorState(Base):
@@ -133,3 +154,5 @@ class CollectorState(Base):
     # API requests spent on requests_day (date in COLLECT_TIMEZONE, ISO format).
     requests_day: Mapped[str | None] = mapped_column(String(10), nullable=True, default=None)
     requests_used: Mapped[int] = mapped_column(Integer, default=0)
+    # With an external collector: when admins were last asked to bring a new file.
+    last_pool_reminder_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)

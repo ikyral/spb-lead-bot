@@ -18,6 +18,11 @@ db/
 **/*.sqlite3
 **/*.db-journal
 
+# Выгрузки лидов, логи и входящие файлы в образ не нужны
+exports/
+logs/
+data/inbox/
+
 # Кэш Python и тестов (в .dockerignore шаблоны без **/ действуют только в корне)
 **/__pycache__/
 **/*.py[cod]
