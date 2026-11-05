@@ -1,0 +1,8 @@
+{
+  "meta": {
+    "api_version": "3.0.0",
+    "code": 403,
+    "error": {"type": "keyIsBlocked", "message": "Key SECRET-KEY is blocked"},
+    "issue_date": "20261105"
+  }
+}

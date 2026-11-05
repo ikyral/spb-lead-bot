@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.database.repo import get_lead_fingerprints, save_new_leads
+from src.database.repo import find_existing_external_ids, get_lead_fingerprints, save_new_leads
 from src.services.checker import analyze_website, create_check_client
 from src.services.dedup import DuplicateIndex, merge_duplicate_places
 from src.services.providers.base import RawPlace
@@ -27,6 +27,13 @@ MAX_CSV_PLACES: int = 2000
 
 # Called as progress(done, total) after each website check.
 ProgressCallback = Callable[[int, int], Awaitable[None]]
+
+
+async def _load_known_leads(session: AsyncSession) -> DuplicateIndex:
+    known_leads = DuplicateIndex()
+    for key, (name, phone, map_url, address) in enumerate(await get_lead_fingerprints(session)):
+        known_leads.add(key, name, phone, map_url, address)
+    return known_leads
 
 
 async def _process_and_save_places(
@@ -86,9 +93,7 @@ async def _process_and_save_places(
     duplicates_skipped = 0
     leads_to_save: list[dict[str, Any]] = []
 
-    known_leads = DuplicateIndex()
-    for key, (name, phone, map_url) in enumerate(await get_lead_fingerprints(session)):
-        known_leads.add(key, name, phone, map_url)
+    known_leads = await _load_known_leads(session)
 
     for place, site_status, details in results:
         socials = place.socials
@@ -108,7 +113,7 @@ async def _process_and_save_places(
 
         qualified += 1
 
-        if known_leads.find(place.name, place.phone, place.map_url) is not None:
+        if known_leads.find(place.name, place.phone, place.map_url, place.address) is not None:
             duplicates_skipped += 1
             continue
 
@@ -126,6 +131,8 @@ async def _process_and_save_places(
             "score": score,
             "crm_status": "new",
             "map_url": place.map_url,
+            "email": place.email,
+            "source_url": place.source_url,
         })
 
     # One transaction for the whole harvest instead of a commit per lead (~30x faster on SQLite).
@@ -138,6 +145,28 @@ async def _process_and_save_places(
         "saved_new": saved_new,
         "duplicates_skipped": duplicates_skipped,
     }
+
+
+async def save_collected_places(session: AsyncSession, places: list[RawPlace]) -> dict[str, int]:
+    """
+    Verify, score and save places from automatic collection.
+
+    Runs repeat, so most places are already known: they are skipped before the website
+    check and never touched, whatever happened to the lead (issued, contacted, rejected).
+    """
+    merged = merge_duplicate_places(places)
+    known_ids = await find_existing_external_ids(session, [place.external_id for place in merged])
+    known_leads = await _load_known_leads(session)
+    fresh = [
+        place
+        for place in merged
+        if place.external_id not in known_ids
+        and known_leads.find(place.name, place.phone, place.map_url, place.address) is None
+    ]
+    stats = await _process_and_save_places(session, fresh)
+    stats["total_found"] = len(places)
+    stats["duplicates_skipped"] += len(places) - len(fresh)
+    return stats
 
 
 async def run_lead_harvest(

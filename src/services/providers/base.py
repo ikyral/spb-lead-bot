@@ -72,12 +72,51 @@ class RawPlace:
     raw_website: str | None = None
     map_url: str | None = None
     high_margin: bool = False
+    email: str | None = None  # only an address published in the organization's public card
+    source_url: str | None = None  # the organization's card in the source
+
+
+@dataclass(frozen=True)
+class SearchQuery:
+    """What to look for: a niche from TARGET_CATEGORIES or a free-text query."""
+
+    text: str
+    category: str
+    high_margin: bool = False
+    osm_tags: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class SearchArea:
+    """Where to look: (south, west, north, east) bounding box, and the district if it is one."""
+
+    bbox: tuple[float, float, float, float]
+    district: str | None = None
+
+
+@dataclass
+class SearchPage:
+    """One page of results. `warning` reports a problem with the data that is not a failed request."""
+
+    places: list[RawPlace]
+    has_more: bool = False
+    warning: str | None = None
 
 
 class BaseMapProvider(ABC):
     """Abstract base class for external map providers."""
 
+    # Value of COLLECT_PROVIDERS that enables the provider.
+    name: str = ""
+
     @abstractmethod
     async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:
-        """Search places in specified district and category."""
+        """Interactive search: API errors are logged, whatever was found is returned."""
+        ...
+
+    @abstractmethod
+    async def search(
+        self, query: SearchQuery, area: SearchArea, page: int = 1, page_size: int = 50
+    ) -> SearchPage:
+        """Collection: one page, one API request. API errors raise ProviderError."""
         ...

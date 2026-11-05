@@ -11,7 +11,9 @@ from src.services.providers.base import RawPlace
 SAME_PLACE_MAX_DISTANCE_M: float = 150.0
 
 # Fields copied from a duplicate when the kept place has no value.
-_FILLABLE_FIELDS: tuple[str, ...] = ("district", "address", "phone", "socials", "map_url")
+_FILLABLE_FIELDS: tuple[str, ...] = (
+    "district", "address", "phone", "socials", "map_url", "email", "source_url",
+)
 
 _PHONE_SEPARATORS_RE = re.compile(r"[,;]")
 _NON_DIGITS_RE = re.compile(r"\D")
@@ -48,6 +50,12 @@ def normalize_name(name: str | None) -> str:
     return " ".join(_NON_WORD_RE.sub(" ", primary).split())
 
 
+def normalize_address_key(address: str | None) -> str:
+    """Normalize an address for comparison: case, 'ё' and punctuation are ignored."""
+    lowered = (address or "").lower().replace("ё", "е")
+    return " ".join(_NON_WORD_RE.sub(" ", lowered).split())
+
+
 def coords_from_map_url(map_url: str | None) -> tuple[float, float] | None:
     """Extract (lat, lon) from a provider map URL, or None if it has no coordinates."""
     match = _MAP_URL_POINT_RE.search(map_url or "")
@@ -66,13 +74,16 @@ def distance_m(a: tuple[float, float], b: tuple[float, float]) -> float:
 
 
 class DuplicateIndex:
-    """Lookup of known businesses by normalized phone, or by normalized name + proximity."""
+    """Lookup of known businesses by normalized phone, name + address, or name + proximity."""
 
     def __init__(self) -> None:
         self._by_phone: dict[str, int] = {}
         self._by_name: dict[str, list[tuple[int, tuple[float, float]]]] = {}
+        self._by_name_address: dict[tuple[str, str], int] = {}
 
-    def add(self, key: int, name: str | None, phone: str | None, map_url: str | None) -> None:
+    def add(
+        self, key: int, name: str | None, phone: str | None, map_url: str | None, address: str | None = None
+    ) -> None:
         """Register a business under the given key."""
         for number in normalize_phones(phone):
             self._by_phone.setdefault(number, key)
@@ -80,13 +91,21 @@ class DuplicateIndex:
         coords = coords_from_map_url(map_url)
         if norm_name and coords:
             self._by_name.setdefault(norm_name, []).append((key, coords))
+        norm_address = normalize_address_key(address)
+        if norm_name and norm_address:
+            self._by_name_address.setdefault((norm_name, norm_address), key)
 
-    def find(self, name: str | None, phone: str | None, map_url: str | None) -> int | None:
+    def find(
+        self, name: str | None, phone: str | None, map_url: str | None, address: str | None = None
+    ) -> int | None:
         """Return the key of a matching known business, or None."""
         for number in normalize_phones(phone):
             if number in self._by_phone:
                 return self._by_phone[number]
         norm_name = normalize_name(name)
+        norm_address = normalize_address_key(address)
+        if norm_name and norm_address and (norm_name, norm_address) in self._by_name_address:
+            return self._by_name_address[(norm_name, norm_address)]
         coords = coords_from_map_url(map_url)
         if norm_name and coords:
             for key, other in self._by_name.get(norm_name, []):
@@ -128,11 +147,11 @@ def merge_duplicate_places(places: list[RawPlace]) -> list[RawPlace]:
     merged: list[RawPlace] = []
     index = DuplicateIndex()
     for place in places:
-        key = index.find(place.name, place.phone, place.map_url)
+        key = index.find(place.name, place.phone, place.map_url, place.address)
         if key is None:
             merged.append(replace(place))
             key = len(merged) - 1
         else:
             _fill_from_duplicate(merged[key], place)
-        index.add(key, place.name, place.phone, place.map_url)
+        index.add(key, place.name, place.phone, place.map_url, place.address)
     return merged

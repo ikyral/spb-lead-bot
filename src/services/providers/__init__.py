@@ -5,6 +5,9 @@ from src.services.providers.base import (
     TARGET_CATEGORIES,
     BaseMapProvider,
     RawPlace,
+    SearchArea,
+    SearchPage,
+    SearchQuery,
 )
 from src.services.providers.csv_loader import parse_csv_leads
 from src.services.providers.osm import (
@@ -24,6 +27,9 @@ __all__ = [
     "BaseMapProvider",
     "OSMOverpassProvider",
     "RawPlace",
+    "SearchArea",
+    "SearchPage",
+    "SearchQuery",
     "TwoGisProvider",
     "parse_csv_leads",
 ]
