@@ -65,6 +65,8 @@ class Settings(BaseSettings):
     COLLECT_MAX_RESULTS_PER_QUERY: int = Field(default=100, ge=1)
     COLLECT_MAX_REQUESTS_PER_RUN: int = Field(default=60, ge=1)
     COLLECT_MAX_REQUESTS_PER_DAY: int = Field(default=200, ge=1)
+    # A fully walked search target of the 2GIS API is not requested again for this long.
+    COLLECT_RECHECK_DAYS: int = Field(default=30, ge=1)
 
     # The city in links to 2GIS cards, for the API provider as well.
     SCRAPER_CITY_SLUG: str = "spb"

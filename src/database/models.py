@@ -122,6 +122,18 @@ class ProviderState(Base):
     key_fingerprint: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
 
 
+class SearchProgress(Base):
+    """How far a provider with a limited quota has walked one search target."""
+
+    __tablename__ = "search_progress"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32))
+    next_page: Mapped[int] = mapped_column(Integer, default=1)
+    # All pages have been seen; the target is left alone until COLLECT_RECHECK_DAYS pass.
+    exhausted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+
+
 class ImportLog(Base):
     """One imported file: only counts and fixed reasons, never the content of leads."""
 

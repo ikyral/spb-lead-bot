@@ -23,6 +23,7 @@ from src.database.models import (
     ImportLog,
     Lead,
     ProviderState,
+    SearchProgress,
 )
 
 engine: AsyncEngine = create_async_engine(settings.DB_URL, echo=False)
@@ -487,6 +488,18 @@ async def enable_provider(session: AsyncSession, name: str) -> None:
     state.consecutive_blocks = 0
     state.blocked_until = None
     state.disabled_at = None
+    await session.commit()
+
+
+async def get_search_progress(session: AsyncSession) -> dict[str, SearchProgress]:
+    """How far every search target has been walked, by its key."""
+    return {row.key: row for row in (await session.scalars(select(SearchProgress))).all()}
+
+
+async def save_search_progress(session: AsyncSession, rows: list[SearchProgress]) -> None:
+    """Store new positions. Called after the leads of those pages are saved: otherwise a crash would lose them."""
+    for row in rows:
+        await session.merge(row)
     await session.commit()
 
 

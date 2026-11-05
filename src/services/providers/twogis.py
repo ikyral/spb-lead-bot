@@ -105,6 +105,7 @@ class TwoGisProvider(BaseMapProvider):
         self._options = options or TwoGisOptions()
         self._max_page_size = DEMO_PAGE_SIZE if self._options.demo_key else TWOGIS_PAGE_SIZE
         self._max_pages = DEMO_MAX_PAGES if self._options.demo_key else TWOGIS_MAX_PAGES
+        self.progress_scope = "demo" if self._options.demo_key else "full"
         self.auth_failure_hint = _AUTH_FAILURE_HINT + (
             _AUTH_FAILURE_CONTACTS_HINT if self._options.request_contacts else ""
         )

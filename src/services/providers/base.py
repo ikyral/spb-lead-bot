@@ -117,6 +117,9 @@ class BaseMapProvider(ABC):
     min_hours_between_runs: float = 0.0
     # When set, a rejected key switches the provider off until the key is replaced: this text explains it.
     auth_failure_hint: str | None = None
+    # When set, requests are too valuable to repeat: every target continues from the page where it
+    # stopped. Progress made under one scope does not count for another (a paid key sees more pages).
+    progress_scope: str | None = None
 
     @abstractmethod
     async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:

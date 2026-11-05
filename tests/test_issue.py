@@ -923,6 +923,7 @@ ROLLBACK_SCHEMA = [
     "DROP TABLE import_log",
     "DROP TABLE collector_state",
     "DROP TABLE provider_state",
+    "DROP TABLE search_progress",
 ]
 
 

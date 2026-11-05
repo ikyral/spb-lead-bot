@@ -29,7 +29,7 @@ from src.bot.keyboards import (
 from src.bot.middlewares import AdminOnlyMiddleware
 from src.bot.notifier import AdminNotifier
 from src.config import Settings
-from src.database.models import STATUS_ISSUED, STATUS_NEW, Lead, ProviderState
+from src.database.models import STATUS_ISSUED, STATUS_NEW, Lead, ProviderState, SearchProgress
 from src.database.repo import (
     MAX_CONSECUTIVE_BLOCKS,
     count_new_leads,
@@ -709,6 +709,148 @@ async def test_old_database_gets_a_counter_that_works(tmp_path: Path) -> None:
     await DgisQuota(maker, "KEY", DgisKeyPolicy(limit=5, reserve=0)).spend()
     assert await _used(maker) == 1
     await engine.dispose()
+
+
+# ---------- requests are not spent on what has been read ----------
+
+
+def _paged(total: int = 50, requests: list[httpx.Request] | None = None):
+    """An API with `total` organizations, ten on a page, recording what was asked."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if requests is not None:
+            requests.append(request)
+        page = int(request.url.params["page"])
+        first = (page - 1) * 10 + 1
+        return httpx.Response(200, json=_items(max(0, min(10, total - first + 1)), first=first, total=total))
+
+    return handler
+
+
+def _pages(requests: list[httpx.Request]) -> list[str]:
+    return [request.url.params["page"] for request in requests]
+
+
+async def test_next_run_continues_from_the_page_where_the_last_one_stopped(session_maker) -> None:
+    requests: list[httpx.Request] = []
+    provider = _provider(_paged(requests=requests))
+    config = _config(COLLECT_MAX_PAGES=2)
+
+    first = await collect_leads(session_maker, [provider], config)
+    second = await collect_leads(session_maker, [provider], config)
+    third = await collect_leads(session_maker, [provider], config)
+
+    assert _pages(requests) == ["1", "2", "3", "4", "5"]
+    assert [run.saved_new for run in (first, second, third)] == [20, 20, 10]
+
+
+async def test_walked_target_costs_nothing_and_the_report_says_why(session_maker) -> None:
+    requests: list[httpx.Request] = []
+    provider = _provider(_paged(total=15, requests=requests))
+    config = _config(COLLECT_MAX_PAGES=5)
+
+    await collect_leads(session_maker, [provider], config)
+    assert _pages(requests) == ["1", "2"]
+
+    again = await collect_leads(session_maker, [provider], config)
+    assert _pages(requests) == ["1", "2"]
+    assert again.requests == 0
+    assert again.errors == 0
+    assert "пройдены до конца" in again.skipped["2gis"]
+
+
+async def test_walked_target_is_read_again_after_the_recheck_period(session_maker) -> None:
+    requests: list[httpx.Request] = []
+    provider = _provider(_paged(total=5, requests=requests))
+    config = _config(COLLECT_RECHECK_DAYS=30)
+    await collect_leads(session_maker, [provider], config)
+
+    async with session_maker() as session:
+        row = (await session.scalars(select(SearchProgress))).one()
+        row.exhausted_at = datetime.now(UTC) - timedelta(days=31)
+        await session.commit()
+
+    await collect_leads(session_maker, [provider], config)
+    assert _pages(requests) == ["1", "1"]
+
+
+async def test_failed_page_is_requested_again(session_maker) -> None:
+    requests: list[httpx.Request] = []
+    healthy = _paged(requests=requests)
+    failing = {"on": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if failing["on"] and request.url.params["page"] == "2":
+            return httpx.Response(400, json={"meta": {"code": 400}})
+        return healthy(request)
+
+    provider = _provider(handler)
+    config = _config(COLLECT_MAX_PAGES=2)
+    await collect_leads(session_maker, [provider], config)
+    failing["on"] = False
+    await collect_leads(session_maker, [provider], config)
+    assert _pages(requests)[:3] == ["1", "2", "3"]
+
+
+async def test_position_is_not_saved_if_the_leads_were_not(session_maker, monkeypatch) -> None:
+    """Otherwise the pages of a failed run would be skipped for good."""
+    requests: list[httpx.Request] = []
+    provider = _provider(_paged(requests=requests))
+    config = _config(COLLECT_MAX_PAGES=1)
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("database")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("src.services.collector.save_collected_places", fail)
+        with pytest.raises(RuntimeError):
+            await collect_leads(session_maker, [provider], config)
+
+    await collect_leads(session_maker, [provider], config)
+    assert _pages(requests) == ["1", "1"]
+
+
+async def test_targets_keep_their_own_positions(session_maker) -> None:
+    requests: list[httpx.Request] = []
+    provider = _provider(_paged(requests=requests))
+    config = _config(COLLECT_QUERIES="dentist_clinic,beauty", COLLECT_MAX_PAGES=1)
+    await collect_leads(session_maker, [provider], config)
+    await collect_leads(session_maker, [provider], config)
+    asked = [(request.url.params["q"], request.url.params["page"]) for request in requests]
+    assert len(set(asked)) == 4
+
+
+async def test_paid_key_starts_over_and_sees_pages_a_demo_key_could_not(session_maker) -> None:
+    demo_requests: list[httpx.Request] = []
+    demo = _provider(_paged(total=100, requests=demo_requests))
+    await collect_leads(session_maker, [demo], _config(COLLECT_MAX_PAGES=5))
+    assert _pages(demo_requests) == ["1", "2", "3", "4", "5"]
+
+    paid_requests: list[httpx.Request] = []
+    paid = _provider(_paged(total=100, requests=paid_requests), TwoGisOptions(demo_key=False))
+    await collect_leads(session_maker, [paid], _config(COLLECT_MAX_PAGES=1, COLLECT_PAGE_SIZE=10))
+    assert _pages(paid_requests) == ["1"]
+
+
+async def test_page_is_not_cut_short_when_it_is_remembered_as_read(session_maker) -> None:
+    provider = _provider(_paged())
+    result = await collect_leads(session_maker, [provider], _config(COLLECT_MAX_RESULTS_PER_QUERY=3))
+    assert result.saved_new == 10
+
+
+async def test_other_sources_repeat_as_before(session_maker) -> None:
+    class Free(TwoGisProvider):
+        progress_scope = None
+
+        def __init__(self, handler) -> None:
+            super().__init__("KEY", client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+            self.progress_scope = None
+
+    requests: list[httpx.Request] = []
+    provider = Free(_paged(total=5, requests=requests))
+    await collect_leads(session_maker, [provider], _config())
+    await collect_leads(session_maker, [provider], _config())
+    assert _pages(requests) == ["1", "1"]
 
 
 # ---------- the key runs out ----------
