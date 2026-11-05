@@ -6,16 +6,18 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from src.config import settings
 from src.database.repo import find_existing_external_ids, get_lead_fingerprints, save_new_leads
 from src.services.checker import analyze_website, create_check_client
 from src.services.dedup import DuplicateIndex, merge_duplicate_places
+from src.services.dgis_key import DgisKeyPolicy, DgisQuota
 from src.services.providers.base import RawPlace
 from src.services.providers.csv_loader import parse_csv_leads
 from src.services.providers.osm import OSMOverpassProvider
-from src.services.providers.twogis import TwoGisProvider
-from src.services.scorer import calculate_lead_score
+from src.services.providers.twogis import TwoGisOptions, TwoGisProvider
+from src.services.scorer import SITE_UNKNOWN, calculate_lead_score
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,11 @@ MAX_CSV_PLACES: int = 2000
 
 # Called as progress(done, total) after each website check.
 ProgressCallback = Callable[[int, int], Awaitable[None]]
+
+
+def _contacts_unknown(place: RawPlace) -> bool:
+    """The source gave no contacts, and none came from a duplicate in another source."""
+    return not place.contacts_known and not (place.phone or place.raw_website or place.socials)
 
 
 async def _load_known_leads(session: AsyncSession) -> DuplicateIndex:
@@ -97,6 +104,10 @@ async def _process_and_save_places(
     known_leads = await _load_known_leads(session)
 
     for place, site_status, details in results:
+        # There is no site to check, but the organization may well have one: its card will tell.
+        if _contacts_unknown(place) and not settings.LEADS_REQUIRE_CONTACT:
+            site_status = SITE_UNKNOWN
+
         socials = place.socials
         if site_status == "social_only" and (not socials or not socials.strip()):
             socials = details or place.raw_website
@@ -134,6 +145,7 @@ async def _process_and_save_places(
             "map_url": place.map_url,
             "email": place.email,
             "source_url": place.source_url,
+            "rubric": place.rubric,
             **(extra_fields or {}),
         })
 
@@ -173,6 +185,12 @@ async def save_collected_places(
     return stats
 
 
+def _manual_search_quota(session: AsyncSession, api_key: str) -> DgisQuota:
+    """Manual searches spend the same requests of the key as collection."""
+    session_maker = async_sessionmaker(session.bind, expire_on_commit=False, class_=AsyncSession)
+    return DgisQuota(session_maker, api_key, DgisKeyPolicy.from_settings(settings))
+
+
 async def run_lead_harvest(
     session: AsyncSession,
     district_name: str,
@@ -194,7 +212,12 @@ async def run_lead_harvest(
         if not twogis_api_key or not twogis_api_key.strip():
             return []
         try:
-            return await TwoGisProvider(twogis_api_key.strip()).search_places(district_name, category_key)
+            provider = TwoGisProvider(
+                twogis_api_key.strip(),
+                options=TwoGisOptions.from_settings(settings),
+                spend_request=_manual_search_quota(session, twogis_api_key).spend,
+            )
+            return await provider.search_places(district_name, category_key)
         except Exception:
             logger.exception("2GIS lead harvest failed for district %s", district_name)
             return []

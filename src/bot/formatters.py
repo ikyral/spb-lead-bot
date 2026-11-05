@@ -16,17 +16,20 @@ from src.database.models import (
     Lead,
 )
 from src.services.providers.base import TARGET_CATEGORIES
+from src.services.scorer import SITE_UNKNOWN
+from src.services.twogis_links import twogis_card_url
 
 if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this module must not import
     from src.database.models import ImportLog, ProviderState
     from src.services.lead_import import ImportResult
-    from src.services.scheduler import CollectorStatus, RunReport
+    from src.services.scheduler import CollectorStatus, DgisKeyStatus, RunReport
 
 # Telegram's limit for one message.
 MAX_MESSAGE_LENGTH: int = 4096
 # Field limits for a lead card: normally the first one fits, the second is for pathological data.
 _CARD_FIELD_LIMITS: tuple[int, ...] = (300, 100)
 _MSK = timezone(timedelta(hours=3), "MSK")
+_PHONE_IN_CARD_LINE: str = "📞 <b>Телефон:</b> смотри в карточке"
 
 _CONTACT_STATUS_TITLES: dict[str, str] = {
     CONTACT_CONTACTED: "✍️ Написал",
@@ -78,6 +81,8 @@ def format_lead_card(lead: Lead) -> str:
         status_line = "📱 Только соцсеть вместо сайта"
     elif lead.site_status == "no_site":
         status_line = "❌ Нет сайта"
+    elif lead.site_status == SITE_UNKNOWN:
+        status_line = "❔ Смотри в карточке"
     else:
         safe_site = html.escape(lead.raw_website or "")
         status_line = f"🌐 Есть сайт ({safe_site})"
@@ -94,6 +99,8 @@ def format_lead_card(lead: Lead) -> str:
         lines.append(f"📫 <b>Адрес:</b> {html.escape(lead.address)}")
     if lead.phone:
         lines.append(f"📞 <b>Телефон:</b> {html.escape(lead.phone)}")
+    elif twogis_card_url(lead.source_url):
+        lines.append(_PHONE_IN_CARD_LINE)
     if lead.email:
         lines.append(f"✉️ <b>Email:</b> {html.escape(lead.email)}")
     if lead.socials:
@@ -113,27 +120,40 @@ def _site_line(lead: Lead, field_limit: int) -> str:
     return f"🌐 <b>Сайт:</b> {site}"
 
 
+def _card_link_line(lead: Lead) -> str | None:
+    if lead.source_url and lead.source_url.startswith(("http://", "https://")):
+        # By the link, not lead.source: when sources are merged the card may come from another one.
+        title = next((text for host, text in _CARD_LINK_TITLES.items() if host in lead.source_url), "Карточка")
+        return f'🗺 <a href="{html.escape(lead.source_url, quote=True)}">{title}</a>'
+    if lead.map_url and lead.map_url.startswith(("http://", "https://")):
+        return f'🗺 <a href="{html.escape(lead.map_url, quote=True)}">На карте</a>'
+    return None
+
+
 def _issued_card(lead: Lead, field_limit: int) -> str:
     def field(value: str) -> str:
         return html.escape(value[:field_limit])
 
-    category = str(TARGET_CATEGORIES.get(lead.category, {}).get("title", lead.category))
+    category = lead.rubric or str(TARGET_CATEGORIES.get(lead.category, {}).get("title", lead.category))
+    # A link to 2GIS is on the button under the message, see get_issued_lead_keyboard.
+    on_button = twogis_card_url(lead.source_url) is not None
     lines = [f"🏢 <b>{field(lead.name)}</b>", f"🏷 <b>Рубрика:</b> {field(category)}"]
     if lead.address:
         lines.append(f"📫 <b>Адрес:</b> {field(lead.address)}")
     if lead.phone:
         lines.append(f"📞 <b>Телефон:</b> {field(lead.phone)}")
+    elif on_button:
+        lines.append(_PHONE_IN_CARD_LINE)
     if lead.email:
         lines.append(f"✉️ <b>Email:</b> {field(lead.email)}")
-    lines.append(_site_line(lead, field_limit))
+    # Unknown means just that: "no site" here would be a claim nobody has checked.
+    if lead.site_status != SITE_UNKNOWN:
+        lines.append(_site_line(lead, field_limit))
     if lead.socials:
         lines.append(f"🔗 <b>Соцсети:</b> {field(lead.socials)}")
-    if lead.source_url and lead.source_url.startswith(("http://", "https://")):
-        # By the link, not lead.source: when sources are merged the card may come from another one.
-        title = next((text for host, text in _CARD_LINK_TITLES.items() if host in lead.source_url), "Карточка")
-        lines.append(f'🗺 <a href="{html.escape(lead.source_url, quote=True)}">{title}</a>')
-    elif lead.map_url and lead.map_url.startswith(("http://", "https://")):
-        lines.append(f'🗺 <a href="{html.escape(lead.map_url, quote=True)}">На карте</a>')
+    link = None if on_button else _card_link_line(lead)
+    if link:
+        lines.append(link)
     status = _CONTACT_STATUS_TITLES.get(lead.contact_status or "", "📤 Выдан, ждёт действия")
     if lead.contact_status and lead.contact_status_by:
         status += f" — {field(lead.contact_status_by)}"
@@ -224,13 +244,52 @@ def _import_lines(last: ImportLog | None, imported_total: int) -> list[str]:
     return lines
 
 
+def _stock_lines(status: CollectorStatus) -> list[str]:
+    """How many leads are left, of what kind, and for how long they will last."""
+    with_contacts = status.pool_with_contacts
+    lines = [
+        f"📦 В запасе: <b>{status.pool_size}</b> "
+        f"(с контактами: <b>{with_contacts}</b>, без контактов: <b>{status.pool_size - with_contacts}</b>)"
+    ]
+    if status.batch_size > 0:
+        days = status.pool_size // status.batch_size
+        if status.pool_size == 0:
+            lines.append("Запас пуст.")
+        elif days == 0:
+            lines.append(f"Хватит меньше чем на день при выдаче по {status.batch_size} лидов в день.")
+        else:
+            lines.append(f"Хватит примерно на <b>{days}</b> дн. при выдаче по {status.batch_size} лидов в день.")
+    return lines
+
+
+def _dgis_key_lines(key: DgisKeyStatus) -> list[str]:
+    """What is left of the API key: requests and days."""
+    if key.limit:
+        left = max(0, key.limit - key.used)
+        requests = f"израсходовано <b>{key.used}</b> из {key.limit}, осталось <b>{left}</b> (резерв {key.reserve})"
+    else:
+        requests = f"израсходовано <b>{key.used}</b>, лимит не задан"
+    lines = [f"\n<b>API 2ГИС</b>: {requests}"]
+    if key.expires_on is not None and key.days_left is not None:
+        shown = key.expires_on.strftime("%d.%m.%Y")
+        if key.days_left < 0:
+            lines.append(f"⌛ Срок ключа закончился {shown}")
+        else:
+            lines.append(f"Ключ действует до {shown}, осталось дней: <b>{key.days_left}</b>")
+    else:
+        lines.append("Срок ключа неизвестен: задайте DGIS_KEY_CREATED_AT")
+    lines.append(f"Контакты: {'запрашиваются' if key.request_contacts else 'не запрашиваются, смотри в карточке'}")
+    return lines
+
+
 def _provider_line(name: str, state: ProviderState | None, now: datetime) -> str:
     safe_name = html.escape(name)
     if state is None:
         return f"✅ {safe_name}"
     reason = html.escape(state.last_block_reason or "")
     if state.disabled_at is not None:
-        return f"⛔ {safe_name}: отключён после блокировок ({reason}). Включить: /provider_on {safe_name}"
+        cause = "после блокировок " if state.consecutive_blocks else ""
+        return f"⛔ {safe_name}: отключён {cause}({reason}). Включить: /provider_on {safe_name}"
     if state.blocked_until is not None and now < state.blocked_until:
         return f"⏸ {safe_name}: пауза до {format_msk_time(state.blocked_until)} ({reason})"
     return f"✅ {safe_name}"
@@ -244,7 +303,8 @@ def format_collector_status(status: CollectorStatus) -> str:
         return "\n".join([
             "🤖 <b>Сбор лидов</b>\n",
             "Режим: <b>внешний сборщик</b>. Этот сервер сам не собирает, лиды приходят файлами.",
-            f"📦 В запасе: <b>{status.pool_size}</b>",
+            *_stock_lines(status),
+            *(_dgis_key_lines(status.dgis_key) if status.dgis_key else []),
             *_import_lines(status.last_import, status.imported_total),
         ])
 
@@ -262,8 +322,11 @@ def format_collector_status(status: CollectorStatus) -> str:
         f"⚠️ {html.escape(name)} отключён: {html.escape(reason)}"
         for name, reason in status.disabled_providers.items()
     ]
-    lines.append(f"\n📦 В запасе: <b>{status.pool_size}</b>")
+    lines.append("")
+    lines += _stock_lines(status)
     lines.append(f"Запросов за сутки: {status.requests_today} из {status.max_requests_per_day}")
+    if status.dgis_key:
+        lines += _dgis_key_lines(status.dgis_key)
     if status.is_running:
         lines.append("\n⏳ <b>Сбор выполняется прямо сейчас</b>")
 
@@ -309,6 +372,16 @@ def generate_pitch_text(lead: Lead) -> str:
             f"Я создаю сайты для локального бизнеса в СПб и могу подготовить бесплатный демо-прототип "
             f"современного сайта для «{lead.name}», чтобы вы оценили результат. "
             "Было бы интересно взглянуть?"
+        )
+
+    if lead.site_status == SITE_UNKNOWN:
+        # Nobody has checked the site yet: the text must not claim there is none.
+        return (
+            f"Здравствуйте! Нашел компанию «{lead.name}» на картах Санкт-Петербурга. "
+            "Я разрабатываю сайты для локального бизнеса: они приводят клиентов из поиска Яндекса и Google "
+            "и повышают доверие к компании.\n\n"
+            f"Если сайта у «{lead.name}» пока нет или он устарел, могу предложить варианты под ваши задачи. "
+            "Удобно обсудить?"
         )
 
     return (

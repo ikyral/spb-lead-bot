@@ -17,8 +17,10 @@ from src.bot.notifier import AdminNotifier
 from src.config import resolve_path, settings, settings_error
 from src.database.repo import async_session_maker, engine, init_db
 from src.services.collector import load_collector_config
+from src.services.dgis_key import DgisKeyPolicy, DgisQuota
 from src.services.lead_import import ImportService
 from src.services.providers.registry import build_providers
+from src.services.providers.twogis import TwoGisOptions
 from src.services.providers.twogis_scraper import ScraperOptions
 from src.services.scheduler import CollectorRunner
 
@@ -65,10 +67,17 @@ async def main() -> None:
     dp.include_router(imports_router)
 
     twogis_key = settings.TWOGIS_API_KEY.get_secret_value() if settings.TWOGIS_API_KEY else None
+    dgis_quota = (
+        DgisQuota(async_session_maker, twogis_key, DgisKeyPolicy.from_settings(settings))
+        if twogis_key and twogis_key.strip()
+        else None
+    )
     provider_set = build_providers(
         collector_config.providers,
         twogis_key,
         ScraperOptions.from_settings(settings),
+        TwoGisOptions.from_settings(settings),
+        dgis_quota.spend if dgis_quota else None,
     )
     for name, reason in provider_set.disabled.items():
         logger.warning("Provider %s is disabled: %s", name, reason)
@@ -84,6 +93,9 @@ async def main() -> None:
         min_pool=settings.LEADS_MIN_POOL,
         external_mode=not settings.COLLECT_ENABLED or not collector_config.providers,
         pool_reminder=notifier.remind_pool_low,
+        batch_size=settings.LEADS_BATCH_SIZE,
+        dgis_quota=dgis_quota,
+        key_notice=notifier.send,
     )
     dp["collector_runner"] = collector_runner
 
@@ -93,6 +105,7 @@ async def main() -> None:
         resolve_path(settings.IMPORT_INBOX_DIR),
         settings.IMPORT_MAX_FILE_BYTES,
         settings.IMPORT_MAX_LEADS,
+        settings.LEADS_REQUIRE_CONTACT,
     )
     dp["import_service"] = import_service
     if settings.IMPORT_INBOX_INTERVAL_SECONDS > 0:

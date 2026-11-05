@@ -13,7 +13,7 @@ import logging
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -22,8 +22,10 @@ from src.config import Settings, resolve_path, settings, settings_error
 from src.database.models import ProviderState
 from src.database.repo import enable_provider, get_provider_states, init_db
 from src.services.collector import load_collector_config
+from src.services.dgis_key import DGIS_PROVIDER_NAME, DgisKeyPolicy, DgisQuota, key_expiry_notice
 from src.services.lead_export import ExportResult, export_new_leads
 from src.services.providers.registry import build_providers
+from src.services.providers.twogis import TwoGisOptions
 from src.services.providers.twogis_scraper import ScraperOptions
 from src.services.scheduler import STATUS_FAILED, TRIGGER_MANUAL, CollectorRunner, RunReport
 
@@ -61,6 +63,7 @@ class _Outcome:
     report: RunReport | None = None
     export: ExportResult | None = None
     refused: dict[str, ProviderState] = field(default_factory=dict)
+    key_lines: list[str] = field(default_factory=list)
 
 
 def _print_outcome(outcome: _Outcome) -> None:
@@ -80,10 +83,13 @@ def _print_outcome(outcome: _Outcome) -> None:
         print(f"Выгружено лидов: {outcome.export.count}.")
         for path in outcome.export.files:
             print(f"Файл: {path}")
+    for line in outcome.key_lines:
+        print(line)
     for name, state in outcome.refused.items():
         if state.disabled_at is not None:
+            cause = "после блокировок " if state.consecutive_blocks else ""
             print(
-                f"{name}: отключён после блокировок ({state.last_block_reason}). "
+                f"{name}: отключён {cause}({state.last_block_reason}). "
                 f"Включить вручную: python collect_cli.py --enable-provider {name}"
             )
         else:
@@ -103,6 +109,18 @@ def _refused_providers(states: dict[str, ProviderState], names: Sequence[str]) -
     }
 
 
+def _key_lines(state: ProviderState | None, policy: DgisKeyPolicy) -> list[str]:
+    """Here nobody gets alerts from the bot: what is left of the API key goes to the console."""
+    used = state.requests_total if state is not None else 0
+    limit_text = f"из {policy.limit}, осталось {max(0, policy.limit - used)}" if policy.limit else "лимит не задан"
+    lines = [f"API 2ГИС: израсходовано запросов {used} {limit_text}."]
+    # The owner's local day is what matters here.
+    notice = key_expiry_notice(policy, date.today())
+    if notice is not None:
+        lines.append(notice[1])
+    return lines
+
+
 async def _collect(
     current: Settings, session_maker: async_sessionmaker[AsyncSession], outcome: _Outcome
 ) -> list[str]:
@@ -111,7 +129,20 @@ async def _collect(
     twogis_key = current.TWOGIS_API_KEY.get_secret_value() if current.TWOGIS_API_KEY else None
     if not current.SCRAPER_HEADLESS:
         logger.warning("SCRAPER_HEADLESS=false is for manual debugging only: do not use it on a schedule")
-    provider_set = build_providers(config.providers, twogis_key, ScraperOptions.from_settings(current))
+    dgis_quota = (
+        DgisQuota(session_maker, twogis_key, DgisKeyPolicy.from_settings(current))
+        if twogis_key and twogis_key.strip()
+        else None
+    )
+    if dgis_quota is not None:
+        await dgis_quota.sync_key()
+    provider_set = build_providers(
+        config.providers,
+        twogis_key,
+        ScraperOptions.from_settings(current),
+        TwoGisOptions.from_settings(current),
+        dgis_quota.spend if dgis_quota else None,
+    )
 
     async def keep_report(report: RunReport) -> None:
         outcome.report = report
@@ -148,7 +179,10 @@ async def _run(args: argparse.Namespace, current: Settings) -> int:
                 current.IMPORT_MAX_LEADS,
             )
         async with session_maker() as session:
-            outcome.refused = _refused_providers(await get_provider_states(session), names)
+            states = await get_provider_states(session)
+        outcome.refused = _refused_providers(states, names)
+        if DGIS_PROVIDER_NAME in names and current.TWOGIS_API_KEY:
+            outcome.key_lines = _key_lines(states.get(DGIS_PROVIDER_NAME), DgisKeyPolicy.from_settings(current))
     finally:
         await engine.dispose()
 

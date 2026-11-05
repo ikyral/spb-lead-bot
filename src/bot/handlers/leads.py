@@ -21,6 +21,7 @@ from src.database.repo import (
     get_status_counts,
     update_crm_status,
 )
+from src.services.twogis_links import twogis_card_url
 
 logger = logging.getLogger(__name__)
 router = Router(name="leads")
@@ -97,6 +98,7 @@ async def render_lead_page(
         map_url=lead.map_url,
         has_prev=offset > 0,
         has_next=len(next_leads) > 0,
+        card_url=twogis_card_url(lead.source_url),
     )
     await _reply(target, card_text, kb=kb, edit=edit)
 

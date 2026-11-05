@@ -25,6 +25,7 @@ from src.services.providers.twogis import parse_catalog_items
 from src.services.scraper import twogis_site
 from src.services.scraper.browser import PageSnapshot, PlaywrightSession
 from src.services.scraper.robots import RobotsRules, RobotsUnavailableError, fetch_robots
+from src.services.twogis_links import build_card_url
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +128,11 @@ class TwoGisScraperProvider(BaseMapProvider):
 
         items = await self._with_contacts(data.items)
         places = parse_catalog_items(
-            {"result": {"items": items.complete}}, area.district, query.category, query.high_margin
+            {"result": {"items": items.complete}},
+            area.district,
+            query.category,
+            query.high_margin,
+            city_slug=self._options.city_slug,
         )
         self._results += len(places)
         if items.blocked is not None:
@@ -194,12 +199,11 @@ class TwoGisScraperProvider(BaseMapProvider):
                 result.complete.append(item)
                 continue
             firm_id = str(item.get("id") or "")
-            if not firm_id or result.budget_ended or result.blocked:
+            card_url = build_card_url(self._options.city_slug, firm_id)
+            if card_url is None or result.budget_ended or result.blocked:
                 continue
             try:
-                snapshot = await self._open(
-                    twogis_site.build_card_url(self._options.city_slug, firm_id), twogis_site.is_card_response
-                )
+                snapshot = await self._open(card_url, twogis_site.is_card_response)
             except ProviderBudgetExhausted:
                 result.budget_ended = True
                 continue

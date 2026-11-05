@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import select
 
 from src.bot.formatters import format_issued_lead
+from src.bot.keyboards import get_issued_lead_keyboard
 from src.config import Settings
 from src.database.models import CONTACT_CONTACTED, STATUS_ISSUED, Lead
 from src.database.repo import issue_next_leads, set_contact_status
@@ -31,6 +32,7 @@ from src.services.providers.base import (
     SearchQuery,
 )
 from src.services.providers.registry import build_providers
+from src.services.providers.twogis import TwoGisOptions
 from src.services.providers.yandex import YandexProvider
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -51,11 +53,15 @@ def _fixture(name: str) -> dict:
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
-def _twogis(payload_or_handler, api_key: str = "SECRET-KEY") -> TwoGisProvider:
+def _twogis(payload_or_handler, api_key: str = "SECRET-KEY", require_contacts: bool = False) -> TwoGisProvider:
     handler = payload_or_handler
     if not callable(payload_or_handler):
         handler = lambda request: httpx.Response(200, json=payload_or_handler)  # noqa: E731
-    return TwoGisProvider(api_key, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    return TwoGisProvider(
+        api_key,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        options=TwoGisOptions(require_contacts=require_contacts),
+    )
 
 
 # ---------- settings ----------
@@ -110,7 +116,7 @@ def test_invalid_settings_name_the_variable(overrides: dict, message: str) -> No
 def test_default_targets_are_all_categories_in_all_districts() -> None:
     config = _config()
     assert len(config.targets) == len(TARGET_CATEGORIES) * len(SPB_DISTRICTS)
-    assert config.providers == ["osm"]  # no automatic requests to 2GIS unless asked for
+    assert config.providers == ["2gis", "osm"]  # 2GIS is the main source, the page reader is not listed
 
 
 def test_targets_from_settings_with_free_text_query_and_bbox() -> None:
@@ -154,7 +160,7 @@ async def test_twogis_page_from_fixture_keeps_only_valid_organizations() -> None
         "2gis", "Улыбка, стоматология", "dentist_clinic", "Центральный", True
     )
     assert first.email == "Info@Smile-Spb.ru"
-    assert first.source_url == "https://2gis.ru/firm/70000001018420390"
+    assert first.source_url == "https://2gis.ru/spb/firm/70000001018420390"
     assert first.map_url == "https://yandex.ru/maps/?pt=30.325,59.935&z=17&l=map"
     assert first.socials == "https://vk.com/smile_spb"
     assert page.has_more is False
@@ -177,7 +183,7 @@ async def test_twogis_request_contains_the_query_area_page_and_key() -> None:
     assert (params["q"], params["page"], params["page_size"]) == ("стоматология", "3", "10")
     assert params["key"] == "SECRET-KEY"
     assert (params["point1"], params["point2"]) == ("30.3,59.95", "30.4,59.9")
-    assert "items.contact_groups" in params["fields"]
+    assert "items.contact_groups" not in params["fields"]
 
 
 async def test_twogis_blocked_key_raises_without_leaking_it() -> None:
@@ -195,9 +201,13 @@ async def test_twogis_without_key_says_so_and_sends_nothing() -> None:
         await _twogis(fail, api_key="").search(QUERY, AREA)
 
 
-async def test_twogis_warns_when_the_key_has_no_access_to_contacts() -> None:
+async def test_twogis_warns_about_missing_contacts_only_if_they_are_required() -> None:
     page = await _twogis(_fixture("twogis_no_contacts.json")).search(QUERY, AREA)
     assert len(page.places) == 5
+    assert page.warning is None
+
+    provider = _twogis(_fixture("twogis_no_contacts.json"), require_contacts=True)
+    page = await provider.search(QUERY, AREA)
     assert "contact_groups" in (page.warning or "")
 
 
@@ -421,8 +431,9 @@ async def test_results_before_a_failure_are_kept(session_maker, no_site_checks) 
     assert (result.saved_new, result.errors) == (1, 1)
 
 
-async def test_data_warning_becomes_a_single_alert(session_maker, no_site_checks) -> None:
-    provider = _twogis(_fixture("twogis_no_contacts.json"))
+async def test_data_warning_becomes_a_single_alert(session_maker, no_site_checks, monkeypatch) -> None:
+    monkeypatch.setattr(pipeline.settings, "LEADS_REQUIRE_CONTACT", True)
+    provider = _twogis(_fixture("twogis_no_contacts.json"), require_contacts=True)
     config = _config(COLLECT_QUERIES="dentist_clinic,beauty", COLLECT_DISTRICTS="Центральный")
     result = await collect_leads(session_maker, [provider], config)
     assert len(result.alerts) == 1
@@ -460,7 +471,7 @@ async def test_from_2gis_response_to_the_card_the_admin_receives(session_maker, 
     provider = _twogis(_fixture("twogis_items.json"))
     result = await collect_leads(session_maker, [provider], _one_target(COLLECT_MAX_PAGES=1))
     assert result.errors == 0
-    assert result.saved_new == 2  # the third organization has no contacts and does not pass scoring
+    assert result.saved_new == 3  # the third has no contacts: a lead too, handed out after the others
 
     async with session_maker() as session:
         batch = await issue_next_leads(session, 30)
@@ -473,7 +484,10 @@ async def test_from_2gis_response_to_the_card_the_admin_receives(session_maker, 
     assert "Улыбка, стоматология" in card
     assert "Стоматологии и клиники" in card
     assert "+78125550101" in card
-    assert '<a href="https://2gis.ru/firm/70000001018420390">Карточка 2ГИС</a>' in card
+    assert "смотри в карточке" not in card
+    button = get_issued_lead_keyboard(batch[0]).inline_keyboard[0][0]
+    assert button.url == "https://2gis.ru/spb/firm/70000001018420390"
+    assert format_issued_lead(batch[2]).count("смотри в карточке") == 1
 
 
 def test_env_example_is_a_valid_configuration() -> None:
@@ -485,5 +499,5 @@ def test_env_example_is_a_valid_configuration() -> None:
     assert settings.COLLECT_INTERVAL_MINUTES is None
     assert settings.TWOGIS_API_KEY is None
     assert (settings.LEADS_BATCH_SIZE, settings.LEADS_MIN_POOL) == (30, 60)
-    assert config.providers == ["osm"]
+    assert config.providers == ["2gis", "osm"]
 

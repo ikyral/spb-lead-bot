@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlsplit
 
-BASE_URL: str = "https://2gis.ru"
+from src.services.twogis_links import BASE_URL
 
 _CATALOG_HOST_RE = re.compile(r"^catalog\.api\.2gis\.(?:ru|com)$")
 _ITEMS_PATH = "/3.0/items"
@@ -34,11 +34,6 @@ def build_search_url(city_slug: str, text: str, page: int = 1) -> str:
     """Public search page: https://2gis.ru/spb/search/<text>[/page/<n>]."""
     url = f"{BASE_URL}/{city_slug}/search/{quote(text, safe='')}"
     return f"{url}/page/{page}" if page > 1 else url
-
-
-def build_card_url(city_slug: str, firm_id: str) -> str:
-    """Public organization card. Ids may have a hash suffix; the URL uses the numeric part."""
-    return f"{BASE_URL}/{city_slug}/firm/{firm_id.split('_', 1)[0]}"
 
 
 def _is_catalog_url(url: str, path_check: str) -> bool:

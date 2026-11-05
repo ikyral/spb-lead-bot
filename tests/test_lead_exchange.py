@@ -205,6 +205,7 @@ async def test_file_format(session_maker, tmp_path: Path) -> None:
             "website": "smile.example",
             "email": "info@smile.example",
             "rubric": "dentist_clinic",
+            "rubric_name": None,
             "lat": 59.935,
             "lon": 30.325,
             "source_url": "https://2gis.ru/firm/70001",
@@ -300,7 +301,7 @@ def test_too_big_file_and_too_many_records_are_refused() -> None:
         (_record(lon="30.3"), REASON_BAD_COORDS),
         (_record(lat=True), REASON_BAD_COORDS),
         (_record(fetched_at="вчера"), REASON_BAD_DATE),
-        (_record(phones=[], website=None), REASON_NO_CONTACTS),
+        (_record(source="osm", phones=[], website=None), REASON_NO_CONTACTS),
     ],
 )
 def test_bad_record_is_rejected_and_counted_while_good_ones_stay(record: object, reason: str) -> None:
@@ -326,7 +327,7 @@ def test_links_in_other_schemes_are_dropped() -> None:
 
 
 def test_lead_with_only_a_dangerous_link_has_no_contacts() -> None:
-    parsed = _parse(_file([_record(1, phones=[], website="javascript:alert(1)")]))
+    parsed = _parse(_file([_record(1, source="osm", phones=[], website="javascript:alert(1)")]))
     assert parsed.rejected == {REASON_NO_CONTACTS: 1}
 
 
@@ -461,7 +462,7 @@ async def test_duplicates_inside_one_file_are_saved_once(service: ImportService,
 async def test_rejections_are_counted_with_their_reasons(service: ImportService) -> None:
     records = [
         _record(1),
-        _record(2, phones=[], website=None),
+        _record(2, source="osm", phones=[], website=None),
         _record(3, name=None),
         _record(4, phones=[], website="https://working.example"),  # has a working site: not a lead
     ]

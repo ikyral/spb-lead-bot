@@ -1,11 +1,12 @@
 """Builds the providers enabled in COLLECT_PROVIDERS, explaining why any of them is unavailable."""
 
 import importlib.util
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from src.services.providers.base import BaseMapProvider
 from src.services.providers.osm import OSMOverpassProvider
-from src.services.providers.twogis import TwoGisProvider
+from src.services.providers.twogis import TwoGisOptions, TwoGisProvider
 from src.services.providers.twogis_scraper import ScraperOptions, TwoGisScraperProvider
 from src.services.providers.yandex import YANDEX_DISABLED_REASON
 
@@ -21,7 +22,11 @@ class ProviderSet:
 
 
 def build_providers(
-    enabled: list[str], twogis_api_key: str | None, scraper_options: ScraperOptions | None = None
+    enabled: list[str],
+    twogis_api_key: str | None,
+    scraper_options: ScraperOptions | None = None,
+    twogis_options: TwoGisOptions | None = None,
+    twogis_spend_request: Callable[[], Awaitable[None]] | None = None,
 ) -> ProviderSet:
     """Create providers from validated names, in the given order (the first source wins on merge)."""
     result = ProviderSet()
@@ -33,7 +38,11 @@ def build_providers(
                 result.disabled[name] = "не установлен playwright (pip install playwright, playwright install chromium)"
         elif name == "2gis":
             if twogis_api_key and twogis_api_key.strip():
-                result.providers.append(TwoGisProvider(twogis_api_key.strip()))
+                result.providers.append(
+                    TwoGisProvider(
+                        twogis_api_key.strip(), options=twogis_options, spend_request=twogis_spend_request
+                    )
+                )
             else:
                 result.disabled[name] = "не задан DGIS_API_KEY"
         elif name == "osm":

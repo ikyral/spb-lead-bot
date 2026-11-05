@@ -15,6 +15,7 @@ from src.config import Settings
 from src.database.models import ProviderState
 from src.database.repo import (
     MAX_CONSECUTIVE_BLOCKS,
+    disable_provider,
     get_provider_states,
     record_provider_block,
     record_provider_run,
@@ -196,7 +197,8 @@ def unavailable_reason(provider: BaseMapProvider, state: ProviderState | None, n
     if state is None:
         return None
     if state.disabled_at is not None:
-        return f"отключён после блокировок ({state.last_block_reason}), нужно ручное включение"
+        cause = "после блокировок " if state.consecutive_blocks else ""
+        return f"отключён {cause}({state.last_block_reason}), нужно ручное включение"
     if state.blocked_until is not None and now < state.blocked_until:
         return f"пауза после блокировки ({state.last_block_reason})"
     if provider.min_hours_between_runs and state.last_run_at is not None:
@@ -255,12 +257,14 @@ class _Collection:
                 self._add_places(exc.partial, collected)
                 await self._handle_block(provider, exc)
                 return
-            except (ProviderAuthError, ProviderQuotaError, ProviderUnavailableError) as exc:
-                # Repeating will not help and could get the key suspended.
-                logger.error("Provider %s stopped for this run: %s", provider.name, exc)
-                self.record_error(str(exc))
-                self.alert(str(exc))
-                self.drop_provider(provider)
+            except ProviderAuthError as exc:
+                if provider.auth_failure_hint is None:
+                    self._stop_provider(provider, exc)
+                else:
+                    await self._handle_rejected_key(provider, exc, provider.auth_failure_hint)
+                return
+            except (ProviderQuotaError, ProviderUnavailableError) as exc:
+                self._stop_provider(provider, exc)
                 return
             except ProviderError as exc:
                 logger.warning("Provider %s failed on %s: %s", provider.name, target.query.category, exc)
@@ -284,6 +288,27 @@ class _Collection:
             collected = self._add_places(search_page.places, collected)
             if collected >= self.config.max_results_per_query or not search_page.has_more:
                 return
+
+    def _stop_provider(self, provider: BaseMapProvider, error: ProviderError) -> None:
+        """Repeating will not help and could get the key suspended."""
+        logger.error("Provider %s stopped for this run: %s", provider.name, error)
+        self.record_error(str(error))
+        self.alert(str(error))
+        self.drop_provider(provider)
+
+    async def _handle_rejected_key(self, provider: BaseMapProvider, error: ProviderError, hint: str) -> None:
+        """A rejected key will not start working by itself: no more requests with it, the leads stay available."""
+        async with self.session_maker() as session:
+            await disable_provider(session, provider.name, hint)
+        self.drop_provider(provider)
+        self.succeeded.discard(provider.name)
+        text = (
+            f"{provider.name}: {hint}. Источник отключён, накопленные лиды выдаются как обычно. Что делать: укажите "
+            f"новый ключ и перезапустите бота, источник включится сам; для прежнего ключа: /provider_on {provider.name}"
+        )
+        logger.error("Provider switched off: %s (%s)", text, error)
+        self.record_error(text)
+        self.alert(text)
 
     def _add_places(self, places: list[RawPlace], collected: int) -> int:
         """Add places up to the limit per query, without repeats. Returns the new count for this query."""

@@ -5,7 +5,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import Enum
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -15,12 +15,14 @@ from src.database.models import CollectorState, ImportLog, ProviderState
 from src.database.repo import (
     count_imported_leads,
     count_new_leads,
+    count_new_leads_with_contacts,
     enable_provider,
     get_collector_state,
     get_last_import,
     get_provider_states,
 )
 from src.services.collector import CollectorConfig, CollectResult, collect_leads
+from src.services.dgis_key import DGIS_PROVIDER_NAME, DgisQuota, key_expiry_notice
 from src.services.providers.registry import ProviderSet
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,8 @@ logger = logging.getLogger(__name__)
 COLLECT_JOB_ID = "lead_collection"
 POOL_CHECK_JOB_ID = "lead_pool_check"
 POOL_CHECK_INTERVAL_MINUTES: int = 15
+KEY_CHECK_JOB_ID = "dgis_key_check"
+KEY_CHECK_INTERVAL_HOURS: int = 6
 # Out-of-schedule collection because of a low pool happens at most this often.
 TOPUP_COOLDOWN: timedelta = timedelta(hours=1)
 # With an external collector admins are asked for a new file at most this often.
@@ -83,6 +87,18 @@ class RunReport:
     announce: bool = False
 
 
+@dataclass(frozen=True)
+class DgisKeyStatus:
+    """The API key of 2GIS, for the status command."""
+
+    used: int
+    limit: int  # 0 = no limit
+    reserve: int
+    expires_on: date | None
+    days_left: int | None
+    request_contacts: bool
+
+
 @dataclass
 class CollectorStatus:
     """Snapshot for the status command."""
@@ -101,10 +117,14 @@ class CollectorStatus:
     external_mode: bool = False
     last_import: ImportLog | None = None
     imported_total: int = 0
+    pool_with_contacts: int = 0
+    batch_size: int = 0
+    dgis_key: DgisKeyStatus | None = None
 
 
 ReportCallback = Callable[[RunReport], Awaitable[None]]
 PoolReminderCallback = Callable[[int], Awaitable[None]]
+KeyNoticeCallback = Callable[[str], Awaitable[None]]
 
 
 class CollectorRunner:
@@ -121,6 +141,9 @@ class CollectorRunner:
         min_pool: int = 0,
         external_mode: bool = False,
         pool_reminder: PoolReminderCallback | None = None,
+        batch_size: int = 0,
+        dgis_quota: DgisQuota | None = None,
+        key_notice: KeyNoticeCallback | None = None,
     ) -> None:
         self._session_maker = session_maker
         self._provider_set = provider_set
@@ -132,6 +155,9 @@ class CollectorRunner:
         # Leads come from an external collector as files: this server never collects by itself.
         self.external_mode = external_mode
         self._pool_reminder = pool_reminder
+        self._batch_size = batch_size
+        self._dgis_quota = dgis_quota
+        self._key_notice = key_notice
         self._scheduler = AsyncIOScheduler(timezone=config.timezone)
         self._auto_enabled = enabled_by_default
         # asyncio is single-threaded: checking and setting this flag cannot interleave.
@@ -152,6 +178,8 @@ class CollectorRunner:
             if state.auto_enabled is not None:
                 self._auto_enabled = state.auto_enabled
             await session.commit()
+        if self._dgis_quota is not None:
+            await self._dgis_quota.sync_key()
 
         schedule_args: dict[str, datetime | None] = {}
         if not self._auto_enabled:
@@ -176,6 +204,16 @@ class CollectorRunner:
                 id=POOL_CHECK_JOB_ID,
                 max_instances=1,
                 coalesce=True,
+            )
+        if self._dgis_quota is not None and self._dgis_quota.policy.expires_on and self._key_notice is not None:
+            self._scheduler.add_job(
+                self.check_key_expiry,
+                "interval",
+                hours=KEY_CHECK_INTERVAL_HOURS,
+                id=KEY_CHECK_JOB_ID,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now(self._config.timezone),
             )
         self._scheduler.start()
         logger.info(
@@ -262,6 +300,27 @@ class CollectorRunner:
         if self._pool_reminder is not None:
             await self._pool_reminder(pool_size)
 
+    async def check_key_expiry(self) -> None:
+        """Warn admins that the API key is running out. Works whatever the state of collection is."""
+        if self._dgis_quota is None or self._key_notice is None:
+            return
+        try:
+            notice = key_expiry_notice(self._dgis_quota.policy, datetime.now(self._config.timezone).date())
+            if notice is None:
+                return
+            mark, text = notice
+            async with self._session_maker() as session:
+                state = await get_collector_state(session)
+                already_said = state.key_warning_mark == mark
+                state.key_warning_mark = mark
+                await session.commit()
+            if not already_said:
+                logger.info("API key notice: %s", text)
+                await self._key_notice(text)
+        except Exception:
+            # Runs from the scheduler: must not affect anything else.
+            logger.exception("Checking the API key expiry failed")
+
     async def request_topup(self, trigger: str = TRIGGER_LOW_POOL) -> TopupDecision:
         """Start an out-of-schedule collection, unless the limits forbid it right now."""
         if self.external_mode:
@@ -313,6 +372,7 @@ class CollectorRunner:
         async with self._session_maker() as session:
             state = await get_collector_state(session)
             pool_size = await count_new_leads(session)
+            pool_with_contacts = await count_new_leads_with_contacts(session)
             provider_states = await get_provider_states(session)
             last_import = await get_last_import(session)
             imported_total = await count_imported_leads(session)
@@ -333,6 +393,24 @@ class CollectorRunner:
             external_mode=self.external_mode,
             last_import=last_import,
             imported_total=imported_total,
+            pool_with_contacts=pool_with_contacts,
+            batch_size=self._batch_size,
+            dgis_key=self._dgis_key_status(provider_states.get(DGIS_PROVIDER_NAME)),
+        )
+
+    def _dgis_key_status(self, state: ProviderState | None) -> DgisKeyStatus | None:
+        if self._dgis_quota is None:
+            return None
+        policy = self._dgis_quota.policy
+        expires_on = policy.expires_on
+        today = datetime.now(self._config.timezone).date()
+        return DgisKeyStatus(
+            used=state.requests_total if state is not None else 0,
+            limit=policy.limit,
+            reserve=policy.reserve,
+            expires_on=expires_on,
+            days_left=(expires_on - today).days if expires_on else None,
+            request_contacts=policy.request_contacts,
         )
 
     def _today(self) -> str:
