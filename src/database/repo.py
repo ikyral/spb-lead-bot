@@ -1,6 +1,7 @@
+from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import Connection, CursorResult, func, select, update
+from sqlalchemy import Connection, CursorResult, func, inspect, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from src.config import settings
-from src.database.models import Base, Lead
+from src.database.models import STATUS_ISSUED, STATUS_NEW, Base, CollectorState, Lead
 
 engine: AsyncEngine = create_async_engine(settings.DB_URL, echo=False)
 async_session_maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
@@ -25,7 +26,21 @@ async def init_db(target_engine: AsyncEngine | None = None) -> None:
     current_engine = target_engine or engine
     async with current_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_add_missing_columns)
         await conn.run_sync(_create_missing_indexes)
+
+
+# Nullable columns added to `leads` after the first release. Old rows need no backfill.
+NEW_LEAD_COLUMNS: tuple[str, ...] = ("email", "source_url", "issued_at")
+
+
+def _add_missing_columns(sync_conn: Connection) -> None:
+    """create_all() does not alter existing tables, so older databases get new columns here."""
+    existing = {column["name"] for column in inspect(sync_conn).get_columns("leads")}
+    for name in NEW_LEAD_COLUMNS:
+        if name not in existing:
+            ddl_type = Lead.__table__.c[name].type.compile(dialect=sync_conn.dialect)
+            sync_conn.execute(text(f"ALTER TABLE leads ADD COLUMN {name} {ddl_type}"))
 
 
 def _create_missing_indexes(sync_conn: Connection) -> None:
@@ -97,6 +112,11 @@ async def _existing_external_ids(session: AsyncSession, external_ids: list[str])
     return existing
 
 
+async def find_existing_external_ids(session: AsyncSession, external_ids: list[str]) -> set[str]:
+    """Return the external IDs from the list that are already saved."""
+    return await _existing_external_ids(session, external_ids)
+
+
 async def save_new_leads(
     session: AsyncSession,
     leads_data: list[dict[str, Any]],
@@ -135,10 +155,10 @@ async def save_new_leads(
 
 async def get_lead_fingerprints(
     session: AsyncSession,
-) -> list[tuple[str, str | None, str | None]]:
-    """Return (name, phone, map_url) of all leads, used to detect cross-source duplicates."""
-    result = await session.execute(select(Lead.name, Lead.phone, Lead.map_url))
-    return [(name, phone, map_url) for name, phone, map_url in result.all()]
+) -> list[tuple[str, str | None, str | None, str | None]]:
+    """Return (name, phone, map_url, address) of all leads, used to detect cross-source duplicates."""
+    result = await session.execute(select(Lead.name, Lead.phone, Lead.map_url, Lead.address))
+    return [(name, phone, map_url, address) for name, phone, map_url, address in result.all()]
 
 
 async def get_leads(
@@ -158,6 +178,72 @@ async def get_leads(
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def issue_next_leads(session: AsyncSession, limit: int) -> list[Lead]:
+    """
+    Hand out the oldest `limit` new leads: they become 'issued' in a single atomic statement.
+
+    Concurrent calls can never return the same lead. The repeated status check in the outer
+    WHERE matters on databases where the subquery can see a stale snapshot.
+    """
+    oldest_new = (
+        select(Lead.id)
+        .where(Lead.crm_status == STATUS_NEW)
+        .order_by(Lead.created_at, Lead.id)
+        .limit(limit)
+    )
+    stmt = (
+        update(Lead)
+        .where(Lead.id.in_(oldest_new), Lead.crm_status == STATUS_NEW)
+        .values(crm_status=STATUS_ISSUED, issued_at=datetime.now(UTC))
+        .returning(Lead)
+        .execution_options(synchronize_session=False)
+    )
+    leads = list((await session.scalars(stmt)).all())
+    await session.commit()
+    # RETURNING has no guaranteed order.
+    return sorted(leads, key=lambda lead: (lead.created_at, lead.id))
+
+
+async def return_undelivered_leads(session: AsyncSession, lead_ids: list[int]) -> None:
+    """Put issued leads that never reached the admin back to the pool, keeping their position."""
+    if not lead_ids:
+        return
+    await session.execute(
+        update(Lead)
+        .where(Lead.id.in_(lead_ids), Lead.crm_status == STATUS_ISSUED)
+        .values(crm_status=STATUS_NEW, issued_at=None)
+    )
+    await session.commit()
+
+
+async def count_new_leads(session: AsyncSession) -> int:
+    """Number of leads not handed out yet."""
+    result = await session.execute(select(func.count(Lead.id)).where(Lead.crm_status == STATUS_NEW))
+    return int(result.scalar_one())
+
+
+async def get_status_counts(session: AsyncSession) -> dict[str, int]:
+    """Lead counts for every status present in the database."""
+    result = await session.execute(select(Lead.crm_status, func.count(Lead.id)).group_by(Lead.crm_status))
+    return {status: int(count) for status, count in result.all()}
+
+
+async def count_issued_leads(session: AsyncSession) -> int:
+    """Number of leads ever handed out, whatever their status is now."""
+    result = await session.execute(select(func.count(Lead.id)).where(Lead.issued_at.is_not(None)))
+    return int(result.scalar_one())
+
+
+async def get_collector_state(session: AsyncSession) -> CollectorState:
+    """Return the collector state row, creating it on first use (the caller commits)."""
+    state = await session.get(CollectorState, 1)
+    if state is None:
+        state = CollectorState(id=1)
+        session.add(state)
+        await session.flush()
+    return state
 
 
 async def get_leads_stats(session: AsyncSession) -> dict[str, int]:
