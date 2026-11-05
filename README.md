@@ -35,7 +35,7 @@
     source .venv/bin/activate
     pip install -r requirements-dev.txt
 
-   Для парсера 2ГИС нужен ещё браузер (в Docker он ставится при сборке образа):
+   Для парсера 2ГИС нужен ещё браузер (в Docker-образ он не входит, поэтому в контейнере парсер не запустится и сообщит об этом):
 
     playwright install chromium
 
