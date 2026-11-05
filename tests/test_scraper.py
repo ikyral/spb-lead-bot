@@ -405,9 +405,7 @@ async def test_browser_that_failed_to_start_is_still_closed() -> None:
 def _playwright_mock() -> tuple[MagicMock, MagicMock, MagicMock, MagicMock]:
     page = MagicMock()
     page.close = AsyncMock()
-    page.url = NORMAL_URL
     context = MagicMock()
-    context.add_init_script = AsyncMock()
     context.new_page = AsyncMock(return_value=page)
     context.close = AsyncMock()
     browser = MagicMock()
@@ -425,34 +423,22 @@ def _start_returning(playwright: MagicMock) -> MagicMock:
     return MagicMock(return_value=starter)
 
 
-async def test_browser_starts_with_stealth_and_everything_is_closed() -> None:
-    from src.services.scraper.browser import DEFAULT_USER_AGENT, STEALTH_ARGS, STEALTH_INIT_SCRIPT
-
+async def test_browser_starts_with_defaults_only_and_everything_is_closed() -> None:
     playwright, browser, context, page = _playwright_mock()
     session = PlaywrightSession()
     with patch("playwright.async_api.async_playwright", _start_returning(playwright)):
         await session.start()
 
-    playwright.chromium.launch.assert_awaited_once_with(headless=True, args=STEALTH_ARGS)
-    browser.new_context.assert_awaited_once_with(
-        locale="ru-RU",
-        timezone_id="Europe/Moscow",
-        user_agent=DEFAULT_USER_AGENT,
-        viewport={"width": 1920, "height": 1080},
-        extra_http_headers={
-            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-            "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-        },
-    )
-    context.add_init_script.assert_awaited_once_with(STEALTH_INIT_SCRIPT)
+    # Nothing that disguises automation: no User-Agent, proxy, or browser arguments.
+    playwright.chromium.launch.assert_awaited_once_with(headless=True)
+    browser.new_context.assert_awaited_once_with(locale="ru-RU")
 
     await session.close()
     page.close.assert_awaited_once()
     context.close.assert_awaited_once()
     browser.close.assert_awaited_once()
     playwright.stop.assert_awaited_once()
+
 
 async def test_failure_of_one_close_step_does_not_skip_the_rest() -> None:
     playwright, browser, context, page = _playwright_mock()
