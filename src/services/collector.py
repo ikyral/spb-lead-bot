@@ -3,6 +3,7 @@
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.base import BaseTrigger
@@ -11,7 +12,22 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.config import Settings
-from src.services.api_client import ProviderAuthError, ProviderError, ProviderQuotaError
+from src.database.models import ProviderState
+from src.database.repo import (
+    MAX_CONSECUTIVE_BLOCKS,
+    get_provider_states,
+    record_provider_block,
+    record_provider_run,
+    record_provider_success,
+)
+from src.services.api_client import (
+    ProviderAuthError,
+    ProviderBlockedError,
+    ProviderBudgetExhausted,
+    ProviderError,
+    ProviderQuotaError,
+    ProviderUnavailableError,
+)
 from src.services.normalize import normalize_place
 from src.services.pipeline import save_collected_places
 from src.services.providers.base import (
@@ -56,6 +72,7 @@ class CollectorConfig:
     max_results_per_query: int
     max_requests_per_run: int
     max_requests_per_day: int
+    block_backoff_hours: float = 6.0
 
 
 def _split(value: str) -> list[str]:
@@ -129,6 +146,9 @@ def load_collector_config(settings: Settings) -> CollectorConfig:
     if unknown:
         raise ValueError(f"COLLECT_PROVIDERS: неизвестные провайдеры {unknown}; доступны: {sorted(KNOWN_PROVIDERS)}")
 
+    if settings.SCRAPER_MIN_DELAY_SECONDS > settings.SCRAPER_MAX_DELAY_SECONDS:
+        raise ValueError("SCRAPER_MIN_DELAY_SECONDS не может быть больше SCRAPER_MAX_DELAY_SECONDS")
+
     areas = _parse_areas(settings.COLLECT_DISTRICTS, settings.COLLECT_BBOX)
     return CollectorConfig(
         trigger=trigger,
@@ -145,6 +165,7 @@ def load_collector_config(settings: Settings) -> CollectorConfig:
         max_results_per_query=settings.COLLECT_MAX_RESULTS_PER_QUERY,
         max_requests_per_run=settings.COLLECT_MAX_REQUESTS_PER_RUN,
         max_requests_per_day=settings.COLLECT_MAX_REQUESTS_PER_DAY,
+        block_backoff_hours=settings.SCRAPER_BLOCK_BACKOFF_HOURS,
     )
 
 
@@ -163,14 +184,42 @@ class CollectResult:
     # Problems that need the owner's attention (key, quota, no access to contacts).
     alerts: list[str] = field(default_factory=list)
     last_error: str | None = None
+    # Providers not used in this run, and why.
+    skipped: dict[str, str] = field(default_factory=dict)
+
+
+REST_REASON: str = "уже запускался сегодня: сайт не должен посещаться часто"
+
+
+def unavailable_reason(provider: BaseMapProvider, state: ProviderState | None, now: datetime) -> str | None:
+    """Why a provider must not be used right now, or None if it may."""
+    if state is None:
+        return None
+    if state.disabled_at is not None:
+        return f"отключён после блокировок ({state.last_block_reason}), нужно ручное включение"
+    if state.blocked_until is not None and now < state.blocked_until:
+        return f"пауза после блокировки ({state.last_block_reason})"
+    if provider.min_hours_between_runs and state.last_run_at is not None:
+        allowed_at = state.last_run_at + timedelta(hours=provider.min_hours_between_runs)
+        if now < allowed_at:
+            return REST_REASON
+    return None
 
 
 class _Collection:
     """Mutable state of one pass over the search targets."""
 
-    def __init__(self, providers: list[BaseMapProvider], config: CollectorConfig, max_requests: int) -> None:
+    def __init__(
+        self,
+        providers: list[BaseMapProvider],
+        config: CollectorConfig,
+        max_requests: int,
+        session_maker: async_sessionmaker[AsyncSession],
+    ) -> None:
         self.active = list(providers)
         self.config = config
+        self.session_maker = session_maker
+        self.succeeded: set[str] = set()
         self.max_requests = max_requests
         self.result = CollectResult()
         self.places: list[RawPlace] = []
@@ -198,7 +247,15 @@ class _Collection:
             self.result.requests += 1
             try:
                 search_page = await provider.search(target.query, target.area, page, self.config.page_size)
-            except (ProviderAuthError, ProviderQuotaError) as exc:
+            except ProviderBudgetExhausted as exc:
+                logger.info("Provider %s finished for this run: %s", provider.name, exc)
+                self.drop_provider(provider)
+                return
+            except ProviderBlockedError as exc:
+                self._add_places(exc.partial, collected)
+                await self._handle_block(provider, exc)
+                return
+            except (ProviderAuthError, ProviderQuotaError, ProviderUnavailableError) as exc:
                 # Repeating will not help and could get the key suspended.
                 logger.error("Provider %s stopped for this run: %s", provider.name, exc)
                 self.record_error(str(exc))
@@ -219,19 +276,48 @@ class _Collection:
                 return
 
             self.failures_in_a_row[provider.name] = 0
+            self.succeeded.add(provider.name)
             if search_page.warning:
                 logger.warning("Provider %s: %s", provider.name, search_page.warning)
                 self.alert(search_page.warning)
 
-            for place in search_page.places:
-                if collected >= self.config.max_results_per_query:
-                    return
-                collected += 1
-                if place.external_id not in self.seen_ids:
-                    self.seen_ids.add(place.external_id)
-                    self.places.append(normalize_place(place))
-            if not search_page.has_more:
+            collected = self._add_places(search_page.places, collected)
+            if collected >= self.config.max_results_per_query or not search_page.has_more:
                 return
+
+    def _add_places(self, places: list[RawPlace], collected: int) -> int:
+        """Add places up to the limit per query, without repeats. Returns the new count for this query."""
+        for place in places:
+            if collected >= self.config.max_results_per_query:
+                break
+            collected += 1
+            if place.external_id not in self.seen_ids:
+                self.seen_ids.add(place.external_id)
+                self.places.append(normalize_place(place))
+        return collected
+
+    async def _handle_block(self, provider: BaseMapProvider, error: ProviderBlockedError) -> None:
+        """Stop right away, tell the admins, and do not come back for hours."""
+        async with self.session_maker() as session:
+            state = await record_provider_block(
+                session, provider.name, str(error), self.config.block_backoff_hours
+            )
+        self.drop_provider(provider)
+        self.succeeded.discard(provider.name)
+        if state.disabled_at is not None:
+            text = (
+                f"{provider.name}: {error}. Это блокировка {state.consecutive_blocks} подряд, источник отключён "
+                f"до ручного включения: /provider_on {provider.name}"
+            )
+        else:
+            text = (
+                f"{provider.name}: {error}. Сбор из этого источника остановлен (блокировка "
+                f"{state.consecutive_blocks} из {MAX_CONSECUTIVE_BLOCKS} до отключения), повтор не раньше "
+                f"{_format_time(state.blocked_until)}."
+            )
+        logger.error("Provider blocked: %s", text)
+        self.record_error(text)
+        self.alert(text)
 
     def _count_failure(self, provider: BaseMapProvider, error: str) -> None:
         count = self.failures_in_a_row.get(provider.name, 0) + 1
@@ -241,6 +327,21 @@ class _Collection:
             # A source that stopped working (or rejects every request) must not fail silently.
             self.alert(f"Источник {provider.name} пропущен до следующего сбора после {count} ошибок подряд: {error}")
             self.drop_provider(provider)
+
+
+def _format_time(value: datetime | None) -> str:
+    if value is None:
+        return "—"
+    return value.astimezone(timezone(timedelta(hours=3))).strftime("%d.%m %H:%M МСК")
+
+
+async def _close_providers(providers: list[BaseMapProvider]) -> None:
+    """Each provider is closed whatever happens to the others: no browser may be left running."""
+    for provider in providers:
+        try:
+            await provider.close()
+        except Exception:
+            logger.warning("Closing provider %s failed", provider.name, exc_info=True)
 
 
 async def collect_leads(
@@ -257,21 +358,44 @@ async def collect_leads(
     Provider failures are recorded in the result; only a database failure raises.
     """
     budget = config.max_requests_per_run if max_requests is None else max_requests
-    collection = _Collection(providers, config, budget)
+    now = datetime.now(UTC)
+    async with session_maker() as session:
+        states = await get_provider_states(session)
+    skipped = {provider.name: unavailable_reason(provider, states.get(provider.name), now) for provider in providers}
+    usable = [provider for provider in providers if skipped[provider.name] is None]
+    resting = {name for name, reason in skipped.items() if reason == REST_REASON}
+
+    collection = _Collection(usable, config, budget, session_maker)
     result = collection.result
+    result.skipped = {name: reason for name, reason in skipped.items() if reason is not None}
+    for name, reason in result.skipped.items():
+        logger.info("Provider %s skipped: %s", name, reason)
     targets = config.targets
     start = cursor % len(targets) if targets else 0
 
-    for offset in range(len(targets)):
-        if result.requests >= budget or not collection.active:
-            break
-        target = targets[(start + offset) % len(targets)]
-        for provider in list(collection.active):
-            await collection.collect_target(provider, target)
-        result.targets_processed = offset + 1
+    try:
+        async with session_maker() as session:
+            for provider in usable:
+                if provider.min_hours_between_runs:
+                    await record_provider_run(session, provider.name)
+        for offset in range(len(targets)):
+            if result.requests >= budget or not collection.active:
+                break
+            target = targets[(start + offset) % len(targets)]
+            for provider in list(collection.active):
+                # A fallback works only while the provider it replaces is out of action;
+                # one that is merely resting until tomorrow does not need replacing.
+                if provider.fallback_for in {other.name for other in collection.active} | resting:
+                    continue
+                await collection.collect_target(provider, target)
+            result.targets_processed = offset + 1
+    finally:
+        await _close_providers(providers)
     result.next_cursor = (start + result.targets_processed) % len(targets) if targets else 0
 
     async with session_maker() as session:
+        for name in collection.succeeded:
+            await record_provider_success(session, name)
         stats = await save_collected_places(session, collection.places)
     result.found = stats["total_found"]
     result.qualified = stats["qualified"]

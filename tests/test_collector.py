@@ -11,8 +11,8 @@ from sqlalchemy import select
 
 from src.bot.formatters import format_issued_lead
 from src.config import Settings
-from src.database.models import STATUS_CONTACTED, STATUS_ISSUED, Lead
-from src.database.repo import issue_next_leads, update_crm_status
+from src.database.models import CONTACT_CONTACTED, STATUS_ISSUED, Lead
+from src.database.repo import issue_next_leads, set_contact_status
 from src.services import pipeline
 from src.services.api_client import (
     ProviderAuthError,
@@ -110,7 +110,7 @@ def test_invalid_settings_name_the_variable(overrides: dict, message: str) -> No
 def test_default_targets_are_all_categories_in_all_districts() -> None:
     config = _config()
     assert len(config.targets) == len(TARGET_CATEGORIES) * len(SPB_DISTRICTS)
-    assert config.providers == ["2gis", "osm"]
+    assert config.providers == ["2gis_scraper", "2gis", "osm"]
 
 
 def test_targets_from_settings_with_free_text_query_and_bbox() -> None:
@@ -130,7 +130,7 @@ def test_empty_values_in_env_mean_defaults(monkeypatch: pytest.MonkeyPatch) -> N
 def test_provider_without_key_is_disabled_with_a_clear_reason() -> None:
     result = build_providers(["2gis", "osm", "yandex"], twogis_api_key="  ")
     assert [provider.name for provider in result.providers] == ["osm"]
-    assert result.disabled["2gis"] == "не задан TWOGIS_API_KEY"
+    assert result.disabled["2gis"] == "не задан DGIS_API_KEY"
     assert "Яндекс" in result.disabled["yandex"]
 
 
@@ -338,7 +338,7 @@ async def test_found_again_lead_is_neither_reissued_nor_overwritten(session_make
 
     async with session_maker() as session:
         issued = await issue_next_leads(session, 2)
-        await update_crm_status(session, issued[0].id, STATUS_CONTACTED)
+        await set_contact_status(session, issued[0].id, CONTACT_CONTACTED)
     issued_at = {lead.id: lead.issued_at for lead in issued}
 
     changed = [_place(1, phone="+7 812 555-01-01", address="Новый адрес"), _place(2)]
@@ -346,7 +346,8 @@ async def test_found_again_lead_is_neither_reissued_nor_overwritten(session_make
 
     assert result.saved_new == 0
     leads = await _all_leads(session_maker)
-    assert [lead.crm_status for lead in leads] == [STATUS_CONTACTED, STATUS_ISSUED]
+    assert [lead.crm_status for lead in leads] == [STATUS_ISSUED, STATUS_ISSUED]
+    assert [lead.contact_status for lead in leads] == [CONTACT_CONTACTED, None]
     assert leads[0].address is None
     assert {lead.id: lead.issued_at for lead in leads} == issued_at
     async with session_maker() as session:
@@ -484,5 +485,5 @@ def test_env_example_is_a_valid_configuration() -> None:
     assert settings.COLLECT_INTERVAL_MINUTES is None
     assert settings.TWOGIS_API_KEY is None
     assert (settings.LEADS_BATCH_SIZE, settings.LEADS_MIN_POOL) == (30, 60)
-    assert config.providers == ["2gis", "osm"]
+    assert config.providers == ["2gis_scraper", "2gis", "osm"]
 

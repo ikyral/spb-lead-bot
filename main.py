@@ -17,6 +17,7 @@ from src.config import settings, settings_error
 from src.database.repo import async_session_maker, engine, init_db
 from src.services.collector import load_collector_config
 from src.services.providers.registry import build_providers
+from src.services.providers.twogis_scraper import ScraperOptions
 from src.services.scheduler import CollectorRunner
 
 logging.basicConfig(
@@ -61,7 +62,19 @@ async def main() -> None:
     dp.include_router(collector_router)
 
     twogis_key = settings.TWOGIS_API_KEY.get_secret_value() if settings.TWOGIS_API_KEY else None
-    provider_set = build_providers(collector_config.providers, twogis_key)
+    provider_set = build_providers(
+        collector_config.providers,
+        twogis_key,
+        ScraperOptions(
+            city_slug=settings.SCRAPER_CITY_SLUG,
+            min_delay_seconds=settings.SCRAPER_MIN_DELAY_SECONDS,
+            max_delay_seconds=settings.SCRAPER_MAX_DELAY_SECONDS,
+            max_pages_per_run=settings.SCRAPER_MAX_PAGES_PER_RUN,
+            max_results_per_run=settings.SCRAPER_MAX_RESULTS_PER_RUN,
+            min_hours_between_runs=settings.SCRAPER_MIN_HOURS_BETWEEN_RUNS,
+            page_timeout_seconds=settings.SCRAPER_PAGE_TIMEOUT_SECONDS,
+        ),
+    )
     for name, reason in provider_set.disabled.items():
         logger.warning("Provider %s is disabled: %s", name, reason)
 

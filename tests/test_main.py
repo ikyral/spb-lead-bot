@@ -104,8 +104,8 @@ async def test_main_wires_the_collector_into_the_bot_lifetime(monkeypatch: pytes
     assert seen["scheduler_running"] is True
     assert seen["scheduler_running_after"] is False
     assert status.next_run_at is not None
-    assert status.active_providers == ["osm"]
-    assert status.disabled_providers == {"2gis": "не задан TWOGIS_API_KEY"}
+    assert status.active_providers == ["2gis_scraper", "osm"]
+    assert status.disabled_providers == {"2gis": "не задан DGIS_API_KEY"}
 
 
 def test_invalid_value_in_environment_is_reported_not_a_crash_on_import() -> None:

@@ -1,0 +1,34 @@
+User-agent: *
+Host: https://2gis.ru
+Sitemap: https://2gis.ru/sitemap.xml
+
+Disallow: /_/*
+Disallow: /maps_action
+
+Disallow: /*printmode=
+Disallow: /*login_token=
+Disallow: /*reference=
+Disallow: /*stat=
+
+Disallow: */my$
+Disallow: */my?*
+Disallow: */my/*
+
+Disallow: */user*
+Disallow: */geolocation*
+Disallow: *?refHash*
+
+Disallow: /geo/70030076128110973
+
+# Yandex-only
+Clean-param: m
+Clean-param: utm_medium&utm_campaign&utm_source&utm_content&utm_term&utm_from
+
+User-agent: Yandex
+Disallow: /search/%D0%A0/rubricId
+
+User-agent: Mail.Ru
+Crawl-delay: 0.2
+
+User-agent: GoogleOther
+Disallow: /

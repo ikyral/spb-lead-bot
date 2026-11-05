@@ -108,6 +108,10 @@ class BaseMapProvider(ABC):
 
     # Value of COLLECT_PROVIDERS that enables the provider.
     name: str = ""
+    # Name of the provider this one replaces: it is used only while that one is out of action.
+    fallback_for: str | None = None
+    # Sites that must not be visited often: the collector skips the provider until this passes.
+    min_hours_between_runs: float = 0.0
 
     @abstractmethod
     async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:
@@ -120,3 +124,7 @@ class BaseMapProvider(ABC):
     ) -> SearchPage:
         """Collection: one page, one API request. API errors raise ProviderError."""
         ...
+
+    async def close(self) -> None:
+        """Called after every run: release whatever the run opened."""
+        return None

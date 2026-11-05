@@ -62,6 +62,26 @@ class ProviderQuotaError(ProviderError):
     """The request limit or quota is exhausted. Needs the owner's attention."""
 
 
+class ProviderUnavailableError(ProviderError):
+    """The provider cannot work right now and repeating will not help (no browser, robots.txt forbids)."""
+
+
+class ProviderBudgetExhausted(ProviderError):
+    """The provider has used up its own limit for this run. Not a failure."""
+
+
+class ProviderBlockedError(ProviderError):
+    """
+    The site refused automated access: captcha, 403, 429 or an unrecognized page.
+
+    `partial` holds what was received before the refusal.
+    """
+
+    def __init__(self, reason: str, partial: list[Any] | None = None) -> None:
+        super().__init__(reason)
+        self.partial = partial or []
+
+
 class RateLimiter:
     """Spaces requests at least 1/rate seconds apart. Rate 0 means no limit."""
 

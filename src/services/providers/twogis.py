@@ -58,6 +58,8 @@ class TwoGisProvider(BaseMapProvider):
     """Fetches places via 2GIS Catalog API 3.0."""
 
     name = "2gis"
+    # The public pages are the main source; a paid key is used only when they are out of action.
+    fallback_for = "2gis_scraper"
 
     def __init__(
         self,
@@ -135,7 +137,7 @@ class TwoGisProvider(BaseMapProvider):
             isinstance(item, dict) and item.get("contact_groups") for item in items
         )
         return SearchPage(
-            places=self._parse_items(response.data, area.district, query.category, query.high_margin),
+            places=parse_catalog_items(response.data, area.district, query.category, query.high_margin),
             has_more=has_more,
             warning=_NO_CONTACTS_WARNING if no_contacts else None,
         )
@@ -172,112 +174,112 @@ class TwoGisProvider(BaseMapProvider):
 
         return places
 
-    def _parse_items(
-        self,
-        data: dict[str, Any],
-        district_name: str | None,
-        category_key: str,
-        high_margin: bool,
-    ) -> list[RawPlace]:
-        """Safely parse 2GIS catalog items into RawPlace list."""
-        places: list[RawPlace] = []
-        result = data.get("result")
-        items = result.get("items") if isinstance(result, dict) else None
 
-        for item in items if isinstance(items, list) else []:
-            # A text search may also return buildings and streets: only organizations are leads.
-            if not isinstance(item, dict) or item.get("type") not in (None, "branch"):
-                continue
-            raw_id = item.get("id")
-            raw_name = item.get("name")
-            if not raw_id or not raw_name or not str(raw_name).strip():
-                continue
+def parse_catalog_items(
+    data: dict[str, Any],
+    district_name: str | None,
+    category_key: str,
+    high_margin: bool,
+) -> list[RawPlace]:
+    """Safely parse 2GIS catalog items into RawPlace list."""
+    places: list[RawPlace] = []
+    result = data.get("result")
+    items = result.get("items") if isinstance(result, dict) else None
 
-            external_id = f"2gis_{raw_id}"
-            name = str(raw_name).strip()
+    for item in items if isinstance(items, list) else []:
+        # A text search may also return buildings and streets: only organizations are leads.
+        if not isinstance(item, dict) or item.get("type") not in (None, "branch"):
+            continue
+        raw_id = item.get("id")
+        raw_name = item.get("name")
+        if not raw_id or not raw_name or not str(raw_name).strip():
+            continue
 
-            address = None
-            addr_data = item.get("address")
-            if isinstance(addr_data, dict):
-                address = addr_data.get("name")
-            elif isinstance(addr_data, str):
-                address = addr_data
-            if not address:
-                address = item.get("address_name")
-            address_str = str(address).strip() if address and str(address).strip() else None
+        external_id = f"2gis_{raw_id}"
+        name = str(raw_name).strip()
 
-            map_url = None
-            point = item.get("point")
-            if isinstance(point, dict):
-                lat = point.get("lat")
-                lon = point.get("lon")
-                if lat is not None and lon is not None:
-                    map_url = f"https://yandex.ru/maps/?pt={lon},{lat}&z=17&l=map"
+        address = None
+        addr_data = item.get("address")
+        if isinstance(addr_data, dict):
+            address = addr_data.get("name")
+        elif isinstance(addr_data, str):
+            address = addr_data
+        if not address:
+            address = item.get("address_name")
+        address_str = str(address).strip() if address and str(address).strip() else None
 
-            phones, websites, socials_list, emails = self._extract_contacts(item)
-            phone_str = ", ".join(phones) if phones else None
-            raw_website = websites[0] if websites else None
-            socials_str = ", ".join(socials_list) if socials_list else None
+        map_url = None
+        point = item.get("point")
+        if isinstance(point, dict):
+            lat = point.get("lat")
+            lon = point.get("lon")
+            if lat is not None and lon is not None:
+                map_url = f"https://yandex.ru/maps/?pt={lon},{lat}&z=17&l=map"
 
-            if not socials_str and raw_website and is_social_domain(url_host(raw_website)):
-                socials_str = raw_website
+        phones, websites, socials_list, emails = _extract_contacts(item)
+        phone_str = ", ".join(phones) if phones else None
+        raw_website = websites[0] if websites else None
+        socials_str = ", ".join(socials_list) if socials_list else None
 
-            places.append(
-                RawPlace(
-                    external_id=external_id,
-                    source="2gis",
-                    name=name,
-                    category=category_key,
-                    district=district_name,
-                    address=address_str,
-                    phone=phone_str,
-                    socials=socials_str,
-                    raw_website=raw_website,
-                    map_url=map_url,
-                    high_margin=high_margin,
-                    email=emails[0] if emails else None,
-                    # Ids may carry a hash suffix ('70000001_ab12'), the card URL uses the numeric part.
-                    source_url=TWOGIS_FIRM_URL.format(firm_id=str(raw_id).split("_", 1)[0]),
-                )
+        if not socials_str and raw_website and is_social_domain(url_host(raw_website)):
+            socials_str = raw_website
+
+        places.append(
+            RawPlace(
+                external_id=external_id,
+                source="2gis",
+                name=name,
+                category=category_key,
+                district=district_name,
+                address=address_str,
+                phone=phone_str,
+                socials=socials_str,
+                raw_website=raw_website,
+                map_url=map_url,
+                high_margin=high_margin,
+                email=emails[0] if emails else None,
+                # Ids may carry a hash suffix ('70000001_ab12'), the card URL uses the numeric part.
+                source_url=TWOGIS_FIRM_URL.format(firm_id=str(raw_id).split("_", 1)[0]),
             )
+        )
 
-        return places
+    return places
 
-    def _extract_contacts(
-        self, item: dict[str, Any]
-    ) -> tuple[list[str], list[str], list[str], list[str]]:
-        """Extract phones, websites, socials and emails from contact_groups."""
-        phones: list[str] = []
-        websites: list[str] = []
-        socials: list[str] = []
-        emails: list[str] = []
+def _extract_contacts(
+    item: dict[str, Any]
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Extract phones, websites, socials and emails from contact_groups."""
+    phones: list[str] = []
+    websites: list[str] = []
+    socials: list[str] = []
+    emails: list[str] = []
 
-        groups = item.get("contact_groups")
-        for group in groups if isinstance(groups, list) else []:
-            contacts = group.get("contacts") if isinstance(group, dict) else None
-            for contact in contacts if isinstance(contacts, list) else []:
-                if not isinstance(contact, dict):
-                    continue
-                c_type = str(contact.get("type") or "").lower().strip()
-                val = contact.get("value") or contact.get("text") or contact.get("url")
-                if not val or not str(val).strip():
-                    continue
-                val_str = str(val).strip()
+    groups = item.get("contact_groups")
+    for group in groups if isinstance(groups, list) else []:
+        contacts = group.get("contacts") if isinstance(group, dict) else None
+        for contact in contacts if isinstance(contacts, list) else []:
+            if not isinstance(contact, dict):
+                continue
+            c_type = str(contact.get("type") or "").lower().strip()
+            val = contact.get("value") or contact.get("text") or contact.get("url")
+            if not val or not str(val).strip():
+                continue
+            val_str = str(val).strip()
 
-                if c_type == "phone":
-                    if val_str not in phones:
-                        phones.append(val_str)
-                elif c_type == "email":
-                    if val_str not in emails:
-                        emails.append(val_str)
-                elif c_type in ("website", "url"):
-                    target = socials if is_social_domain(url_host(val_str)) else websites
-                    if val_str not in target:
-                        target.append(val_str)
-                elif (
-                    c_type in ("vkontakte", "vk", "telegram", "instagram", "whatsapp", "social")
-                    and val_str not in socials
-                ):
-                    socials.append(val_str)
+            if c_type == "phone":
+                if val_str not in phones:
+                    phones.append(val_str)
+            elif c_type == "email":
+                if val_str not in emails:
+                    emails.append(val_str)
+            elif c_type in ("website", "url"):
+                target = socials if is_social_domain(url_host(val_str)) else websites
+                if val_str not in target:
+                    target.append(val_str)
+            elif (
+                c_type in ("vkontakte", "vk", "telegram", "instagram", "whatsapp", "social")
+                and val_str not in socials
+            ):
+                socials.append(val_str)
 
-        return phones, websites, socials, emails
+    return phones, websites, socials, emails

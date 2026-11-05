@@ -1,6 +1,6 @@
 from pathlib import Path, PurePosixPath
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -15,7 +15,10 @@ class Settings(BaseSettings):
     # SecretStr masks the values in repr()/str(), logs and tracebacks; use .get_secret_value().
     BOT_TOKEN: SecretStr
     ADMIN_TG_ID: int
-    TWOGIS_API_KEY: SecretStr | None = None
+    # Optional fallback for the scraper. DGIS_API_KEY and the older name TWOGIS_API_KEY both work.
+    TWOGIS_API_KEY: SecretStr | None = Field(
+        default=None, validation_alias=AliasChoices("DGIS_API_KEY", "TWOGIS_API_KEY")
+    )
     DB_URL: str = "sqlite+aiosqlite:///./leads.db"
     # Additional admins, comma-separated. ADMIN_TG_ID stays required and is always an admin.
     ADMIN_TG_IDS: str = ""
@@ -30,7 +33,7 @@ class Settings(BaseSettings):
     COLLECT_INTERVAL_MINUTES: int | None = Field(default=None, ge=1)  # when set, replaces COLLECT_CRON
     COLLECT_TIMEZONE: str = "Europe/Moscow"
     COLLECT_RUN_ON_START: bool = False
-    COLLECT_PROVIDERS: str = "2gis,osm"
+    COLLECT_PROVIDERS: str = "2gis_scraper,2gis,osm"
     COLLECT_QUERIES: str = ""  # category keys and/or free-text queries; empty = all categories
     COLLECT_DISTRICTS: str = ""  # empty = all SPb districts
     COLLECT_BBOX: str = ""  # 'south,west,north,east'; replaces COLLECT_DISTRICTS
@@ -39,6 +42,16 @@ class Settings(BaseSettings):
     COLLECT_MAX_RESULTS_PER_QUERY: int = Field(default=100, ge=1)
     COLLECT_MAX_REQUESTS_PER_RUN: int = Field(default=60, ge=1)
     COLLECT_MAX_REQUESTS_PER_DAY: int = Field(default=200, ge=1)
+
+    # Reading public pages of 2GIS. The lower bounds keep the bot polite whatever is configured.
+    SCRAPER_CITY_SLUG: str = "spb"
+    SCRAPER_MIN_DELAY_SECONDS: float = Field(default=3.0, ge=3.0)
+    SCRAPER_MAX_DELAY_SECONDS: float = Field(default=8.0, ge=3.0)
+    SCRAPER_MAX_PAGES_PER_RUN: int = Field(default=200, ge=1, le=500)
+    SCRAPER_MAX_RESULTS_PER_RUN: int = Field(default=300, ge=1, le=500)
+    SCRAPER_MIN_HOURS_BETWEEN_RUNS: float = Field(default=20.0, ge=1.0)
+    SCRAPER_BLOCK_BACKOFF_HOURS: float = Field(default=6.0, ge=2.0)
+    SCRAPER_PAGE_TIMEOUT_SECONDS: float = Field(default=45.0, ge=5.0)
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",

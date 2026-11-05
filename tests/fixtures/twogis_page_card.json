@@ -1,0 +1,23 @@
+{
+  "_comment": "NOT captured from the site, see twogis_page_search.json.",
+  "meta": {"api_version": "3.0.0", "code": 200},
+  "result": {
+    "total": 1,
+    "items": [
+      {
+        "id": "70000001018420391_def",
+        "type": "branch",
+        "name": "Дент Про",
+        "contact_groups": [
+          {
+            "contacts": [
+              {"type": "phone", "value": "+7 921 000-00-02"},
+              {"type": "email", "value": "info@dentpro.example"},
+              {"type": "website", "value": "https://dentpro.example/?utm_source=2gis"}
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

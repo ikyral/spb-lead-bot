@@ -11,8 +11,8 @@ from enum import Enum
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.database.models import CollectorState
-from src.database.repo import count_new_leads, get_collector_state
+from src.database.models import CollectorState, ProviderState
+from src.database.repo import count_new_leads, enable_provider, get_collector_state, get_provider_states
 from src.services.collector import CollectorConfig, CollectResult, collect_leads
 from src.services.providers.registry import ProviderSet
 
@@ -87,6 +87,7 @@ class CollectorStatus:
     disabled_providers: dict[str, str]
     requests_today: int
     max_requests_per_day: int
+    provider_states: dict[str, ProviderState] = field(default_factory=dict)
 
 
 ReportCallback = Callable[[RunReport], Awaitable[None]]
@@ -251,10 +252,20 @@ class CollectorRunner:
                 job.pause()
         logger.info("Automatic collection %s", "enabled" if enabled else "disabled")
 
+    def known_provider(self, name: str) -> bool:
+        return name in {provider.name for provider in self._provider_set.providers}
+
+    async def enable_provider(self, name: str) -> None:
+        """An admin's decision after an automatic switch-off."""
+        async with self._session_maker() as session:
+            await enable_provider(session, name)
+        logger.info("Provider %s enabled by an admin", name)
+
     async def get_status(self) -> CollectorStatus:
         async with self._session_maker() as session:
             state = await get_collector_state(session)
             pool_size = await count_new_leads(session)
+            provider_states = await get_provider_states(session)
             await session.commit()
         job = self._scheduler.get_job(COLLECT_JOB_ID) if self._scheduler.running else None
         return CollectorStatus(
@@ -268,6 +279,7 @@ class CollectorRunner:
             disabled_providers=dict(self._provider_set.disabled),
             requests_today=self._requests_used_today(state),
             max_requests_per_day=self._config.max_requests_per_day,
+            provider_states=provider_states,
         )
 
     def _today(self) -> str:
