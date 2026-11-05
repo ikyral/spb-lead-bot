@@ -211,7 +211,7 @@ async def handle_export_csv(callback: CallbackQuery) -> None:
     writer.writerow([
         "ID", "Источник", "Название", "Категория", "Район", "Адрес", "Телефон",
         "Соцсети", "Сайт", "Статус сайта", "Оценка", "CRM статус", "Карта", "Дата добавления (МСК)",
-        "Email", "Карточка источника", "Дата выдачи (МСК)",
+        "Email", "Карточка источника", "Дата выдачи (МСК)", "Результат контакта",
     ])
     for lead in leads:
         writer.writerow([_csv_safe(value) for value in (
@@ -219,7 +219,7 @@ async def handle_export_csv(callback: CallbackQuery) -> None:
             lead.phone or "", lead.socials or "", lead.raw_website or "", lead.site_status,
             lead.score, lead.crm_status, lead.map_url or "",
             _format_msk(lead.created_at),
-            lead.email or "", lead.source_url or "", _format_msk(lead.issued_at),
+            lead.email or "", lead.source_url or "", _format_msk(lead.issued_at), lead.contact_status or "",
         )])
 
     csv_bytes = output.getvalue().encode("utf-8-sig")

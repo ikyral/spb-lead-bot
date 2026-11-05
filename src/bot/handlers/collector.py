@@ -1,7 +1,9 @@
 """Admin commands for automatic lead collection. Access is restricted by AdminOnlyMiddleware."""
 
+import html
+
 from aiogram import Router
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from src.bot.formatters import format_collector_status
@@ -37,3 +39,19 @@ async def handle_collect_off(message: Message, collector_runner: CollectorRunner
     """Disable automatic collection: both the schedule and refilling the pool."""
     await collector_runner.set_auto_enabled(False)
     await message.answer("⏸ Автосбор выключен. Сбор вручную по-прежнему работает: /collect_now")
+
+
+@router.message(Command("provider_on"))
+async def handle_provider_on(message: Message, command: CommandObject, collector_runner: CollectorRunner) -> None:
+    """Turn a source back on after blocks. This is the only way out of an automatic switch-off."""
+    name = (command.args or "2gis_scraper").strip()
+    if not collector_runner.known_provider(name):
+        await message.answer(f"Неизвестный источник: {html.escape(name)}. Список: /collect_status", parse_mode="HTML")
+        return
+    await collector_runner.enable_provider(name)
+    await message.answer(
+        f"✅ Источник {html.escape(name)} включён, счётчик блокировок сброшен. "
+        "Если сайт снова откажет, источник остановится сам.",
+        parse_mode="HTML",
+    )
+

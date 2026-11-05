@@ -7,18 +7,18 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from src.database.models import (
-    STATUS_CONTACTED,
+    CONTACT_CONTACTED,
+    CONTACT_NO_ANSWER,
+    CONTACT_REJECTED,
+    CONTACT_REPLIED,
     STATUS_IN_WORK,
-    STATUS_ISSUED,
     STATUS_NEW,
-    STATUS_NO_ANSWER,
-    STATUS_REJECTED,
-    STATUS_REPLIED,
     Lead,
 )
 from src.services.providers.base import TARGET_CATEGORIES
 
 if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this module must not import
+    from src.database.models import ProviderState
     from src.services.scheduler import CollectorStatus, RunReport
 
 # Telegram's limit for one message.
@@ -27,14 +27,11 @@ MAX_MESSAGE_LENGTH: int = 4096
 _CARD_FIELD_LIMITS: tuple[int, ...] = (300, 100)
 _MSK = timezone(timedelta(hours=3), "MSK")
 
-_LEAD_STATUS_TITLES: dict[str, str] = {
-    STATUS_ISSUED: "📤 Выдан, ждёт действия",
-    STATUS_CONTACTED: "✍️ Написал",
-    STATUS_REPLIED: "💬 Ответили",
-    STATUS_REJECTED: "🗑 Отказ",
-    STATUS_NO_ANSWER: "🔇 Нет ответа",
-    STATUS_IN_WORK: "💼 В работе",
-    STATUS_NEW: "📋 Новый",
+_CONTACT_STATUS_TITLES: dict[str, str] = {
+    CONTACT_CONTACTED: "✍️ Написал",
+    CONTACT_REPLIED: "💬 Ответили",
+    CONTACT_REJECTED: "🗑 Отказ",
+    CONTACT_NO_ANSWER: "🔇 Нет ответа",
 }
 _CARD_LINK_TITLES: dict[str, str] = {"2gis.": "Карточка 2ГИС", "openstreetmap.": "Карточка OpenStreetMap"}
 _RUN_STATUS_TITLES: dict[str, str] = {
@@ -131,7 +128,8 @@ def _issued_card(lead: Lead, field_limit: int) -> str:
         lines.append(f'🗺 <a href="{html.escape(lead.source_url, quote=True)}">{title}</a>')
     elif lead.map_url and lead.map_url.startswith(("http://", "https://")):
         lines.append(f'🗺 <a href="{html.escape(lead.map_url, quote=True)}">На карте</a>')
-    lines.append(f"📌 <b>Статус:</b> {_LEAD_STATUS_TITLES.get(lead.crm_status, html.escape(lead.crm_status))}")
+    status = _CONTACT_STATUS_TITLES.get(lead.contact_status or "", "📤 Выдан, ждёт действия")
+    lines.append(f"📌 <b>Статус:</b> {status}")
     return "\n".join(lines)
 
 
@@ -145,18 +143,19 @@ def format_issued_lead(lead: Lead) -> str:
     return text
 
 
-def format_funnel_stats(counts: dict[str, int], issued_total: int) -> str:
+def format_funnel_stats(counts: dict[str, int], contact_counts: dict[str, int], issued_total: int) -> str:
     """Format the pool size and what happened to the handed-out leads."""
+    waiting = max(0, issued_total - sum(contact_counts.values()))
     lines = [
         "📊 <b>Лиды:</b>\n",
         f"• 📈 Всего: <b>{sum(counts.values())}</b>",
         f"• 📦 Новых в запасе: <b>{counts.get(STATUS_NEW, 0)}</b>",
         f"• 📤 Выдано всего: <b>{issued_total}</b>",
-        f"• ⏳ Выдано, ждут действия: <b>{counts.get(STATUS_ISSUED, 0)}</b>",
-        f"• ✍️ Написал: <b>{counts.get(STATUS_CONTACTED, 0)}</b>",
-        f"• 💬 Ответили: <b>{counts.get(STATUS_REPLIED, 0)}</b>",
-        f"• 🗑 Отказ: <b>{counts.get(STATUS_REJECTED, 0)}</b>",
-        f"• 🔇 Нет ответа: <b>{counts.get(STATUS_NO_ANSWER, 0)}</b>",
+        f"• ⏳ Выдано, ждут действия: <b>{waiting}</b>",
+        f"• ✍️ Написал: <b>{contact_counts.get(CONTACT_CONTACTED, 0)}</b>",
+        f"• 💬 Ответили: <b>{contact_counts.get(CONTACT_REPLIED, 0)}</b>",
+        f"• 🗑 Отказ: <b>{contact_counts.get(CONTACT_REJECTED, 0)}</b>",
+        f"• 🔇 Нет ответа: <b>{contact_counts.get(CONTACT_NO_ANSWER, 0)}</b>",
     ]
     if counts.get(STATUS_IN_WORK):
         lines.append(f"• 💼 В работе: <b>{counts[STATUS_IN_WORK]}</b>")
@@ -180,24 +179,41 @@ def format_collection_report(report: RunReport) -> str:
     ]
     if result.last_error:
         lines.append(f"\n⚠️ Последняя ошибка: {html.escape(result.last_error)}")
+    lines += [f"⏭ {html.escape(name)} пропущен: {html.escape(why)}" for name, why in result.skipped.items()]
     return "\n".join(lines)
+
+
+def _provider_line(name: str, state: ProviderState | None, now: datetime) -> str:
+    safe_name = html.escape(name)
+    if state is None:
+        return f"✅ {safe_name}"
+    reason = html.escape(state.last_block_reason or "")
+    if state.disabled_at is not None:
+        return f"⛔ {safe_name}: отключён после блокировок ({reason}). Включить: /provider_on {safe_name}"
+    if state.blocked_until is not None and now < state.blocked_until:
+        return f"⏸ {safe_name}: пауза до {format_msk_time(state.blocked_until)} ({reason})"
+    return f"✅ {safe_name}"
 
 
 def format_collector_status(status: CollectorStatus) -> str:
     """Format the state of automatic collection."""
     state = status.state
+    now = datetime.now(UTC)
     lines = [
         "🤖 <b>Автосбор лидов</b>\n",
         f"Автозапуск: <b>{'включён' if status.auto_enabled else 'выключен'}</b>",
         f"Расписание: {html.escape(status.schedule_text)}",
         f"Следующий запуск: <b>{format_msk_time(status.next_run_at)}</b>",
-        f"Источники: <b>{html.escape(', '.join(status.active_providers) or 'нет')}</b>",
+        "\n<b>Источники:</b>",
     ]
+    lines += [_provider_line(name, status.provider_states.get(name), now) for name in status.active_providers]
+    if not status.active_providers:
+        lines.append("нет доступных")
     lines += [
         f"⚠️ {html.escape(name)} отключён: {html.escape(reason)}"
         for name, reason in status.disabled_providers.items()
     ]
-    lines.append(f"📦 В запасе: <b>{status.pool_size}</b>")
+    lines.append(f"\n📦 В запасе: <b>{status.pool_size}</b>")
     lines.append(f"Запросов за сутки: {status.requests_today} из {status.max_requests_per_day}")
     if status.is_running:
         lines.append("\n⏳ <b>Сбор выполняется прямо сейчас</b>")

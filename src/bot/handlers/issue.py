@@ -21,10 +21,11 @@ from src.database.repo import (
     async_session_maker,
     count_issued_leads,
     count_new_leads,
+    get_contact_status_counts,
     get_status_counts,
     issue_next_leads,
     return_undelivered_leads,
-    update_crm_status,
+    set_contact_status,
 )
 from src.services.scheduler import TRIGGER_BATCH, CollectorRunner, TopupDecision, TopupOutcome
 
@@ -46,7 +47,7 @@ async def _send_card(message: Message, lead: Lead) -> None:
         try:
             await message.answer(
                 format_issued_lead(lead),
-                reply_markup=get_lead_status_keyboard(lead.id, lead.crm_status),
+                reply_markup=get_lead_status_keyboard(lead.id, lead.contact_status),
                 parse_mode="HTML",
                 link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
@@ -146,11 +147,11 @@ async def handle_lead_status(callback: CallbackQuery) -> None:
         if lead is None or lead.issued_at is None:
             await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
             return
-        if lead.crm_status == status:
+        if lead.contact_status == status:
             await callback.answer("Этот статус уже стоит")
             return
-        await update_crm_status(session, lead_id, status)
-        lead.crm_status = status
+        await set_contact_status(session, lead_id, status)
+        lead.contact_status = status
 
     await callback.answer(f"Статус: {LEAD_OUTCOMES[status]}")
     if isinstance(callback.message, Message):
@@ -171,7 +172,10 @@ async def handle_leads_stats(message: Message) -> None:
     """Show how many leads are in the pool and what happened to the handed-out ones."""
     async with async_session_maker() as session:
         counts = await get_status_counts(session)
+        contact_counts = await get_contact_status_counts(session)
         issued_total = await count_issued_leads(session)
     await message.answer(
-        format_funnel_stats(counts, issued_total), reply_markup=get_full_export_keyboard(), parse_mode="HTML"
+        format_funnel_stats(counts, contact_counts, issued_total),
+        reply_markup=get_full_export_keyboard(),
+        parse_mode="HTML",
     )

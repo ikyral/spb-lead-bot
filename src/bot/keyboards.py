@@ -9,7 +9,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.config import settings
-from src.database.models import STATUS_CONTACTED, STATUS_NO_ANSWER, STATUS_REJECTED, STATUS_REPLIED
+from src.database.models import CONTACT_CONTACTED, CONTACT_NO_ANSWER, CONTACT_REJECTED, CONTACT_REPLIED
 from src.services.providers.base import SPB_DISTRICTS, TARGET_CATEGORIES
 
 DISTRICT_NAMES: list[str] = list(SPB_DISTRICTS.keys())
@@ -20,10 +20,10 @@ STALE_BUTTON_TEXT: str = "Кнопка устарела. Откройте мен
 
 # Statuses an admin can put on a handed-out lead, in the order of the buttons.
 LEAD_OUTCOMES: dict[str, str] = {
-    STATUS_CONTACTED: "Написал",
-    STATUS_REPLIED: "Ответили",
-    STATUS_REJECTED: "Отказ",
-    STATUS_NO_ANSWER: "Нет ответа",
+    CONTACT_CONTACTED: "Написал",
+    CONTACT_REPLIED: "Ответили",
+    CONTACT_REJECTED: "Отказ",
+    CONTACT_NO_ANSWER: "Нет ответа",
 }
 
 
@@ -117,7 +117,7 @@ def get_lead_card_keyboard(
     return builder.as_markup()
 
 
-def get_lead_status_keyboard(lead_id: int, current_status: str) -> InlineKeyboardMarkup:
+def get_lead_status_keyboard(lead_id: int, current_status: str | None) -> InlineKeyboardMarkup:
     """Status buttons of a handed-out lead; the current status is marked."""
     builder = InlineKeyboardBuilder()
     for status, title in LEAD_OUTCOMES.items():

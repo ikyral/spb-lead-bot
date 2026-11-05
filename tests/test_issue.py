@@ -28,14 +28,15 @@ from src.bot.middlewares import AdminOnlyMiddleware
 from src.bot.notifier import AdminNotifier
 from src.config import Settings, settings
 from src.database.models import (
-    STATUS_CONTACTED,
+    CONTACT_CONTACTED,
+    CONTACT_NO_ANSWER,
+    CONTACT_REJECTED,
+    CONTACT_REPLIED,
     STATUS_ISSUED,
     STATUS_NEW,
-    STATUS_NO_ANSWER,
-    STATUS_REJECTED,
-    STATUS_REPLIED,
     CollectorState,
     Lead,
+    ProviderState,
 )
 from src.database.repo import (
     count_issued_leads,
@@ -44,6 +45,7 @@ from src.database.repo import (
     init_db,
     issue_next_leads,
     return_undelivered_leads,
+    set_contact_status,
 )
 from src.services.collector import CollectResult
 from src.services.scheduler import TopupDecision, TopupOutcome
@@ -124,8 +126,8 @@ async def test_other_statuses_are_never_handed_out(session_maker) -> None:
     async with session_maker() as session:
         session.add_all([
             _lead(1, crm_status="in_work"),
-            _lead(2, crm_status=STATUS_REJECTED),
-            _lead(3, crm_status=STATUS_CONTACTED),
+            _lead(2, crm_status="rejected"),
+            _lead(3, crm_status=STATUS_ISSUED, contact_status=CONTACT_CONTACTED),
             _lead(4),
         ])
         await session.commit()
@@ -149,18 +151,19 @@ async def test_status_set_meanwhile_is_not_lost_by_returning_a_lead(session_make
         lead_id = (await issue_next_leads(session, 1))[0].id
     async with session_maker() as session:
         lead = await session.get(Lead, lead_id)
-        lead.crm_status = STATUS_CONTACTED
+        lead.contact_status = CONTACT_CONTACTED
         await session.commit()
     async with session_maker() as session:
         await return_undelivered_leads(session, [lead_id])
-        assert (await session.get(Lead, lead_id)).crm_status == STATUS_CONTACTED
+        lead = await session.get(Lead, lead_id)
+    assert (lead.crm_status, lead.contact_status) == (STATUS_ISSUED, CONTACT_CONTACTED)
 
 
 async def test_status_counts_cover_every_status(session_maker) -> None:
     async with session_maker() as session:
-        session.add_all([_lead(1), _lead(2, crm_status=STATUS_ISSUED), _lead(3, crm_status=STATUS_REPLIED)])
+        session.add_all([_lead(1), _lead(2, crm_status=STATUS_ISSUED), _lead(3, crm_status="in_work")])
         await session.commit()
-        assert await get_status_counts(session) == {STATUS_NEW: 1, STATUS_ISSUED: 1, STATUS_REPLIED: 1}
+        assert await get_status_counts(session) == {STATUS_NEW: 1, STATUS_ISSUED: 1, "in_work": 1}
 
 
 # ---------- 'next batch' button ----------
@@ -248,6 +251,32 @@ async def test_double_tap_does_not_hand_out_a_second_batch(batch_env) -> None:
     await first
     async with batch_env() as session:
         assert await count_new_leads(session) == 3  # only one batch left the pool
+
+
+async def test_two_admins_pressing_at_once_get_different_leads(batch_env) -> None:
+    await _add_leads(batch_env, 6)
+    first, second = _message(user_id=1), _message(user_id=2)
+
+    await asyncio.gather(
+        issue.handle_next_batch(first, _runner()),
+        issue.handle_next_batch(second, _runner()),
+    )
+
+    def names(message: MagicMock) -> set[str]:
+        return {call.args[0].split("</b>")[0] for call in _cards(message)}
+
+    assert len(names(first)) == 3
+    assert len(names(second)) == 3
+    assert not names(first) & names(second)
+
+
+async def test_pressing_the_button_makes_no_requests_to_external_sources(batch_env) -> None:
+    """Handing out reads only the database; collection happens in the background."""
+    await _add_leads(batch_env, 3)
+    runner = _runner()
+    await issue.handle_next_batch(_message(), runner)
+    runner.request_topup.assert_not_awaited()
+    runner.start_in_background.assert_not_called()
 
 
 async def test_guard_is_released_after_an_error(batch_env, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -416,11 +445,11 @@ def test_card_never_exceeds_the_telegram_limit() -> None:
 
 
 def test_status_keyboard_marks_the_current_status_and_fits_telegram_limits() -> None:
-    keyboard = get_lead_status_keyboard(12345678, STATUS_REPLIED)
+    keyboard = get_lead_status_keyboard(12345678, CONTACT_REPLIED)
     buttons = [button for row in keyboard.inline_keyboard for button in row]
     assert [button.text for button in buttons] == ["Написал", "✅ Ответили", "Отказ", "Нет ответа"]
     assert all(len(button.callback_data.encode()) <= 64 for button in buttons)
-    assert set(LEAD_OUTCOMES) == {STATUS_CONTACTED, STATUS_REPLIED, STATUS_REJECTED, STATUS_NO_ANSWER}
+    assert set(LEAD_OUTCOMES) == {CONTACT_CONTACTED, CONTACT_REPLIED, CONTACT_REJECTED, CONTACT_NO_ANSWER}
 
 
 def _status_callback(data: str) -> MagicMock:
@@ -447,7 +476,7 @@ async def test_status_button_saves_the_status_and_updates_the_card(batch_env, st
 
     async with batch_env() as session:
         lead = await session.get(Lead, lead_id)
-    assert lead.crm_status == status
+    assert (lead.contact_status, lead.crm_status) == (status, STATUS_ISSUED)
     assert lead.issued_at is not None
     callback.answer.assert_awaited_once_with(f"Статус: {LEAD_OUTCOMES[status]}")
     edit = callback.message.edit_text.await_args
@@ -458,14 +487,14 @@ async def test_status_button_saves_the_status_and_updates_the_card(batch_env, st
 
 async def test_status_can_be_changed_and_same_status_is_no_error(batch_env) -> None:
     lead_id = await _issued_lead_id(batch_env)
-    await issue.handle_lead_status(_status_callback(f"ls:{lead_id}:{STATUS_CONTACTED}"))
-    await issue.handle_lead_status(_status_callback(f"ls:{lead_id}:{STATUS_REPLIED}"))
+    await issue.handle_lead_status(_status_callback(f"ls:{lead_id}:{CONTACT_CONTACTED}"))
+    await issue.handle_lead_status(_status_callback(f"ls:{lead_id}:{CONTACT_REPLIED}"))
 
-    again = _status_callback(f"ls:{lead_id}:{STATUS_REPLIED}")
+    again = _status_callback(f"ls:{lead_id}:{CONTACT_REPLIED}")
     await issue.handle_lead_status(again)
     again.message.edit_text.assert_not_awaited()
     async with batch_env() as session:
-        assert (await session.get(Lead, lead_id)).crm_status == STATUS_REPLIED
+        assert (await session.get(Lead, lead_id)).contact_status == CONTACT_REPLIED
 
 
 @pytest.mark.parametrize(
@@ -478,12 +507,13 @@ async def test_forged_or_stale_status_buttons_are_rejected(batch_env, data: str)
     await issue.handle_lead_status(callback)
     callback.answer.assert_awaited_once_with(STALE_BUTTON_TEXT, show_alert=True)
     async with batch_env() as session:
-        assert (await session.get(Lead, 1)).crm_status == STATUS_ISSUED
+        lead = await session.get(Lead, 1)
+    assert (lead.crm_status, lead.contact_status) == (STATUS_ISSUED, None)
 
 
 async def test_status_of_a_lead_not_handed_out_cannot_be_set(batch_env) -> None:
     await _add_leads(batch_env, 1)
-    callback = _status_callback(f"ls:1:{STATUS_CONTACTED}")
+    callback = _status_callback(f"ls:1:{CONTACT_CONTACTED}")
     await issue.handle_lead_status(callback)
     callback.answer.assert_awaited_once_with(STALE_BUTTON_TEXT, show_alert=True)
     async with batch_env() as session:
@@ -492,28 +522,22 @@ async def test_status_of_a_lead_not_handed_out_cannot_be_set(batch_env) -> None:
 
 async def test_status_is_saved_even_if_the_old_card_cannot_be_edited(batch_env) -> None:
     lead_id = await _issued_lead_id(batch_env)
-    callback = _status_callback(f"ls:{lead_id}:{STATUS_REPLIED}")
+    callback = _status_callback(f"ls:{lead_id}:{CONTACT_REPLIED}")
     callback.message.edit_text.side_effect = TelegramBadRequest(
         method=MagicMock(spec=SendMessage), message="message can't be edited"
     )
     await issue.handle_lead_status(callback)
     async with batch_env() as session:
-        assert (await session.get(Lead, lead_id)).crm_status == STATUS_REPLIED
+        assert (await session.get(Lead, lead_id)).contact_status == CONTACT_REPLIED
 
 
 # ---------- statistics and other messages ----------
 
 
 def test_funnel_stats_text() -> None:
-    counts = {
-        STATUS_NEW: 5,
-        STATUS_ISSUED: 2,
-        STATUS_CONTACTED: 3,
-        STATUS_REPLIED: 1,
-        STATUS_REJECTED: 4,
-        STATUS_NO_ANSWER: 6,
-    }
-    text_ = format_funnel_stats(counts, issued_total=16)
+    counts = {STATUS_NEW: 5, STATUS_ISSUED: 16}
+    contact_counts = {CONTACT_CONTACTED: 3, CONTACT_REPLIED: 1, CONTACT_REJECTED: 4, CONTACT_NO_ANSWER: 6}
+    text_ = format_funnel_stats(counts, contact_counts, issued_total=16)
     for line in (
         "Всего: <b>21</b>", "в запасе: <b>5</b>", "Выдано всего: <b>16</b>", "ждут действия: <b>2</b>",
         "Написал: <b>3</b>", "Ответили: <b>1</b>", "Отказ: <b>4</b>", "Нет ответа: <b>6</b>",
@@ -525,7 +549,7 @@ def test_funnel_stats_text() -> None:
 async def test_stats_command_counts_from_the_database(batch_env) -> None:
     lead_id = await _issued_lead_id(batch_env)
     await _add_leads(batch_env, 2, start=10)
-    await issue.handle_lead_status(_status_callback(f"ls:{lead_id}:{STATUS_CONTACTED}"))
+    await issue.handle_lead_status(_status_callback(f"ls:{lead_id}:{CONTACT_CONTACTED}"))
 
     message = _message()
     await issue.handle_leads_stats(message)
@@ -541,7 +565,7 @@ async def test_stats_command_counts_from_the_database(batch_env) -> None:
 async def test_existing_stats_button_total_includes_handed_out_leads(session_maker, monkeypatch) -> None:
     monkeypatch.setattr(leads, "async_session_maker", session_maker)
     async with session_maker() as session:
-        session.add_all([_lead(1), _lead(2, crm_status=STATUS_CONTACTED), _lead(3, crm_status="in_work")])
+        session.add_all([_lead(1), _lead(2, crm_status=STATUS_ISSUED), _lead(3, crm_status="in_work")])
         await session.commit()
     message = _message()
     await leads.handle_stats(message)
@@ -564,8 +588,8 @@ async def test_csv_export_gets_new_columns_at_the_end(session_maker, monkeypatch
     document = callback.message.answer_document.await_args.kwargs["document"]
     header, row = list(csv.reader(io.StringIO(document.data.decode("utf-8-sig")), delimiter=";"))[:2]
     assert header[:2] == ["ID", "Источник"]
-    assert header[-3:] == ["Email", "Карточка источника", "Дата выдачи (МСК)"]
-    assert row[-1] != ""
+    assert header[-4:] == ["Email", "Карточка источника", "Дата выдачи (МСК)", "Результат контакта"]
+    assert row[-2] != ""
 
 
 def test_main_menu_has_the_batch_button() -> None:
@@ -599,6 +623,7 @@ def test_collector_status_before_the_first_run_and_after_it() -> None:
         disabled_providers={"2gis": "не задан TWOGIS_API_KEY"},
         requests_today=3,
         max_requests_per_day=200,
+        provider_states={},
     )
     text_ = format_collector_status(status)
     assert "06.11.2026 04:00 МСК" in text_
@@ -642,6 +667,52 @@ async def test_notifier_survives_one_unreachable_admin() -> None:
     ])
     await AdminNotifier(bot, [1, 2]).send("текст")
     assert bot.send_message.await_count == 2
+
+
+async def test_provider_on_command() -> None:
+    runner = MagicMock()
+    runner.known_provider = MagicMock(side_effect=lambda name: name == "2gis_scraper")
+    runner.enable_provider = AsyncMock()
+
+    message = _message()
+    await collector_handlers.handle_provider_on(message, MagicMock(args=None), runner)
+    runner.enable_provider.assert_awaited_once_with("2gis_scraper")
+    assert "включён" in _final_text(message)
+
+    runner.enable_provider.reset_mock()
+    await collector_handlers.handle_provider_on(message, MagicMock(args="<b>что-то</b>"), runner)
+    runner.enable_provider.assert_not_awaited()
+    assert "&lt;b&gt;что-то" in _final_text(message)
+
+
+def test_status_shows_paused_and_switched_off_providers() -> None:
+    now = datetime.now(UTC)
+    paused = ProviderState(
+        name="2gis_scraper", consecutive_blocks=1, last_block_reason="сайт показал капчу",
+        blocked_until=now + timedelta(hours=6),
+    )
+    off = ProviderState(
+        name="other", consecutive_blocks=3, last_block_reason="сайт ответил кодом 429", disabled_at=now,
+    )
+    status = MagicMock(
+        state=CollectorState(id=1, found=0, qualified=0, saved_new=0, duplicates=0, errors=0),
+        auto_enabled=True,
+        is_running=False,
+        next_run_at=None,
+        schedule_text="cron",
+        pool_size=0,
+        active_providers=["2gis_scraper", "other", "osm"],
+        disabled_providers={},
+        requests_today=0,
+        max_requests_per_day=200,
+        provider_states={"2gis_scraper": paused, "other": off},
+    )
+    text_ = format_collector_status(status)
+    assert "⏸ 2gis_scraper: пауза до" in text_
+    assert "сайт показал капчу" in text_
+    assert "⛔ other: отключён" in text_
+    assert "/provider_on other" in text_
+    assert "✅ osm" in text_
 
 
 async def test_collect_commands_answer_and_switch() -> None:
@@ -750,7 +821,7 @@ async def test_stranger_cannot_take_leads_or_set_statuses(guarded_dispatcher, mo
         _update(1, 999, "📦 Следующие 30"),
         _update(2, 999, "/next_leads"),
         _update(3, 999, "/leads_stats"),
-        _callback_update(4, 999, f"ls:1:{STATUS_CONTACTED}"),
+        _callback_update(4, 999, f"ls:1:{CONTACT_CONTACTED}"),
     )
     for update in updates:
         await guarded_dispatcher.feed_update(bot, update, collector_runner=runner)
@@ -802,12 +873,15 @@ OLD_SCHEMA = [
 
 # The rollback documented in README.md.
 ROLLBACK_SCHEMA = [
-    "UPDATE leads SET crm_status = 'in_work' WHERE crm_status IN ('issued', 'contacted', 'replied', 'no_answer')",
+    "UPDATE leads SET crm_status = 'rejected' WHERE contact_status = 'rejected'",
+    "UPDATE leads SET crm_status = 'in_work' WHERE crm_status = 'issued'",
     "DROP INDEX ix_leads_crm_status_created_at",
     "ALTER TABLE leads DROP COLUMN email",
     "ALTER TABLE leads DROP COLUMN source_url",
     "ALTER TABLE leads DROP COLUMN issued_at",
+    "ALTER TABLE leads DROP COLUMN contact_status",
     "DROP TABLE collector_state",
+    "DROP TABLE provider_state",
 ]
 
 
@@ -835,8 +909,8 @@ async def test_upgrade_keeps_data_is_repeatable_and_old_leads_join_the_queue(old
     await init_db(old_database)
     await init_db(old_database)  # a restart must not fail
 
-    assert {"email", "source_url", "issued_at"} <= await _columns(old_database)
-    assert "collector_state" in await _tables(old_database)
+    assert {"email", "source_url", "issued_at", "contact_status"} <= await _columns(old_database)
+    assert {"collector_state", "provider_state"} <= await _tables(old_database)
 
     session_maker = async_sessionmaker(old_database, expire_on_commit=False, class_=AsyncSession)
     async with session_maker() as session:
@@ -857,10 +931,64 @@ async def test_documented_rollback_restores_the_old_schema(old_database) -> None
             await conn.execute(text(statement))
 
     assert await _columns(old_database) == before
-    assert "collector_state" not in await _tables(old_database)
+    assert not {"collector_state", "provider_state"} & await _tables(old_database)
     async with old_database.connect() as conn:
         rows = (await conn.execute(text("SELECT crm_status FROM leads ORDER BY id"))).scalars().all()
     assert rows == ["in_work", "in_work"]
 
     await init_db(old_database)  # and it can be upgraded again
-    assert {"email", "source_url", "issued_at"} <= await _columns(old_database)
+    assert {"email", "source_url", "issued_at", "contact_status"} <= await _columns(old_database)
+
+
+async def test_rollback_keeps_refusals_as_rejected(old_database) -> None:
+    await init_db(old_database)
+    session_maker = async_sessionmaker(old_database, expire_on_commit=False, class_=AsyncSession)
+    async with session_maker() as session:
+        batch = await issue_next_leads(session, 1)
+        lead_id = batch[0].id
+        await set_contact_status(session, lead_id, CONTACT_REJECTED)
+    async with old_database.begin() as conn:
+        for statement in ROLLBACK_SCHEMA:
+            await conn.execute(text(statement))
+        query = text("SELECT crm_status FROM leads WHERE id = :id")
+        status = (await conn.execute(query, {"id": lead_id})).scalar_one()
+    assert status == "rejected"
+
+
+async def test_results_stored_in_crm_status_by_the_earlier_version_move_to_contact_status(old_database) -> None:
+    """A database upgraded by the previous commit of this branch has no contact_status yet."""
+    async with old_database.begin() as conn:
+        await conn.execute(text("ALTER TABLE leads ADD COLUMN email VARCHAR(255)"))
+        await conn.execute(text("ALTER TABLE leads ADD COLUMN source_url VARCHAR(512)"))
+        await conn.execute(text("ALTER TABLE leads ADD COLUMN issued_at DATETIME"))
+        for number, status, issued in (
+            (10, "contacted", "2026-11-05 10:00:00"),
+            (11, "replied", "2026-11-05 10:00:00"),
+            (12, "no_answer", "2026-11-05 10:00:00"),
+            (13, "rejected", "2026-11-05 10:00:00"),
+            (14, "rejected", None),  # rejected from the CRM cards, never handed out
+            (15, "issued", "2026-11-05 10:00:00"),
+        ):
+            await conn.execute(
+                text(
+                    "INSERT INTO leads "
+                    "(external_id, source, name, category, site_status, score, crm_status, issued_at) "
+                    "VALUES (:external_id, 'x', 'n', 'c', 'no_site', 50, :status, :issued)"
+                ),
+                {"external_id": f"x_{number}", "status": status, "issued": issued},
+            )
+
+    await init_db(old_database)
+
+    async with old_database.connect() as conn:
+        rows = (await conn.execute(text(
+            "SELECT external_id, crm_status, contact_status FROM leads WHERE external_id LIKE 'x_%' ORDER BY id"
+        ))).all()
+    assert [tuple(row) for row in rows] == [
+        ("x_10", "issued", "contacted"),
+        ("x_11", "issued", "replied"),
+        ("x_12", "issued", "no_answer"),
+        ("x_13", "issued", "rejected"),
+        ("x_14", "rejected", None),
+        ("x_15", "issued", None),
+    ]
