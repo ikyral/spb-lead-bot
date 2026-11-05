@@ -2,9 +2,17 @@
 Everything that depends on how 2gis.ru looks: URLs, signs of a block, the format of responses.
 
 When the site changes, this is the file to edit.
+
+STATUS OF THIS FILE (2026-11-05). The block detection is based on a page really received from
+the site (tests/fixtures/twogis_captcha.html). The rest was never checked against the site:
+the very first request was answered with a captcha, so no search page or card was seen.
+- The search and card URLs are the public ones known from the site's links.
+- Which requests the site's own scripts send, and that their format equals the documented
+  Catalog API 3.0, are assumptions. If they are wrong, pages are reported as unrecognized
+  (the provider stops and the admin is told); nothing wrong is saved.
+- DOM parsing does not exist on purpose: there are no real pages to base selectors on.
 """
 
-import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -20,8 +28,6 @@ _CAPTCHA_HOST = "captcha.2gis."
 _CAPTCHA_TITLE = "captcha"
 _CAPTCHA_HTML_MARKERS: tuple[str, ...] = ("g-recaptcha", "подозрительную активность", "что вы не робот")
 _REFUSING_STATUSES: frozenset[int] = frozenset({401, 403, 429})
-
-_INITIAL_STATE_RE = re.compile(r"var\s+initialState\s*=\s*JSON\.parse\(\s*('(?:\\.|[^'])*'|\"(?:\\.|[^\"])*\")\s*\)")
 
 
 def build_search_url(city_slug: str, text: str, page: int = 1) -> str:
@@ -76,28 +82,9 @@ def _meta_code(body: dict[str, Any]) -> int | None:
     return code if isinstance(code, int) else None
 
 
-def _extract_initial_state(html: str) -> dict[str, Any] | None:
-    """Extract SSR `initialState` JSON embedded in 2GIS HTML when XHR is not fired on initial load."""
-    if not html:
-        return None
-    match = _INITIAL_STATE_RE.search(html)
-    if not match:
-        return None
-    raw_literal = match.group(1)
-    try:
-        if raw_literal.startswith("'"):
-            unescaped = raw_literal[1:-1].replace('\\"', '"').replace("\\'", "'").replace("\\\\", "\\")
-        else:
-            unescaped = json.loads(raw_literal)
-        parsed = json.loads(unescaped)
-        return parsed if isinstance(parsed, dict) else None
-    except (ValueError, TypeError):
-        return None
-
-
-def read_search_bodies(bodies: list[dict[str, Any]], html: str = "") -> SearchData | None:
+def read_search_bodies(bodies: list[dict[str, Any]]) -> SearchData | None:
     """
-    Find the search result among the responses of a page (or fallback to SSR initialState in HTML).
+    Find the search result among the responses of a page.
 
     Returns None if nothing resembles one: the page is not what the code expects.
     'Not found' from the site is a normal empty result.
@@ -113,18 +100,6 @@ def read_search_bodies(bodies: list[dict[str, Any]], html: str = "") -> SearchDa
             )
     if any(_meta_code(body) == 404 for body in bodies):
         return SearchData(items=[], total=0)
-
-    state = _extract_initial_state(html)
-    if state is not None:
-        profile_map = state.get("data", {}).get("entity", {}).get("profile", {})
-        if isinstance(profile_map, dict) and profile_map:
-            items = [
-                entry["data"]
-                for entry in profile_map.values()
-                if isinstance(entry, dict) and isinstance(entry.get("data"), dict)
-            ]
-            if items:
-                return SearchData(items=items, total=None)
     return None
 
 
@@ -137,8 +112,8 @@ def refusal_in_bodies(bodies: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def read_card_body(bodies: list[dict[str, Any]], firm_id: str, html: str = "") -> dict[str, Any] | None:
-    """Find the card of this organization among the responses of a page (or SSR HTML)."""
+def read_card_body(bodies: list[dict[str, Any]], firm_id: str) -> dict[str, Any] | None:
+    """Find the card of this organization among the responses of a page."""
     numeric_id = firm_id.split("_", 1)[0]
     for body in bodies:
         result = body.get("result")
@@ -146,13 +121,4 @@ def read_card_body(bodies: list[dict[str, Any]], firm_id: str, html: str = "") -
         for item in items if isinstance(items, list) else []:
             if isinstance(item, dict) and str(item.get("id", "")).split("_", 1)[0] == numeric_id:
                 return item
-
-    state = _extract_initial_state(html)
-    if state is not None:
-        profile_map = state.get("data", {}).get("entity", {}).get("profile", {})
-        if isinstance(profile_map, dict):
-            for entry in profile_map.values():
-                item = entry.get("data") if isinstance(entry, dict) else None
-                if isinstance(item, dict) and str(item.get("id", "")).split("_", 1)[0] == numeric_id:
-                    return item
     return None
