@@ -127,6 +127,24 @@ def get_lead_status_keyboard(lead_id: int, current_status: str | None) -> Inline
     return builder.as_markup()
 
 
+def get_next_batch_keyboard() -> InlineKeyboardMarkup:
+    """The 'next batch' button for groups, where the bottom keyboard does not suit (see README)."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"📦 Следующие {settings.LEADS_BATCH_SIZE}", callback_data="panel:next")
+    return builder.as_markup()
+
+
+def get_group_panel_keyboard() -> InlineKeyboardMarkup:
+    """Controls for groups. Inline buttons reach the bot even with privacy mode on."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"📦 Следующие {settings.LEADS_BATCH_SIZE}", callback_data="panel:next")
+    builder.button(text="📊 Статистика", callback_data="panel:stats")
+    builder.button(text="🤖 Статус сбора", callback_data="panel:status")
+    builder.button(text="▶️ Запустить сбор", callback_data="panel:collect")
+    builder.adjust(1, 2, 1)
+    return builder.as_markup()
+
+
 def get_full_export_keyboard() -> InlineKeyboardMarkup:
     """Export of all leads, including the handed-out ones."""
     builder = InlineKeyboardBuilder()

@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Dialect, Index, Integer, String, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Dialect, Index, Integer, String, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -81,6 +81,10 @@ class Lead(Base):
     source_url: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
     issued_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
     contact_status: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
+    # Who set contact_status and when: Telegram IDs do not fit 32 bits.
+    contact_status_by_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    contact_status_by: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
+    contact_status_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
 
     def __repr__(self) -> str:
         return (

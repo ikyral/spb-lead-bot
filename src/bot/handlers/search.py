@@ -10,10 +10,12 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
+from src.bot.chats import is_group_chat
 from src.bot.keyboards import (
     STALE_BUTTON_TEXT,
     get_categories_keyboard,
     get_districts_keyboard,
+    get_group_panel_keyboard,
     get_main_menu_keyboard,
 )
 from src.config import settings
@@ -81,6 +83,15 @@ class ProgressReporter:
 @router.message(CommandStart())
 async def handle_start(message: Message) -> None:
     """Handle /start command, welcome admin, and display main menu."""
+    if is_group_chat(message):
+        # The bottom keyboard would appear for everyone, and privacy mode hides its buttons from the bot.
+        await message.answer(
+            "👋 <b>SPb Lead Finder</b>\n\nКнопками и командами могут пользоваться только администраторы бота.",
+            reply_markup=get_group_panel_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
     text = (
         "👋 <b>Добро пожаловать в SPb Lead Finder!</b>\n\n"
         "Бот ищет потенциальных клиентов на разработку сайтов в Санкт-Петербурге:\n"

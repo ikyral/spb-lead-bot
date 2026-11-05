@@ -2,11 +2,12 @@
 
 import html
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from src.bot.formatters import format_collector_status
+from src.bot.keyboards import STALE_BUTTON_TEXT
 from src.services.scheduler import TRIGGER_MANUAL, CollectorRunner
 
 router = Router(name="collector")
@@ -19,6 +20,25 @@ async def handle_collect_now(message: Message, collector_runner: CollectorRunner
         await message.answer("▶️ Сбор запущен. Итог пришлю, когда он закончится.")
     else:
         await message.answer("⏳ Сбор уже выполняется. Итог придёт, когда он закончится.")
+
+
+@router.callback_query(F.data.in_({"panel:collect", "panel:status"}))
+async def handle_panel_button(callback: CallbackQuery, collector_runner: CollectorRunner) -> None:
+    """The same as /collect_now and /collect_status from inline buttons."""
+    if not isinstance(callback.message, Message):
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    await callback.answer()
+    if callback.data == "panel:collect":
+        await handle_collect_now(callback.message, collector_runner)
+    else:
+        await handle_collect_status(callback.message, collector_runner)
+
+
+@router.message(Command("chat_id"))
+async def handle_chat_id(message: Message) -> None:
+    """Show the ID of this chat, for NOTIFY_CHAT_IDS."""
+    await message.answer(f"ID этого чата: <code>{message.chat.id}</code>", parse_mode="HTML")
 
 
 @router.message(Command("collect_status"))

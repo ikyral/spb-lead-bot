@@ -4,16 +4,23 @@ import asyncio
 import logging
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramMigrateToChat,
+    TelegramRetryAfter,
+)
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, LinkPreviewOptions, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, LinkPreviewOptions, Message
 
-from src.bot.formatters import format_funnel_stats, format_issued_lead, format_msk_time
+from src.bot.chats import is_group_chat
+from src.bot.formatters import format_funnel_stats, format_issued_lead, format_msk_time, format_user_label
 from src.bot.keyboards import (
     LEAD_OUTCOMES,
     STALE_BUTTON_TEXT,
     get_full_export_keyboard,
     get_lead_status_keyboard,
+    get_next_batch_keyboard,
 )
 from src.config import settings
 from src.database.models import Lead
@@ -34,11 +41,34 @@ router = Router(name="issue")
 
 # The bottom button shows the batch size; any size matches, so an old keyboard keeps working.
 NEXT_BATCH_BUTTON_RE = r"^📦 Следующие \d+$"
-# Telegram asks not to send more than one message per second to a chat.
+# Telegram asks not to send more than one message per second to a chat...
 MESSAGE_PAUSE_SECONDS: float = 1.0
+# ...and no more than 20 messages per minute to a group.
+GROUP_MESSAGE_PAUSE_SECONDS: float = 3.1
 MAX_SEND_ATTEMPTS: int = 3
-# Who is receiving a batch right now: a double tap must not hand out a second batch.
+# Chats receiving a batch right now: a double tap must not hand out a second batch, and two
+# batches at once would break the limit of a group. Leads never overlap in any case: see issue_next_leads.
 _issuing_to: set[int] = set()
+
+
+async def _answer_safely(message: Message, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    """A closing message must not fail the handler: the leads are already sorted out by now."""
+    try:
+        await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+    except TelegramMigrateToChat as exc:
+        logger.warning(
+            "Chat %s has become supergroup %s: the batch stops here", message.chat.id, exc.migrate_to_chat_id
+        )
+        if message.bot is not None:
+            try:
+                await message.bot.send_message(
+                    exc.migrate_to_chat_id, f"{text}\n\nГруппа стала супергруппой, нажмите кнопку ещё раз.",
+                    parse_mode="HTML",
+                )
+            except TelegramAPIError as send_error:
+                logger.warning("Could not write to the new supergroup: %s", send_error)
+    except TelegramAPIError as exc:
+        logger.warning("Could not send a message to chat %s: %s", message.chat.id, exc)
 
 
 async def _send_card(message: Message, lead: Lead) -> None:
@@ -77,11 +107,20 @@ async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> N
     async with async_session_maker() as session:
         leads = await issue_next_leads(session, size)
 
+    in_group = is_group_chat(message)
+    pause = GROUP_MESSAGE_PAUSE_SECONDS if in_group else MESSAGE_PAUSE_SECONDS
     undelivered: list[int] = [lead.id for lead in leads]
     try:
+        if in_group and len(leads) > 1:
+            minutes = max(1, round(len(leads) * pause / 60))
+            try:
+                await message.answer(f"⏳ Выдаю лидов: {len(leads)}. В группе это займёт около {minutes} мин.")
+            except TelegramRetryAfter as exc:
+                # Only a courtesy: the cards below wait for Telegram by themselves.
+                logger.info("Skipped the batch notice: Telegram asks to wait %s s", exc.retry_after)
         for index, lead in enumerate(leads):
             if index:
-                await asyncio.sleep(MESSAGE_PAUSE_SECONDS)
+                await asyncio.sleep(pause)
             try:
                 await _send_card(message, lead)
             except TelegramBadRequest:
@@ -114,22 +153,35 @@ async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> N
         lines.append(_describe_topup(await collector_runner.request_topup(TRIGGER_BATCH)))
     else:
         await collector_runner.check_pool()
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await _answer_safely(message, "\n".join(lines), get_next_batch_keyboard() if in_group else None)
 
 
 @router.message(F.text.regexp(NEXT_BATCH_BUTTON_RE))
 @router.message(Command("next_leads"))
 async def handle_next_batch(message: Message, collector_runner: CollectorRunner) -> None:
     """Hand out the next batch of leads."""
-    user_id = message.from_user.id if message.from_user else message.chat.id
-    if user_id in _issuing_to:
-        await message.answer("⏳ Предыдущая пачка ещё отправляется.")
+    chat_id = message.chat.id
+    if chat_id in _issuing_to:
+        await _answer_safely(message, "⏳ Предыдущая пачка ещё отправляется.")
         return
-    _issuing_to.add(user_id)
+    _issuing_to.add(chat_id)
     try:
         await _issue_batch(message, collector_runner)
     finally:
-        _issuing_to.discard(user_id)
+        _issuing_to.discard(chat_id)
+
+
+@router.callback_query(F.data == "panel:next")
+async def handle_next_batch_button(callback: CallbackQuery, collector_runner: CollectorRunner) -> None:
+    """The same from an inline button: it reaches the bot even with privacy mode on."""
+    if not isinstance(callback.message, Message):
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    if callback.message.chat.id in _issuing_to:
+        await callback.answer("Предыдущая пачка ещё отправляется")
+        return
+    await callback.answer()
+    await handle_next_batch(callback.message, collector_runner)
 
 
 @router.callback_query(F.data.startswith("ls:"))
@@ -150,8 +202,10 @@ async def handle_lead_status(callback: CallbackQuery) -> None:
         if lead.contact_status == status:
             await callback.answer("Этот статус уже стоит")
             return
-        await set_contact_status(session, lead_id, status)
-        lead.contact_status = status
+        user = callback.from_user
+        changed_by = format_user_label(user.username, user.full_name)
+        await set_contact_status(session, lead_id, status, user.id, changed_by)
+        lead.contact_status, lead.contact_status_by = status, changed_by
 
     await callback.answer(f"Статус: {LEAD_OUTCOMES[status]}")
     if isinstance(callback.message, Message):
@@ -165,6 +219,16 @@ async def handle_lead_status(callback: CallbackQuery) -> None:
         except TelegramAPIError as exc:
             # The status is saved; only the card on the screen is out of date.
             logger.warning("Could not update the card of lead %s: %s", lead_id, exc)
+
+
+@router.callback_query(F.data == "panel:stats")
+async def handle_stats_button(callback: CallbackQuery) -> None:
+    """The same as /leads_stats from an inline button."""
+    if not isinstance(callback.message, Message):
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    await callback.answer()
+    await handle_leads_stats(callback.message)
 
 
 @router.message(Command("leads_stats"))
