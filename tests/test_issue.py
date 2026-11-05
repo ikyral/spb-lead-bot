@@ -169,9 +169,10 @@ async def test_status_counts_cover_every_status(session_maker) -> None:
 # ---------- 'next batch' button ----------
 
 
-def _message(user_id: int = 1) -> MagicMock:
+def _message(user_id: int = 1, chat_id: int | None = None) -> MagicMock:
     message = MagicMock(spec=Message)
     message.from_user = User(id=user_id, is_bot=False, first_name="Admin")
+    message.chat = Chat(id=chat_id if chat_id is not None else user_id, type="private")
     message.answer = AsyncMock()
     return message
 
@@ -255,7 +256,7 @@ async def test_double_tap_does_not_hand_out_a_second_batch(batch_env) -> None:
 
 async def test_two_admins_pressing_at_once_get_different_leads(batch_env) -> None:
     await _add_leads(batch_env, 6)
-    first, second = _message(user_id=1), _message(user_id=2)
+    first, second = _message(user_id=1, chat_id=-101), _message(user_id=2, chat_id=-102)
 
     await asyncio.gather(
         issue.handle_next_batch(first, _runner()),
@@ -456,6 +457,7 @@ def _status_callback(data: str) -> MagicMock:
     callback = MagicMock(spec=CallbackQuery)
     callback.data = data
     callback.answer = AsyncMock()
+    callback.from_user = User(id=1, is_bot=False, first_name="Анна", username="anna")
     callback.message = MagicMock(spec=Message)
     callback.message.edit_text = AsyncMock()
     return callback
@@ -478,6 +480,8 @@ async def test_status_button_saves_the_status_and_updates_the_card(batch_env, st
         lead = await session.get(Lead, lead_id)
     assert (lead.contact_status, lead.crm_status) == (status, STATUS_ISSUED)
     assert lead.issued_at is not None
+    assert (lead.contact_status_by_id, lead.contact_status_by) == (1, "@anna")
+    assert lead.contact_status_at is not None
     callback.answer.assert_awaited_once_with(f"Статус: {LEAD_OUTCOMES[status]}")
     edit = callback.message.edit_text.await_args
     assert "Организация 1" in edit.args[0]
@@ -588,8 +592,10 @@ async def test_csv_export_gets_new_columns_at_the_end(session_maker, monkeypatch
     document = callback.message.answer_document.await_args.kwargs["document"]
     header, row = list(csv.reader(io.StringIO(document.data.decode("utf-8-sig")), delimiter=";"))[:2]
     assert header[:2] == ["ID", "Источник"]
-    assert header[-4:] == ["Email", "Карточка источника", "Дата выдачи (МСК)", "Результат контакта"]
-    assert row[-2] != ""
+    assert header[-6:] == [
+        "Email", "Карточка источника", "Дата выдачи (МСК)", "Результат контакта", "Кто отметил", "Когда отмечено (МСК)",
+    ]
+    assert row[-4] != ""
 
 
 def test_main_menu_has_the_batch_button() -> None:
@@ -787,6 +793,7 @@ def guarded_dispatcher(monkeypatch: pytest.MonkeyPatch) -> Dispatcher:
         Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=100, ADMIN_TG_IDS="200"),
     )
     monkeypatch.setattr(Message, "answer", AsyncMock())
+    monkeypatch.setattr(CallbackQuery, "answer", AsyncMock())
     dp = Dispatcher()
     guard = AdminOnlyMiddleware()
     dp.message.middleware(guard)
@@ -871,6 +878,8 @@ OLD_SCHEMA = [
     """,
 ]
 
+NEW_COLUMNS = {"email", "source_url", "issued_at", "contact_status", "contact_status_by_id", "contact_status_by"}
+
 # The rollback documented in README.md.
 ROLLBACK_SCHEMA = [
     "UPDATE leads SET crm_status = 'rejected' WHERE contact_status = 'rejected'",
@@ -880,6 +889,9 @@ ROLLBACK_SCHEMA = [
     "ALTER TABLE leads DROP COLUMN source_url",
     "ALTER TABLE leads DROP COLUMN issued_at",
     "ALTER TABLE leads DROP COLUMN contact_status",
+    "ALTER TABLE leads DROP COLUMN contact_status_by_id",
+    "ALTER TABLE leads DROP COLUMN contact_status_by",
+    "ALTER TABLE leads DROP COLUMN contact_status_at",
     "DROP TABLE collector_state",
     "DROP TABLE provider_state",
 ]
@@ -909,7 +921,7 @@ async def test_upgrade_keeps_data_is_repeatable_and_old_leads_join_the_queue(old
     await init_db(old_database)
     await init_db(old_database)  # a restart must not fail
 
-    assert {"email", "source_url", "issued_at", "contact_status"} <= await _columns(old_database)
+    assert await _columns(old_database) >= NEW_COLUMNS
     assert {"collector_state", "provider_state"} <= await _tables(old_database)
 
     session_maker = async_sessionmaker(old_database, expire_on_commit=False, class_=AsyncSession)
@@ -937,7 +949,7 @@ async def test_documented_rollback_restores_the_old_schema(old_database) -> None
     assert rows == ["in_work", "in_work"]
 
     await init_db(old_database)  # and it can be upgraded again
-    assert {"email", "source_url", "issued_at", "contact_status"} <= await _columns(old_database)
+    assert await _columns(old_database) >= NEW_COLUMNS
 
 
 async def test_rollback_keeps_refusals_as_rejected(old_database) -> None:
@@ -946,7 +958,7 @@ async def test_rollback_keeps_refusals_as_rejected(old_database) -> None:
     async with session_maker() as session:
         batch = await issue_next_leads(session, 1)
         lead_id = batch[0].id
-        await set_contact_status(session, lead_id, CONTACT_REJECTED)
+        await set_contact_status(session, lead_id, CONTACT_REJECTED, 1, "@anna")
     async with old_database.begin() as conn:
         for statement in ROLLBACK_SCHEMA:
             await conn.execute(text(statement))

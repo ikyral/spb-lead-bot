@@ -42,7 +42,15 @@ async def init_db(target_engine: AsyncEngine | None = None) -> None:
 
 
 # Nullable columns added to `leads` after the first release. Old rows need no backfill.
-NEW_LEAD_COLUMNS: tuple[str, ...] = ("email", "source_url", "issued_at", "contact_status")
+NEW_LEAD_COLUMNS: tuple[str, ...] = (
+    "email",
+    "source_url",
+    "issued_at",
+    "contact_status",
+    "contact_status_by_id",
+    "contact_status_by",
+    "contact_status_at",
+)
 # Blocks in a row after which a provider stays off until an admin turns it on.
 MAX_CONSECUTIVE_BLOCKS: int = 3
 
@@ -263,9 +271,20 @@ async def count_issued_leads(session: AsyncSession) -> int:
     return int(result.scalar_one())
 
 
-async def set_contact_status(session: AsyncSession, lead_id: int, status: str) -> None:
-    """Save what came of contacting a handed-out lead."""
-    await session.execute(update(Lead).where(Lead.id == lead_id).values(contact_status=status))
+async def set_contact_status(
+    session: AsyncSession, lead_id: int, status: str, changed_by_id: int, changed_by: str
+) -> None:
+    """Save what came of contacting a handed-out lead, who said so and when."""
+    await session.execute(
+        update(Lead)
+        .where(Lead.id == lead_id)
+        .values(
+            contact_status=status,
+            contact_status_by_id=changed_by_id,
+            contact_status_by=changed_by[:128],
+            contact_status_at=datetime.now(UTC),
+        )
+    )
     await session.commit()
 
 

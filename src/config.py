@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     # Additional admins, comma-separated. ADMIN_TG_ID stays required and is always an admin.
     ADMIN_TG_IDS: str = ""
 
+    # Group chats for collection results and alerts, comma-separated (groups have negative IDs).
+    NOTIFY_CHAT_IDS: str = ""
+    # Send the same to admins privately. Without any chats they are told regardless.
+    NOTIFY_ADMINS_PRIVATE: bool = True
+
     # Leads are handed out in batches on request; the pool is refilled when it runs low (0 = never).
     LEADS_BATCH_SIZE: int = Field(default=30, ge=1, le=100)
     LEADS_MIN_POOL: int = Field(default=60, ge=0)
@@ -70,6 +75,22 @@ class Settings(BaseSettings):
             if part.strip() and not part.strip().isdecimal():
                 raise ValueError(f"ADMIN_TG_IDS must be comma-separated Telegram IDs, got {part.strip()!r}")
         return value
+
+    @field_validator("NOTIFY_CHAT_IDS")
+    @classmethod
+    def _validate_notify_chat_ids(cls, value: str) -> str:
+        for part in value.split(","):
+            chat_id = part.strip()
+            if chat_id and (not chat_id.removeprefix("-").isdecimal() or int(chat_id) == 0):
+                raise ValueError(
+                    f"NOTIFY_CHAT_IDS must be comma-separated chat IDs like -1001234567890, got {chat_id!r}"
+                )
+        return value
+
+    @property
+    def notify_chat_ids(self) -> tuple[int, ...]:
+        """Chats for notifications, without repeats."""
+        return tuple(dict.fromkeys(int(part) for part in self.NOTIFY_CHAT_IDS.split(",") if part.strip()))
 
     @property
     def admin_ids(self) -> frozenset[int]:

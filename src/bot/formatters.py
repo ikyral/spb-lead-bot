@@ -50,6 +50,11 @@ _TRIGGER_TITLES: dict[str, str] = {
 }
 
 
+def format_user_label(username: str | None, full_name: str) -> str:
+    """How to name a person in a chat: @username if there is one, otherwise the name."""
+    return f"@{username}" if username else full_name
+
+
 def format_msk_time(value: datetime | None) -> str:
     """Format a timestamp as Moscow time for messages."""
     if value is None:
@@ -129,6 +134,8 @@ def _issued_card(lead: Lead, field_limit: int) -> str:
     elif lead.map_url and lead.map_url.startswith(("http://", "https://")):
         lines.append(f'🗺 <a href="{html.escape(lead.map_url, quote=True)}">На карте</a>')
     status = _CONTACT_STATUS_TITLES.get(lead.contact_status or "", "📤 Выдан, ждёт действия")
+    if lead.contact_status and lead.contact_status_by:
+        status += f" — {field(lead.contact_status_by)}"
     lines.append(f"📌 <b>Статус:</b> {status}")
     return "\n".join(lines)
 

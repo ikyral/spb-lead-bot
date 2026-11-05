@@ -82,7 +82,9 @@ async def main() -> None:
         async_session_maker,
         provider_set,
         collector_config,
-        report=AdminNotifier(bot, settings.admin_ids).report,
+        report=AdminNotifier(
+            bot, settings.admin_ids, settings.notify_chat_ids, settings.NOTIFY_ADMINS_PRIVATE
+        ).report,
         enabled_by_default=settings.COLLECT_ENABLED,
         run_on_start=settings.COLLECT_RUN_ON_START,
         min_pool=settings.LEADS_MIN_POOL,
@@ -92,7 +94,14 @@ async def main() -> None:
     dp.startup.register(collector_runner.start)
     dp.shutdown.register(collector_runner.shutdown)
 
-    logger.info("Bot starting polling for admin IDs %s...", sorted(settings.admin_ids))
+    if not settings.NOTIFY_ADMINS_PRIVATE and not settings.notify_chat_ids:
+        logger.warning("NOTIFY_ADMINS_PRIVATE=false needs NOTIFY_CHAT_IDS: without chats admins are still notified")
+
+    logger.info(
+        "Bot starting polling for admin IDs %s, notification chats %s...",
+        sorted(settings.admin_ids),
+        list(settings.notify_chat_ids),
+    )
     try:
         await dp.start_polling(bot)
     finally:

@@ -338,7 +338,7 @@ async def test_found_again_lead_is_neither_reissued_nor_overwritten(session_make
 
     async with session_maker() as session:
         issued = await issue_next_leads(session, 2)
-        await set_contact_status(session, issued[0].id, CONTACT_CONTACTED)
+        await set_contact_status(session, issued[0].id, CONTACT_CONTACTED, 1, "@anna")
     issued_at = {lead.id: lead.issued_at for lead in issued}
 
     changed = [_place(1, phone="+7 812 555-01-01", address="Новый адрес"), _place(2)]
