@@ -8,7 +8,8 @@ from collections.abc import Iterable
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramMigrateToChat, TelegramRetryAfter
 
-from src.bot.formatters import format_collection_report
+from src.bot.formatters import format_collection_report, format_import_report
+from src.services.lead_import import ImportResult
 from src.services.scheduler import TRIGGER_LOW_POOL, TRIGGER_SCHEDULE, RunReport
 
 logger = logging.getLogger(__name__)
@@ -41,8 +42,9 @@ class AdminNotifier:
         admins = self._admin_ids if self._notify_admins or not self._chat_ids else []
         return list(dict.fromkeys([*self._chat_ids, *admins]))
 
-    async def send(self, text: str, silent: bool = False) -> None:
-        await asyncio.gather(*(self._send_to(target, text, silent) for target in self._targets()))
+    async def send(self, text: str, silent: bool = False, exclude_chat: int | None = None) -> None:
+        targets = [target for target in self._targets() if target != exclude_chat]
+        await asyncio.gather(*(self._send_to(target, text, silent) for target in targets))
 
     async def _send_to(self, target: int, text: str, silent: bool) -> None:
         """Never raises: a problem with one chat must not reach other chats or the collection."""
@@ -97,6 +99,17 @@ class AdminNotifier:
             await self._bot.send_message(chat_id, text, parse_mode="HTML")
         except TelegramAPIError as exc:
             logger.warning("Failed to notify chat %s about its new ID: %s", chat_id, exc)
+
+    async def report_import(self, result: ImportResult, exclude_chat: int | None = None) -> None:
+        """The outcome of an imported file. The chat it was sent from sees the result there."""
+        await self.send(format_import_report(result), exclude_chat=exclude_chat)
+
+    async def remind_pool_low(self, pool_size: int) -> None:
+        """Ask for a new file from the external collector."""
+        await self.send(
+            f"📉 В запасе осталось лидов: <b>{pool_size}</b>, нужен новый импорт. "
+            "Загрузите файл с внешнего сборщика: отправьте его боту или положите в папку импорта на сервере."
+        )
 
     async def report(self, report: RunReport) -> None:
         """Alerts always go out; the summary only if there is something to tell."""

@@ -8,14 +8,16 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from src.bot.handlers.collector import router as collector_router
+from src.bot.handlers.imports import router as imports_router
 from src.bot.handlers.issue import router as issue_router
 from src.bot.handlers.leads import router as leads_router
 from src.bot.handlers.search import router as search_router
 from src.bot.middlewares import AdminOnlyMiddleware
 from src.bot.notifier import AdminNotifier
-from src.config import settings, settings_error
+from src.config import resolve_path, settings, settings_error
 from src.database.repo import async_session_maker, engine, init_db
 from src.services.collector import load_collector_config
+from src.services.lead_import import ImportService
 from src.services.providers.registry import build_providers
 from src.services.providers.twogis_scraper import ScraperOptions
 from src.services.scheduler import CollectorRunner
@@ -60,36 +62,43 @@ async def main() -> None:
     dp.include_router(leads_router)
     dp.include_router(issue_router)
     dp.include_router(collector_router)
+    dp.include_router(imports_router)
 
     twogis_key = settings.TWOGIS_API_KEY.get_secret_value() if settings.TWOGIS_API_KEY else None
     provider_set = build_providers(
         collector_config.providers,
         twogis_key,
-        ScraperOptions(
-            city_slug=settings.SCRAPER_CITY_SLUG,
-            min_delay_seconds=settings.SCRAPER_MIN_DELAY_SECONDS,
-            max_delay_seconds=settings.SCRAPER_MAX_DELAY_SECONDS,
-            max_pages_per_run=settings.SCRAPER_MAX_PAGES_PER_RUN,
-            max_results_per_run=settings.SCRAPER_MAX_RESULTS_PER_RUN,
-            min_hours_between_runs=settings.SCRAPER_MIN_HOURS_BETWEEN_RUNS,
-            page_timeout_seconds=settings.SCRAPER_PAGE_TIMEOUT_SECONDS,
-        ),
+        ScraperOptions.from_settings(settings),
     )
     for name, reason in provider_set.disabled.items():
         logger.warning("Provider %s is disabled: %s", name, reason)
 
+    notifier = AdminNotifier(bot, settings.admin_ids, settings.notify_chat_ids, settings.NOTIFY_ADMINS_PRIVATE)
     collector_runner = CollectorRunner(
         async_session_maker,
         provider_set,
         collector_config,
-        report=AdminNotifier(
-            bot, settings.admin_ids, settings.notify_chat_ids, settings.NOTIFY_ADMINS_PRIVATE
-        ).report,
+        report=notifier.report,
         enabled_by_default=settings.COLLECT_ENABLED,
         run_on_start=settings.COLLECT_RUN_ON_START,
         min_pool=settings.LEADS_MIN_POOL,
+        external_mode=not settings.COLLECT_ENABLED or not collector_config.providers,
+        pool_reminder=notifier.remind_pool_low,
     )
     dp["collector_runner"] = collector_runner
+
+    import_service = ImportService(
+        async_session_maker,
+        notifier.report_import,
+        resolve_path(settings.IMPORT_INBOX_DIR),
+        settings.IMPORT_MAX_FILE_BYTES,
+        settings.IMPORT_MAX_LEADS,
+    )
+    dp["import_service"] = import_service
+    if settings.IMPORT_INBOX_INTERVAL_SECONDS > 0:
+        collector_runner.add_interval_job(
+            import_service.scan_inbox, settings.IMPORT_INBOX_INTERVAL_SECONDS, "import_inbox"
+        )
     # Polling calls these inside its own lifetime, while the bot can still send messages.
     dp.startup.register(collector_runner.start)
     dp.shutdown.register(collector_runner.shutdown)

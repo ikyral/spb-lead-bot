@@ -18,7 +18,8 @@ from src.database.models import (
 from src.services.providers.base import TARGET_CATEGORIES
 
 if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this module must not import
-    from src.database.models import ProviderState
+    from src.database.models import ImportLog, ProviderState
+    from src.services.lead_import import ImportResult
     from src.services.scheduler import CollectorStatus, RunReport
 
 # Telegram's limit for one message.
@@ -190,6 +191,39 @@ def format_collection_report(report: RunReport) -> str:
     return "\n".join(lines)
 
 
+def format_import_report(result: ImportResult) -> str:
+    """Format the outcome of an imported file. The file name comes from outside and is escaped."""
+    name = html.escape(result.file_name)
+    if not result.ok:
+        return f"⚠️ <b>Импорт не выполнен</b>: {name}\n\nПричина: {html.escape(result.error or 'неизвестна')}"
+    lines = [
+        f"📥 <b>Импорт завершён</b>: {name}\n",
+        f"• В файле: <b>{result.total}</b>",
+        f"• Новых: <b>{result.saved_new}</b>",
+        f"• Дубликатов: <b>{result.duplicates}</b>",
+        f"• Отклонено: <b>{result.rejected_total}</b>",
+    ]
+    lines += [f"   – {html.escape(reason)}: {count}" for reason, count in result.rejected.most_common()]
+    lines.append(f"\n📦 В запасе: <b>{result.pool_size}</b>")
+    return "\n".join(lines)
+
+
+def _import_lines(last: ImportLog | None, imported_total: int) -> list[str]:
+    lines = [f"\n<b>Импорт файлов</b>: всего пришло лидов <b>{imported_total}</b>"]
+    if last is None:
+        lines.append("Файлы ещё не импортировались.")
+        return lines
+    lines.append(f"Последний: {format_msk_time(last.finished_at)}, {html.escape(last.file_name)}")
+    if last.ok:
+        lines.append(
+            f"В файле: <b>{last.total}</b>, новых: <b>{last.saved_new}</b>, "
+            f"дубликатов: <b>{last.duplicates}</b>, отклонено: <b>{last.rejected}</b>"
+        )
+    else:
+        lines.append(f"⚠️ Не выполнен: {html.escape(last.error or 'причина неизвестна')}")
+    return lines
+
+
 def _provider_line(name: str, state: ProviderState | None, now: datetime) -> str:
     safe_name = html.escape(name)
     if state is None:
@@ -206,6 +240,14 @@ def format_collector_status(status: CollectorStatus) -> str:
     """Format the state of automatic collection."""
     state = status.state
     now = datetime.now(UTC)
+    if status.external_mode:
+        return "\n".join([
+            "🤖 <b>Сбор лидов</b>\n",
+            "Режим: <b>внешний сборщик</b>. Этот сервер сам не собирает, лиды приходят файлами.",
+            f"📦 В запасе: <b>{status.pool_size}</b>",
+            *_import_lines(status.last_import, status.imported_total),
+        ])
+
     lines = [
         "🤖 <b>Автосбор лидов</b>\n",
         f"Автозапуск: <b>{'включён' if status.auto_enabled else 'выключен'}</b>",
@@ -227,6 +269,7 @@ def format_collector_status(status: CollectorStatus) -> str:
 
     if state.last_started_at is None:
         lines.append("\nСбор ещё не запускался.")
+        lines += _import_lines(status.last_import, status.imported_total)
         return "\n".join(lines)
 
     run_status = _RUN_STATUS_TITLES.get(state.last_status or "", state.last_status or "—")
@@ -239,6 +282,7 @@ def format_collector_status(status: CollectorStatus) -> str:
     ]
     if state.last_error:
         lines.append(f"⚠️ Последняя ошибка: {html.escape(state.last_error)}")
+    lines += _import_lines(status.last_import, status.imported_total)
     return "\n".join(lines)
 
 

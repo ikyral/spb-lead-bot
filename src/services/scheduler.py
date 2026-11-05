@@ -11,8 +11,15 @@ from enum import Enum
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.database.models import CollectorState, ProviderState
-from src.database.repo import count_new_leads, enable_provider, get_collector_state, get_provider_states
+from src.database.models import CollectorState, ImportLog, ProviderState
+from src.database.repo import (
+    count_imported_leads,
+    count_new_leads,
+    enable_provider,
+    get_collector_state,
+    get_last_import,
+    get_provider_states,
+)
 from src.services.collector import CollectorConfig, CollectResult, collect_leads
 from src.services.providers.registry import ProviderSet
 
@@ -23,6 +30,8 @@ POOL_CHECK_JOB_ID = "lead_pool_check"
 POOL_CHECK_INTERVAL_MINUTES: int = 15
 # Out-of-schedule collection because of a low pool happens at most this often.
 TOPUP_COOLDOWN: timedelta = timedelta(hours=1)
+# With an external collector admins are asked for a new file at most this often.
+POOL_REMINDER_INTERVAL: timedelta = timedelta(days=1)
 # A run missed by up to this much (bot busy or just restarted) still starts.
 MISFIRE_GRACE_SECONDS: int = 3600
 # Docker gives a container 10 s to stop; a run cancelled after this wait is safe,
@@ -52,6 +61,7 @@ class TopupOutcome(Enum):
     COOLDOWN = "cooldown"
     AUTO_OFF = "auto_off"
     DAILY_LIMIT = "daily_limit"
+    EXTERNAL = "external"
 
 
 @dataclass(frozen=True)
@@ -88,9 +98,13 @@ class CollectorStatus:
     requests_today: int
     max_requests_per_day: int
     provider_states: dict[str, ProviderState] = field(default_factory=dict)
+    external_mode: bool = False
+    last_import: ImportLog | None = None
+    imported_total: int = 0
 
 
 ReportCallback = Callable[[RunReport], Awaitable[None]]
+PoolReminderCallback = Callable[[int], Awaitable[None]]
 
 
 class CollectorRunner:
@@ -105,6 +119,8 @@ class CollectorRunner:
         enabled_by_default: bool = True,
         run_on_start: bool = False,
         min_pool: int = 0,
+        external_mode: bool = False,
+        pool_reminder: PoolReminderCallback | None = None,
     ) -> None:
         self._session_maker = session_maker
         self._provider_set = provider_set
@@ -113,6 +129,9 @@ class CollectorRunner:
         self._enabled_by_default = enabled_by_default
         self._run_on_start = run_on_start
         self._min_pool = min_pool
+        # Leads come from an external collector as files: this server never collects by itself.
+        self.external_mode = external_mode
+        self._pool_reminder = pool_reminder
         self._scheduler = AsyncIOScheduler(timezone=config.timezone)
         self._auto_enabled = enabled_by_default
         # asyncio is single-threaded: checking and setting this flag cannot interleave.
@@ -139,15 +158,16 @@ class CollectorRunner:
             schedule_args["next_run_time"] = None  # added paused
         elif self._run_on_start:
             schedule_args["next_run_time"] = datetime.now(self._config.timezone)
-        self._scheduler.add_job(
-            self._run_scheduled,
-            self._config.trigger,
-            id=COLLECT_JOB_ID,
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=MISFIRE_GRACE_SECONDS,
-            **schedule_args,
-        )
+        if not self.external_mode:
+            self._scheduler.add_job(
+                self._run_scheduled,
+                self._config.trigger,
+                id=COLLECT_JOB_ID,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=MISFIRE_GRACE_SECONDS,
+                **schedule_args,
+            )
         if self._min_pool > 0:
             self._scheduler.add_job(
                 self.check_pool,
@@ -160,11 +180,15 @@ class CollectorRunner:
         self._scheduler.start()
         logger.info(
             "Collector scheduler started: %s, auto=%s, providers=%s, targets=%d",
-            self._config.schedule_text,
+            "external collector, no collection here" if self.external_mode else self._config.schedule_text,
             self._auto_enabled,
             [provider.name for provider in self._provider_set.providers],
             len(self._config.targets),
         )
+
+    def add_interval_job(self, job: Callable[[], Awaitable[object]], seconds: int, job_id: str) -> None:
+        """Run another periodic task of the bot here. Call before start()."""
+        self._scheduler.add_job(job, "interval", seconds=seconds, id=job_id, max_instances=1, coalesce=True)
 
     async def shutdown(self, wait_seconds: float = SHUTDOWN_WAIT_SECONDS) -> None:
         """Stop with the bot: give a running collection a moment to finish, then cancel it."""
@@ -184,7 +208,7 @@ class CollectorRunner:
 
     def start_in_background(self, trigger: str = TRIGGER_MANUAL) -> bool:
         """Start a collection without waiting for it. Returns False if one is already running."""
-        if self._running:
+        if self._running or self.external_mode:
             return False
         self._running = True
         self._task = asyncio.create_task(self._guarded_run(trigger))
@@ -192,6 +216,8 @@ class CollectorRunner:
 
     async def run_once(self, trigger: str) -> bool:
         """Run a collection and wait for it. Returns False if one is already running."""
+        if self.external_mode:
+            return False
         if self._running:
             logger.info("Collection (%s) skipped: another one is still running", trigger)
             return False
@@ -204,21 +230,43 @@ class CollectorRunner:
         await self.run_once(TRIGGER_SCHEDULE)
 
     async def check_pool(self) -> None:
-        """Start an extra collection if the pool of new leads is below the threshold."""
-        if self._min_pool <= 0 or not self._auto_enabled:
+        """If the pool of new leads is below the threshold, start an extra collection or ask for a file."""
+        if self._min_pool <= 0 or (not self._auto_enabled and not self.external_mode):
             return
         try:
             async with self._session_maker() as session:
                 pool_size = await count_new_leads(session)
-            if pool_size < self._min_pool:
+            if pool_size >= self._min_pool:
+                return
+            if self.external_mode:
+                await self._ask_for_new_file(pool_size)
+            else:
                 decision = await self.request_topup(TRIGGER_LOW_POOL)
                 logger.info("Lead pool is low (%d < %d): %s", pool_size, self._min_pool, decision.outcome.value)
         except Exception:
             # Runs from the scheduler and after issuing leads: must not affect either.
             logger.exception("Lead pool check failed")
 
+    async def _ask_for_new_file(self, pool_size: int) -> None:
+        """Tell admins the pool is running low, at most once a day; the time survives restarts."""
+        now = datetime.now(UTC)
+        async with self._session_maker() as session:
+            state = await get_collector_state(session)
+            last = state.last_pool_reminder_at
+            if last is not None and now - last < POOL_REMINDER_INTERVAL:
+                await session.commit()
+                return
+            state.last_pool_reminder_at = now
+            await session.commit()
+        logger.info("Lead pool is low (%d < %d): asking for a new file", pool_size, self._min_pool)
+        if self._pool_reminder is not None:
+            await self._pool_reminder(pool_size)
+
     async def request_topup(self, trigger: str = TRIGGER_LOW_POOL) -> TopupDecision:
         """Start an out-of-schedule collection, unless the limits forbid it right now."""
+        if self.external_mode:
+            await self.check_pool()
+            return TopupDecision(TopupOutcome.EXTERNAL)
         if not self._auto_enabled:
             return TopupDecision(TopupOutcome.AUTO_OFF)
         if self._running:
@@ -266,6 +314,8 @@ class CollectorRunner:
             state = await get_collector_state(session)
             pool_size = await count_new_leads(session)
             provider_states = await get_provider_states(session)
+            last_import = await get_last_import(session)
+            imported_total = await count_imported_leads(session)
             await session.commit()
         job = self._scheduler.get_job(COLLECT_JOB_ID) if self._scheduler.running else None
         return CollectorStatus(
@@ -280,6 +330,9 @@ class CollectorRunner:
             requests_today=self._requests_used_today(state),
             max_requests_per_day=self._config.max_requests_per_day,
             provider_states=provider_states,
+            external_mode=self.external_mode,
+            last_import=last_import,
+            imported_total=imported_total,
         )
 
     def _today(self) -> str:

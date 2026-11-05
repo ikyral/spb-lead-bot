@@ -13,6 +13,8 @@ services:
     environment:
       # Overrides DB_URL from .env: the database must live inside the mounted ./db directory.
       DB_URL: "sqlite+aiosqlite:////app/db/leads.db"
+      # Only ./db is writable for the bot's user in the container.
+      IMPORT_INBOX_DIR: "/app/db/inbox"
     volumes:
       - ./data:/app/data
       # Mount a directory, not a file: a missing file would be created by Docker as a directory.

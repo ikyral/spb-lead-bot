@@ -100,7 +100,7 @@ async def test_main_wires_the_collector_into_the_bot_lifetime(monkeypatch: pytes
     await main.main()
 
     status = seen["status"]
-    assert seen["routers"] == {"search", "leads", "issue", "collector"}
+    assert seen["routers"] == {"search", "leads", "issue", "collector", "imports"}
     assert seen["scheduler_running"] is True
     assert seen["scheduler_running_after"] is False
     assert status.next_run_at is not None

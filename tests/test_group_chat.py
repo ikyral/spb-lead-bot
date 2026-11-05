@@ -287,6 +287,7 @@ def telegram(monkeypatch: pytest.MonkeyPatch) -> Iterator[MagicMock]:
         dp.include_router(router)
     calls.dp = dp
     calls.runner = MagicMock()
+    calls.runner.external_mode = False
     calls.runner.start_in_background = MagicMock(return_value=True)
     calls.runner.request_topup = AsyncMock(return_value=TopupDecision(TopupOutcome.COOLDOWN))
     calls.runner.check_pool = AsyncMock()
