@@ -1,0 +1,13 @@
+{
+  "meta": {"api_version": "3.0.0", "code": 200, "issue_date": "20261105"},
+  "result": {
+    "total": 5,
+    "items": [
+      {"id": "1", "type": "branch", "name": "Первая", "point": {"lat": 59.91, "lon": 30.31}},
+      {"id": "2", "type": "branch", "name": "Вторая", "point": {"lat": 59.92, "lon": 30.32}},
+      {"id": "3", "type": "branch", "name": "Третья", "point": {"lat": 59.93, "lon": 30.33}},
+      {"id": "4", "type": "branch", "name": "Четвёртая", "point": {"lat": 59.94, "lon": 30.34}},
+      {"id": "5", "type": "branch", "name": "Пятая", "point": {"lat": 59.95, "lon": 30.35}}
+    ]
+  }
+}

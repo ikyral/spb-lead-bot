@@ -18,7 +18,7 @@ from src.database.repo import (
     async_session_maker,
     export_leads_by_status,
     get_leads,
-    get_leads_stats,
+    get_status_counts,
     update_crm_status,
 )
 
@@ -178,13 +178,14 @@ async def handle_lead_action(callback: CallbackQuery) -> None:
 async def handle_stats(message: Message) -> None:
     """Show CRM statistics and export buttons."""
     async with async_session_maker() as session:
-        stats = await get_leads_stats(session)
+        stats = await get_status_counts(session)
+    # Includes handed-out leads, shown in detail by /leads_stats.
     total = sum(stats.values())
     text = (
         "📊 <b>Статистика базы лидов:</b>\n\n"
-        f"• 📋 Новые: <b>{stats['new']}</b>\n"
-        f"• 💼 В работе: <b>{stats['in_work']}</b>\n"
-        f"• 🗑 В отказе: <b>{stats['rejected']}</b>\n"
+        f"• 📋 Новые: <b>{stats.get('new', 0)}</b>\n"
+        f"• 💼 В работе: <b>{stats.get('in_work', 0)}</b>\n"
+        f"• 🗑 В отказе: <b>{stats.get('rejected', 0)}</b>\n"
         f"• 📈 Всего в базе: <b>{total}</b>\n\n"
         "Выберите категорию для выгрузки в CSV:"
     )
@@ -209,7 +210,8 @@ async def handle_export_csv(callback: CallbackQuery) -> None:
     writer = csv.writer(output, delimiter=";")
     writer.writerow([
         "ID", "Источник", "Название", "Категория", "Район", "Адрес", "Телефон",
-        "Соцсети", "Сайт", "Статус сайта", "Оценка", "CRM статус", "Карта", "Дата добавления (МСК)"
+        "Соцсети", "Сайт", "Статус сайта", "Оценка", "CRM статус", "Карта", "Дата добавления (МСК)",
+        "Email", "Карточка источника", "Дата выдачи (МСК)", "Результат контакта",
     ])
     for lead in leads:
         writer.writerow([_csv_safe(value) for value in (
@@ -217,6 +219,7 @@ async def handle_export_csv(callback: CallbackQuery) -> None:
             lead.phone or "", lead.socials or "", lead.raw_website or "", lead.site_status,
             lead.score, lead.crm_status, lead.map_url or "",
             _format_msk(lead.created_at),
+            lead.email or "", lead.source_url or "", _format_msk(lead.issued_at), lead.contact_status or "",
         )])
 
     csv_bytes = output.getvalue().encode("utf-8-sig")

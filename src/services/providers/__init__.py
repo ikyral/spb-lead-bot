@@ -5,6 +5,9 @@ from src.services.providers.base import (
     TARGET_CATEGORIES,
     BaseMapProvider,
     RawPlace,
+    SearchArea,
+    SearchPage,
+    SearchQuery,
 )
 from src.services.providers.csv_loader import parse_csv_leads
 from src.services.providers.osm import (
@@ -15,6 +18,7 @@ from src.services.providers.twogis import (
     TWOGIS_CATALOG_URL,
     TwoGisProvider,
 )
+from src.services.providers.twogis_scraper import ScraperOptions, TwoGisScraperProvider
 
 __all__ = [
     "DEFAULT_OVERPASS_ENDPOINTS",
@@ -24,6 +28,11 @@ __all__ = [
     "BaseMapProvider",
     "OSMOverpassProvider",
     "RawPlace",
+    "ScraperOptions",
+    "SearchArea",
+    "SearchPage",
+    "SearchQuery",
     "TwoGisProvider",
+    "TwoGisScraperProvider",
     "parse_csv_leads",
 ]

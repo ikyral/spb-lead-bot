@@ -1,0 +1,52 @@
+{
+  "meta": {"api_version": "3.0.0", "code": 200, "issue_date": "20261105"},
+  "result": {
+    "total": 6,
+    "items": [
+      {
+        "id": "70000001018420390_abc123def",
+        "type": "branch",
+        "name": "Улыбка, стоматология",
+        "address_name": "Невский проспект,  10 ",
+        "point": {"lat": 59.935, "lon": 30.325},
+        "contact_groups": [
+          {
+            "contacts": [
+              {"type": "phone", "value": "+7 (812) 555-01-01", "text": "+7 (812) 555-01-01"},
+              {"type": "phone", "value": "8 812 555-01-01"},
+              {"type": "email", "value": "Info@Smile-Spb.ru"},
+              {"type": "website", "value": "https://WWW.Smile-Spb.ru/?utm_source=2gis&utm_medium=card&page=1"},
+              {"type": "vkontakte", "value": "https://vk.com/smile_spb"}
+            ]
+          }
+        ]
+      },
+      {
+        "id": "70000001018420391",
+        "type": "branch",
+        "name": "Дент Про",
+        "address": {"name": "Лиговский проспект, 50"},
+        "point": {"lat": 59.92, "lon": 30.355},
+        "contact_groups": [
+          {"contacts": [{"type": "phone", "value": "+7 921 000-00-02"}]}
+        ]
+      },
+      {"id": "5348561428", "type": "building", "name": "Бизнес-центр Невский, 10"},
+      {"type": "branch", "name": "Организация без id"},
+      {"id": "70000001018420392", "type": "branch", "name": "   "},
+      {
+        "id": "70000001018420393",
+        "type": "branch",
+        "name": "Странные контакты",
+        "address": 42,
+        "point": "59.9,30.3",
+        "contact_groups": [
+          "не объект",
+          {"contacts": "не список"},
+          {"contacts": [null, {"type": "phone"}, {"type": "phone", "value": "  "}, {"value": "без типа"}]}
+        ]
+      },
+      "не объект"
+    ]
+  }
+}

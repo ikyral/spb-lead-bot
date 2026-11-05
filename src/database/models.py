@@ -1,9 +1,21 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Dialect, Index, Integer, String, func
+from sqlalchemy import Boolean, DateTime, Dialect, Index, Integer, String, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
+
+# Lead lifecycle (leads.crm_status). A lead leaves STATUS_NEW only once, so it is handed out only once.
+STATUS_NEW = "new"
+STATUS_IN_WORK = "in_work"
+STATUS_REJECTED = "rejected"
+STATUS_ISSUED = "issued"
+
+# What came of contacting a handed-out lead (leads.contact_status).
+CONTACT_CONTACTED = "contacted"
+CONTACT_REPLIED = "replied"
+CONTACT_REJECTED = "rejected"
+CONTACT_NO_ANSWER = "no_answer"
 
 
 class UTCDateTime(TypeDecorator[datetime]):
@@ -41,6 +53,8 @@ class Lead(Base):
         # Lead cards: WHERE crm_status = ? AND score >= ? ORDER BY score DESC, id DESC.
         # SQLite stores the rowid (id) in the index, so the ORDER BY needs no extra sort.
         Index("ix_leads_crm_status_score", "crm_status", "score"),
+        # Handing out batches: WHERE crm_status = 'new' ORDER BY created_at, id.
+        Index("ix_leads_crm_status_created_at", "crm_status", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -62,9 +76,56 @@ class Lead(Base):
         default=lambda: datetime.now(UTC),
         server_default=func.now(),
     )
+    # Added after the first release: existing databases get them from NEW_LEAD_COLUMNS in repo.py.
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    source_url: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
+    issued_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    contact_status: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
 
     def __repr__(self) -> str:
         return (
             f"<Lead id={self.id} external_id={self.external_id!r} "
             f"name={self.name!r} score={self.score} crm_status={self.crm_status!r}>"
         )
+
+
+class ProviderState(Base):
+    """How a source has been treating the bot: blocks, the pause after them, automatic switch-off."""
+
+    __tablename__ = "provider_state"
+
+    name: Mapped[str] = mapped_column(String(32), primary_key=True)
+    consecutive_blocks: Mapped[int] = mapped_column(Integer, default=0)
+    blocked_until: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    # Set after too many blocks in a row; only an admin's command clears it.
+    disabled_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    last_block_reason: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
+    last_block_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    last_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+
+
+class CollectorState(Base):
+    """The only row (id=1) holds the automatic collection switch and the result of the last run."""
+
+    __tablename__ = "collector_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    # None = not switched by a command yet, COLLECT_ENABLED applies.
+    auto_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
+    last_status: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
+    last_trigger: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
+    last_started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    last_finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    found: Mapped[int] = mapped_column(Integer, default=0)
+    qualified: Mapped[int] = mapped_column(Integer, default=0)
+    saved_new: Mapped[int] = mapped_column(Integer, default=0)
+    duplicates: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(1024), nullable=True, default=None)
+    # The last alert sent to admins: the same problem is reported once, not after every run.
+    last_alert: Mapped[str | None] = mapped_column(String(1024), nullable=True, default=None)
+    # Position in the list of search targets, so a limited run continues where the previous one stopped.
+    cursor: Mapped[int] = mapped_column(Integer, default=0)
+    # API requests spent on requests_day (date in COLLECT_TIMEZONE, ISO format).
+    requests_day: Mapped[str | None] = mapped_column(String(10), nullable=True, default=None)
+    requests_used: Mapped[int] = mapped_column(Integer, default=0)

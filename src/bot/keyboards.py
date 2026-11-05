@@ -8,6 +8,8 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from src.config import settings
+from src.database.models import CONTACT_CONTACTED, CONTACT_NO_ANSWER, CONTACT_REJECTED, CONTACT_REPLIED
 from src.services.providers.base import SPB_DISTRICTS, TARGET_CATEGORIES
 
 DISTRICT_NAMES: list[str] = list(SPB_DISTRICTS.keys())
@@ -15,6 +17,14 @@ CATEGORY_KEYS: list[str] = list(TARGET_CATEGORIES.keys())
 
 # Shown when callback data is malformed, forged, or from a keyboard of an older bot version.
 STALE_BUTTON_TEXT: str = "Кнопка устарела. Откройте меню заново."
+
+# Statuses an admin can put on a handed-out lead, in the order of the buttons.
+LEAD_OUTCOMES: dict[str, str] = {
+    CONTACT_CONTACTED: "Написал",
+    CONTACT_REPLIED: "Ответили",
+    CONTACT_REJECTED: "Отказ",
+    CONTACT_NO_ANSWER: "Нет ответа",
+}
 
 
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
@@ -29,6 +39,7 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="💼 В работе"),
                 KeyboardButton(text="📊 Статистика и CSV"),
             ],
+            [KeyboardButton(text=f"📦 Следующие {settings.LEADS_BATCH_SIZE}")],
         ],
         resize_keyboard=True,
     )
@@ -103,6 +114,23 @@ def get_lead_card_keyboard(
     else:
         builder.adjust(2, 1)
 
+    return builder.as_markup()
+
+
+def get_lead_status_keyboard(lead_id: int, current_status: str | None) -> InlineKeyboardMarkup:
+    """Status buttons of a handed-out lead; the current status is marked."""
+    builder = InlineKeyboardBuilder()
+    for status, title in LEAD_OUTCOMES.items():
+        text = f"✅ {title}" if status == current_status else title
+        builder.button(text=text, callback_data=f"ls:{lead_id}:{status}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def get_full_export_keyboard() -> InlineKeyboardMarkup:
+    """Export of all leads, including the handed-out ones."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📥 Выгрузить все лиды (CSV)", callback_data="export:all")
     return builder.as_markup()
 
 

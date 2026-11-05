@@ -10,7 +10,7 @@ from src.config import settings
 
 
 class AdminOnlyMiddleware(BaseMiddleware):
-    """Restricts bot access strictly to the configured ADMIN_TG_ID."""
+    """Restricts bot access strictly to the configured admins (ADMIN_TG_ID and ADMIN_TG_IDS)."""
 
     async def __call__(
         self,
@@ -24,7 +24,7 @@ class AdminOnlyMiddleware(BaseMiddleware):
         elif "event_from_user" in data:
             from_user = data["event_from_user"]
 
-        if not from_user or from_user.id != settings.ADMIN_TG_ID:
+        if not from_user or from_user.id not in settings.admin_ids:
             return None
 
         return await handler(event, data)

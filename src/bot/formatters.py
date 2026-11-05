@@ -1,9 +1,62 @@
 """Message and lead card formatters with HTML escaping."""
 
-import html
+from __future__ import annotations
 
-from src.database.models import Lead
+import html
+from datetime import UTC, datetime, timedelta, timezone
+from typing import TYPE_CHECKING
+
+from src.database.models import (
+    CONTACT_CONTACTED,
+    CONTACT_NO_ANSWER,
+    CONTACT_REJECTED,
+    CONTACT_REPLIED,
+    STATUS_IN_WORK,
+    STATUS_NEW,
+    Lead,
+)
 from src.services.providers.base import TARGET_CATEGORIES
+
+if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this module must not import
+    from src.database.models import ProviderState
+    from src.services.scheduler import CollectorStatus, RunReport
+
+# Telegram's limit for one message.
+MAX_MESSAGE_LENGTH: int = 4096
+# Field limits for a lead card: normally the first one fits, the second is for pathological data.
+_CARD_FIELD_LIMITS: tuple[int, ...] = (300, 100)
+_MSK = timezone(timedelta(hours=3), "MSK")
+
+_CONTACT_STATUS_TITLES: dict[str, str] = {
+    CONTACT_CONTACTED: "✍️ Написал",
+    CONTACT_REPLIED: "💬 Ответили",
+    CONTACT_REJECTED: "🗑 Отказ",
+    CONTACT_NO_ANSWER: "🔇 Нет ответа",
+}
+_CARD_LINK_TITLES: dict[str, str] = {"2gis.": "Карточка 2ГИС", "openstreetmap.": "Карточка OpenStreetMap"}
+_RUN_STATUS_TITLES: dict[str, str] = {
+    "running": "выполняется",
+    "ok": "успешно",
+    "partial": "частично, были ошибки",
+    "failed": "ошибка",
+    "interrupted": "прерван",
+    "daily_limit": "пропущен, суточный лимит запросов",
+}
+_TRIGGER_TITLES: dict[str, str] = {
+    "schedule": "по расписанию",
+    "manual": "вручную",
+    "batch": "при выдаче пачки",
+    "low_pool": "мало лидов в запасе",
+}
+
+
+def format_msk_time(value: datetime | None) -> str:
+    """Format a timestamp as Moscow time for messages."""
+    if value is None:
+        return "—"
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(_MSK).strftime("%d.%m.%Y %H:%M МСК")
 
 
 def format_lead_card(lead: Lead) -> str:
@@ -35,9 +88,150 @@ def format_lead_card(lead: Lead) -> str:
         lines.append(f"📫 <b>Адрес:</b> {html.escape(lead.address)}")
     if lead.phone:
         lines.append(f"📞 <b>Телефон:</b> {html.escape(lead.phone)}")
+    if lead.email:
+        lines.append(f"✉️ <b>Email:</b> {html.escape(lead.email)}")
     if lead.socials:
         lines.append(f"🔗 <b>Соцсети:</b> {html.escape(lead.socials)}")
 
+    return "\n".join(lines)
+
+
+def _site_line(lead: Lead, field_limit: int) -> str:
+    site = html.escape((lead.raw_website or "")[:field_limit])
+    if lead.site_status == "dead_site":
+        return f"🌐 <b>Сайт:</b> ⚠️ не работает ({site or 'адрес не указан'})"
+    if lead.site_status == "social_only":
+        return f"🌐 <b>Сайт:</b> 📱 только соцсеть{f' ({site})' if site else ''}"
+    if lead.site_status == "no_site":
+        return "🌐 <b>Сайт:</b> ❌ нет"
+    return f"🌐 <b>Сайт:</b> {site}"
+
+
+def _issued_card(lead: Lead, field_limit: int) -> str:
+    def field(value: str) -> str:
+        return html.escape(value[:field_limit])
+
+    category = str(TARGET_CATEGORIES.get(lead.category, {}).get("title", lead.category))
+    lines = [f"🏢 <b>{field(lead.name)}</b>", f"🏷 <b>Рубрика:</b> {field(category)}"]
+    if lead.address:
+        lines.append(f"📫 <b>Адрес:</b> {field(lead.address)}")
+    if lead.phone:
+        lines.append(f"📞 <b>Телефон:</b> {field(lead.phone)}")
+    if lead.email:
+        lines.append(f"✉️ <b>Email:</b> {field(lead.email)}")
+    lines.append(_site_line(lead, field_limit))
+    if lead.socials:
+        lines.append(f"🔗 <b>Соцсети:</b> {field(lead.socials)}")
+    if lead.source_url and lead.source_url.startswith(("http://", "https://")):
+        # By the link, not lead.source: when sources are merged the card may come from another one.
+        title = next((text for host, text in _CARD_LINK_TITLES.items() if host in lead.source_url), "Карточка")
+        lines.append(f'🗺 <a href="{html.escape(lead.source_url, quote=True)}">{title}</a>')
+    elif lead.map_url and lead.map_url.startswith(("http://", "https://")):
+        lines.append(f'🗺 <a href="{html.escape(lead.map_url, quote=True)}">На карте</a>')
+    status = _CONTACT_STATUS_TITLES.get(lead.contact_status or "", "📤 Выдан, ждёт действия")
+    lines.append(f"📌 <b>Статус:</b> {status}")
+    return "\n".join(lines)
+
+
+def format_issued_lead(lead: Lead) -> str:
+    """Format a handed-out lead: everything needed to contact the organization, within Telegram's limit."""
+    text = ""
+    for limit in _CARD_FIELD_LIMITS:
+        text = _issued_card(lead, limit)
+        if len(text) <= MAX_MESSAGE_LENGTH:
+            break
+    return text
+
+
+def format_funnel_stats(counts: dict[str, int], contact_counts: dict[str, int], issued_total: int) -> str:
+    """Format the pool size and what happened to the handed-out leads."""
+    waiting = max(0, issued_total - sum(contact_counts.values()))
+    lines = [
+        "📊 <b>Лиды:</b>\n",
+        f"• 📈 Всего: <b>{sum(counts.values())}</b>",
+        f"• 📦 Новых в запасе: <b>{counts.get(STATUS_NEW, 0)}</b>",
+        f"• 📤 Выдано всего: <b>{issued_total}</b>",
+        f"• ⏳ Выдано, ждут действия: <b>{waiting}</b>",
+        f"• ✍️ Написал: <b>{contact_counts.get(CONTACT_CONTACTED, 0)}</b>",
+        f"• 💬 Ответили: <b>{contact_counts.get(CONTACT_REPLIED, 0)}</b>",
+        f"• 🗑 Отказ: <b>{contact_counts.get(CONTACT_REJECTED, 0)}</b>",
+        f"• 🔇 Нет ответа: <b>{contact_counts.get(CONTACT_NO_ANSWER, 0)}</b>",
+    ]
+    if counts.get(STATUS_IN_WORK):
+        lines.append(f"• 💼 В работе: <b>{counts[STATUS_IN_WORK]}</b>")
+    return "\n".join(lines)
+
+
+def format_collection_report(report: RunReport) -> str:
+    """Format the outcome of a collection run."""
+    result = report.result
+    status = _RUN_STATUS_TITLES.get(report.status, report.status)
+    lines = [
+        f"🏁 <b>Сбор лидов завершён</b> ({status})\n",
+        f"• Найдено: <b>{result.found}</b>",
+        f"• Подходят: <b>{result.qualified}</b>",
+        f"• Новых сохранено: <b>{result.saved_new}</b>",
+        f"• Дубликатов пропущено: <b>{result.duplicates}</b>",
+        f"• Ошибок: <b>{result.errors}</b>",
+        f"• Запросов к API: <b>{result.requests}</b>",
+        f"• Длительность: <b>{report.duration_seconds:.0f} с</b>",
+        f"\n📦 В запасе: <b>{report.pool_size}</b>",
+    ]
+    if result.last_error:
+        lines.append(f"\n⚠️ Последняя ошибка: {html.escape(result.last_error)}")
+    lines += [f"⏭ {html.escape(name)} пропущен: {html.escape(why)}" for name, why in result.skipped.items()]
+    return "\n".join(lines)
+
+
+def _provider_line(name: str, state: ProviderState | None, now: datetime) -> str:
+    safe_name = html.escape(name)
+    if state is None:
+        return f"✅ {safe_name}"
+    reason = html.escape(state.last_block_reason or "")
+    if state.disabled_at is not None:
+        return f"⛔ {safe_name}: отключён после блокировок ({reason}). Включить: /provider_on {safe_name}"
+    if state.blocked_until is not None and now < state.blocked_until:
+        return f"⏸ {safe_name}: пауза до {format_msk_time(state.blocked_until)} ({reason})"
+    return f"✅ {safe_name}"
+
+
+def format_collector_status(status: CollectorStatus) -> str:
+    """Format the state of automatic collection."""
+    state = status.state
+    now = datetime.now(UTC)
+    lines = [
+        "🤖 <b>Автосбор лидов</b>\n",
+        f"Автозапуск: <b>{'включён' if status.auto_enabled else 'выключен'}</b>",
+        f"Расписание: {html.escape(status.schedule_text)}",
+        f"Следующий запуск: <b>{format_msk_time(status.next_run_at)}</b>",
+        "\n<b>Источники:</b>",
+    ]
+    lines += [_provider_line(name, status.provider_states.get(name), now) for name in status.active_providers]
+    if not status.active_providers:
+        lines.append("нет доступных")
+    lines += [
+        f"⚠️ {html.escape(name)} отключён: {html.escape(reason)}"
+        for name, reason in status.disabled_providers.items()
+    ]
+    lines.append(f"\n📦 В запасе: <b>{status.pool_size}</b>")
+    lines.append(f"Запросов за сутки: {status.requests_today} из {status.max_requests_per_day}")
+    if status.is_running:
+        lines.append("\n⏳ <b>Сбор выполняется прямо сейчас</b>")
+
+    if state.last_started_at is None:
+        lines.append("\nСбор ещё не запускался.")
+        return "\n".join(lines)
+
+    run_status = _RUN_STATUS_TITLES.get(state.last_status or "", state.last_status or "—")
+    trigger = _TRIGGER_TITLES.get(state.last_trigger or "", state.last_trigger or "—")
+    lines += [
+        f"\n<b>Последний запуск</b> ({trigger}): {format_msk_time(state.last_started_at)}",
+        f"Результат: <b>{html.escape(run_status)}</b>",
+        f"Найдено: <b>{state.found}</b>, подходят: <b>{state.qualified}</b>, новых: <b>{state.saved_new}</b>",
+        f"Дубликатов: <b>{state.duplicates}</b>, ошибок: <b>{state.errors}</b>",
+    ]
+    if state.last_error:
+        lines.append(f"⚠️ Последняя ошибка: {html.escape(state.last_error)}")
     return "\n".join(lines)
 
 

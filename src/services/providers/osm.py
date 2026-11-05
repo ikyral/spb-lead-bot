@@ -1,16 +1,21 @@
 """OpenStreetMap Overpass API provider for Saint Petersburg places."""
 
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 import httpx
 
+from src.services.api_client import ApiClient, ProviderError, ProviderTemporaryError, RateLimiter
 from src.services.checker import is_social_domain, url_host
 from src.services.providers.base import (
     SPB_DISTRICTS,
     TARGET_CATEGORIES,
     BaseMapProvider,
     RawPlace,
+    SearchArea,
+    SearchPage,
+    SearchQuery,
 )
 
 logger = logging.getLogger(__name__)
@@ -19,10 +24,15 @@ DEFAULT_OVERPASS_ENDPOINTS: list[str] = [
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
     "https://overpass-api.de/api/interpreter",
 ]
+OSM_ELEMENT_URL: str = "https://www.openstreetmap.org/{element_type}/{element_id}"
+# Public Overpass servers ask for moderate use; shared by all provider instances.
+_RATE_LIMITER = RateLimiter(requests_per_second=1.0)
 
 
 class OSMOverpassProvider(BaseMapProvider):
     """Fetches places via OSM Overpass API with server fallback."""
+
+    name = "osm"
 
     def __init__(
         self,
@@ -31,11 +41,10 @@ class OSMOverpassProvider(BaseMapProvider):
         timeout: float = 30.0,
     ) -> None:
         self.endpoints = endpoints or list(DEFAULT_OVERPASS_ENDPOINTS)
-        self._client = client
-        self.timeout = timeout
+        self._api = ApiClient("Overpass", client=client, limiter=_RATE_LIMITER, timeout=timeout)
 
     def build_query(
-        self, bbox: tuple[float, float, float, float], osm_tags: list[tuple[str, str]]
+        self, bbox: tuple[float, float, float, float], osm_tags: Iterable[tuple[str, str]]
     ) -> str:
         """Construct Overpass QL query for given bounding box and OSM tags."""
         south, west, north, east = bbox
@@ -58,27 +67,44 @@ class OSMOverpassProvider(BaseMapProvider):
         if not osm_tags:
             return []
 
-        query = self.build_query(bbox, osm_tags)
-        high_margin = bool(cat_info.get("high_margin", False))
+        query = SearchQuery(
+            text="",
+            category=category_key,
+            high_margin=bool(cat_info.get("high_margin", False)),
+            osm_tags=tuple(osm_tags),
+        )
+        places, _complete = await self._query_endpoints(query, SearchArea(bbox=bbox, district=district_name))
+        return places
+
+    async def search(
+        self, query: SearchQuery, area: SearchArea, page: int = 1, page_size: int = 50
+    ) -> SearchPage:
+        """
+        Overpass has no pages: everything comes at once, so only page 1 exists.
+
+        Free-text queries have no OSM tags and are skipped. If all servers fail and
+        nothing was received, ProviderTemporaryError is raised.
+        """
+        if page > 1 or not query.osm_tags:
+            return SearchPage(places=[])
+        places, complete = await self._query_endpoints(query, area)
+        if not complete and not places:
+            raise ProviderTemporaryError("Overpass: все серверы недоступны")
+        return SearchPage(places=places)
+
+    async def _query_endpoints(self, search: SearchQuery, area: SearchArea) -> tuple[list[RawPlace], bool]:
+        """Try the servers in turn. Returns the places and whether the result is complete."""
+        query = self.build_query(area.bbox, search.osm_tags)
+        district_name, category_key, high_margin = area.district, search.category, search.high_margin
 
         # Best incomplete result, used only if no endpoint returns a complete one.
         partial: list[RawPlace] = []
 
         for endpoint in self.endpoints:
             try:
-                if self._client is not None:
-                    response = await self._client.post(
-                        endpoint, data={"data": query}, timeout=self.timeout
-                    )
-                else:
-                    async with httpx.AsyncClient(timeout=self.timeout) as client:
-                        response = await client.post(endpoint, data={"data": query})
-
-                if response.status_code != 200:
-                    logger.warning("Overpass endpoint %s returned status %d", endpoint, response.status_code)
-                    continue
-
-                data = response.json()
+                # The next server is the retry here.
+                response = await self._api.request_json("POST", endpoint, data={"data": query}, max_attempts=1)
+                data = response.data
                 places = self._parse_elements(data, district_name, category_key, high_margin)
 
                 # Timeouts and memory exhaustion come with HTTP 200 and a 'remark' starting with
@@ -93,8 +119,8 @@ class OSMOverpassProvider(BaseMapProvider):
                         partial = places
                     continue
 
-                return places
-            except (httpx.HTTPError, ValueError, KeyError, AttributeError) as exc:
+                return places, True
+            except (ProviderError, ValueError, KeyError, AttributeError) as exc:
                 logger.warning("Overpass endpoint %s failed: %s", endpoint, exc)
 
         if partial:
@@ -103,12 +129,12 @@ class OSMOverpassProvider(BaseMapProvider):
                 "using an incomplete result with %d places",
                 district_name, category_key, len(partial),
             )
-        return partial
+        return partial, False
 
     def _parse_elements(
         self,
         data: dict[str, Any],
-        district_name: str,
+        district_name: str | None,
         category_key: str,
         high_margin: bool,
     ) -> list[RawPlace]:
@@ -189,6 +215,11 @@ class OSMOverpassProvider(BaseMapProvider):
                     raw_website=raw_website,
                     map_url=map_url,
                     high_margin=high_margin,
+                    source_url=(
+                        OSM_ELEMENT_URL.format(element_type=elem["type"], element_id=elem_id)
+                        if elem.get("type") in ("node", "way", "relation")
+                        else None
+                    ),
                 )
             )
 

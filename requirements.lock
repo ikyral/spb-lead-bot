@@ -10,6 +10,7 @@ aiosignal==1.4.0
 aiosqlite==0.22.1
 annotated-types==0.8.0
 anyio==4.16.0
+APScheduler==3.11.3
 attrs==26.1.0
 certifi==2026.10.23
 frozenlist==1.8.0
@@ -20,12 +21,16 @@ httpx==0.28.1
 idna==3.20
 magic-filter==1.0.12
 multidict==7.2.1
+playwright==1.64.1
 propcache==0.5.4
 pydantic==2.13.5
 pydantic-settings==2.16.2
 pydantic_core==2.46.5
+pyee==13.0.1
 python-dotenv==1.2.4
 SQLAlchemy==2.1.8
 typing-inspection==0.4.5
 typing_extensions==4.16.0
+tzdata==2026.6
+tzlocal==5.4.5
 yarl==1.25.1
