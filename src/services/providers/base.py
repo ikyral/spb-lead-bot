@@ -74,6 +74,9 @@ class RawPlace:
     high_margin: bool = False
     email: str | None = None  # only an address published in the organization's public card
     source_url: str | None = None  # the organization's card in the source
+    rubric: str | None = None  # the source's own category, more precise than the searched niche
+    # False: the source gave no contacts, and that does not mean the organization has none.
+    contacts_known: bool = True
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,11 @@ class BaseMapProvider(ABC):
     fallback_for: str | None = None
     # Sites that must not be visited often: the collector skips the provider until this passes.
     min_hours_between_runs: float = 0.0
+    # When set, a rejected key switches the provider off until the key is replaced: this text explains it.
+    auth_failure_hint: str | None = None
+    # When set, requests are too valuable to repeat: every target continues from the page where it
+    # stopped. Progress made under one scope does not count for another (a paid key sees more pages).
+    progress_scope: str | None = None
 
     @abstractmethod
     async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:

@@ -19,6 +19,7 @@ from src.database.models import Lead
 from src.services.dedup import coords_from_map_url
 from src.services.normalize import normalize_place
 from src.services.providers.base import RawPlace
+from src.services.twogis_links import TWOGIS_SOURCES
 
 SCHEMA_VERSION: int = 1
 
@@ -75,6 +76,8 @@ def lead_to_record(lead: Lead, city_slug: str) -> dict[str, Any]:
         "website": lead.raw_website,
         "email": lead.email,
         "rubric": lead.category,
+        # Optional, an older server ignores it: the source's own category.
+        "rubric_name": lead.rubric,
         "lat": coords[0] if coords else None,
         "lon": coords[1] if coords else None,
         "source_url": lead.source_url,
@@ -174,7 +177,7 @@ def _coordinate(record: dict[str, Any], key: str, limit: float) -> float | None:
     return float(value)
 
 
-def _parse_record(record: Any) -> RawPlace:
+def _parse_record(record: Any, require_contact: bool) -> RawPlace:
     if not isinstance(record, dict):
         raise _RejectedRecord(REASON_NOT_OBJECT)
 
@@ -208,7 +211,9 @@ def _parse_record(record: Any) -> RawPlace:
     # The city is not stored: the bot works with one city and the address names the place.
     _text(record, "city", _DISTRICT_MAX)
 
-    if not phones and not website:
+    no_contacts = not phones and not website
+    # Without contacts an organization from 2GIS is still a lead: the owner looks in its card.
+    if no_contacts and (require_contact or source not in TWOGIS_SOURCES):
         raise _RejectedRecord(REASON_NO_CONTACTS)
 
     return normalize_place(
@@ -226,6 +231,8 @@ def _parse_record(record: Any) -> RawPlace:
             map_url=None if lat is None or lon is None else f"https://yandex.ru/maps/?pt={lon},{lat}&z=17&l=map",
             email=_text(record, "email", _EMAIL_MAX),
             source_url=_url(record, "source_url"),
+            rubric=_text(record, "rubric_name", _NAME_MAX),
+            contacts_known=not no_contacts,
         )
     )
 
@@ -243,7 +250,7 @@ def _load_json(data: bytes) -> Any:
         raise LeadFileError("файл повреждён: это не корректный JSON") from None
 
 
-def parse_lead_file(data: bytes, max_bytes: int, max_leads: int) -> ParsedFile:
+def parse_lead_file(data: bytes, max_bytes: int, max_leads: int, require_contact: bool = False) -> ParsedFile:
     """
     Check a file and pick out the usable leads.
 
@@ -277,7 +284,7 @@ def parse_lead_file(data: bytes, max_bytes: int, max_leads: int) -> ParsedFile:
     parsed = ParsedFile(total=len(records))
     for record in records:
         try:
-            parsed.places.append(_parse_record(record))
+            parsed.places.append(_parse_record(record, require_contact))
         except _RejectedRecord as exc:
             parsed.rejected[exc.reason] += 1
     return parsed

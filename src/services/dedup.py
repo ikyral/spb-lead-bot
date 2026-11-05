@@ -6,13 +6,14 @@ from dataclasses import replace
 
 from src.services.checker import is_social_domain, url_host
 from src.services.providers.base import RawPlace
+from src.services.twogis_links import twogis_card_url
 
 # Places with the same normalized name closer than this are treated as one business.
 SAME_PLACE_MAX_DISTANCE_M: float = 150.0
 
 # Fields copied from a duplicate when the kept place has no value.
 _FILLABLE_FIELDS: tuple[str, ...] = (
-    "district", "address", "phone", "socials", "map_url", "email", "source_url",
+    "district", "address", "phone", "socials", "map_url", "email", "source_url", "rubric",
 )
 
 _PHONE_SEPARATORS_RE = re.compile(r"[,;]")
@@ -134,7 +135,12 @@ def _fill_from_duplicate(target: RawPlace, source: RawPlace) -> None:
         if not getattr(target, field) and getattr(source, field):
             setattr(target, field, getattr(source, field))
 
+    # The owner looks up contacts on 2GIS, so its card beats a card in another source.
+    if twogis_card_url(source.source_url) and not twogis_card_url(target.source_url):
+        target.source_url = source.source_url
+
     target.high_margin = target.high_margin or source.high_margin
+    target.contacts_known = target.contacts_known and source.contacts_known
 
 
 def merge_duplicate_places(places: list[RawPlace]) -> list[RawPlace]:

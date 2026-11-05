@@ -13,6 +13,9 @@ _EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 _TRACKING_PARAMS: frozenset[str] = frozenset({"gclid", "yclid", "ymclid", "fbclid", "_openstat", "from"})
 _E164_MAX_DIGITS = 15
 _E164_MIN_DIGITS = 8
+_RUSSIAN_DIGITS = 11
+_LOCAL_DIGITS = 10
+_MANUAL_PHONE_RE = re.compile(r"\+?[\d\s().\-]+", re.ASCII)
 
 
 def normalize_phone(raw: str | None) -> str | None:
@@ -31,6 +34,25 @@ def normalize_phone(raw: str | None) -> str | None:
     if len(digits) >= 11 and digits[0] in "78":
         return f"+7{digits[1:11]}"
     return f"+7{digits}" if len(digits) == 10 else None
+
+
+def parse_manual_phone(raw: str | None) -> str | None:
+    """
+    A number typed by a person, in E.164, or None if the text is not exactly one phone number.
+
+    Stricter than normalize_phone: that one cleans up data from sources and drops extra digits,
+    while here extra digits or words mean a typo the person should see.
+    """
+    text = (raw or "").strip()
+    if not _MANUAL_PHONE_RE.fullmatch(text):
+        return None
+    digits = _NON_DIGITS_RE.sub("", text)
+    if text.startswith("+"):
+        if digits.startswith("7") and len(digits) != _RUSSIAN_DIGITS:
+            return None
+    elif len(digits) != _LOCAL_DIGITS and not (len(digits) == _RUSSIAN_DIGITS and digits[0] in "78"):
+        return None
+    return normalize_phone(text)
 
 
 def normalize_phone_list(raw: str | None) -> str | None:

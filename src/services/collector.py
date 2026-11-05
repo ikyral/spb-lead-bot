@@ -1,5 +1,6 @@
 """Automatic lead collection: what to search for (from settings) and one collection pass."""
 
+import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -12,13 +13,16 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.config import Settings
-from src.database.models import ProviderState
+from src.database.models import ProviderState, SearchProgress
 from src.database.repo import (
     MAX_CONSECUTIVE_BLOCKS,
+    disable_provider,
     get_provider_states,
+    get_search_progress,
     record_provider_block,
     record_provider_run,
     record_provider_success,
+    save_search_progress,
 )
 from src.services.api_client import (
     ProviderAuthError,
@@ -73,6 +77,7 @@ class CollectorConfig:
     max_requests_per_run: int
     max_requests_per_day: int
     block_backoff_hours: float = 6.0
+    recheck_days: int = 30
 
 
 def _split(value: str) -> list[str]:
@@ -166,6 +171,7 @@ def load_collector_config(settings: Settings) -> CollectorConfig:
         max_requests_per_run=settings.COLLECT_MAX_REQUESTS_PER_RUN,
         max_requests_per_day=settings.COLLECT_MAX_REQUESTS_PER_DAY,
         block_backoff_hours=settings.SCRAPER_BLOCK_BACKOFF_HOURS,
+        recheck_days=settings.COLLECT_RECHECK_DAYS,
     )
 
 
@@ -191,12 +197,18 @@ class CollectResult:
 REST_REASON: str = "уже запускался сегодня: сайт не должен посещаться часто"
 
 
+def _progress_key(provider: BaseMapProvider, target: SearchTarget) -> str:
+    parts = (provider.name, provider.progress_scope, target.query.category, target.query.text, target.area.bbox)
+    return hashlib.sha256(repr(parts).encode("utf-8")).hexdigest()
+
+
 def unavailable_reason(provider: BaseMapProvider, state: ProviderState | None, now: datetime) -> str | None:
     """Why a provider must not be used right now, or None if it may."""
     if state is None:
         return None
     if state.disabled_at is not None:
-        return f"отключён после блокировок ({state.last_block_reason}), нужно ручное включение"
+        cause = "после блокировок " if state.consecutive_blocks else ""
+        return f"отключён {cause}({state.last_block_reason}), нужно ручное включение"
     if state.blocked_until is not None and now < state.blocked_until:
         return f"пауза после блокировки ({state.last_block_reason})"
     if provider.min_hours_between_runs and state.last_run_at is not None:
@@ -215,6 +227,7 @@ class _Collection:
         config: CollectorConfig,
         max_requests: int,
         session_maker: async_sessionmaker[AsyncSession],
+        known_progress: dict[str, SearchProgress] | None = None,
     ) -> None:
         self.active = list(providers)
         self.config = config
@@ -225,6 +238,9 @@ class _Collection:
         self.places: list[RawPlace] = []
         self.seen_ids: set[str] = set()
         self.failures_in_a_row: dict[str, int] = {}
+        self.known_progress = known_progress or {}
+        self.new_progress: dict[str, SearchProgress] = {}
+        self.walked_targets: dict[str, int] = {}
 
     def alert(self, text: str) -> None:
         if text not in self.result.alerts:
@@ -241,7 +257,11 @@ class _Collection:
     async def collect_target(self, provider: BaseMapProvider, target: SearchTarget) -> None:
         """Walk the result pages of one target. Results received before a failure are kept."""
         collected = 0
-        for page in range(1, self.config.max_pages + 1):
+        first_page = self._first_page(provider, target)
+        if first_page is None:
+            self.walked_targets[provider.name] = self.walked_targets.get(provider.name, 0) + 1
+            return
+        for page in range(first_page, first_page + self.config.max_pages):
             if self.result.requests >= self.max_requests:
                 return
             self.result.requests += 1
@@ -255,12 +275,14 @@ class _Collection:
                 self._add_places(exc.partial, collected)
                 await self._handle_block(provider, exc)
                 return
-            except (ProviderAuthError, ProviderQuotaError, ProviderUnavailableError) as exc:
-                # Repeating will not help and could get the key suspended.
-                logger.error("Provider %s stopped for this run: %s", provider.name, exc)
-                self.record_error(str(exc))
-                self.alert(str(exc))
-                self.drop_provider(provider)
+            except ProviderAuthError as exc:
+                if provider.auth_failure_hint is None:
+                    self._stop_provider(provider, exc)
+                else:
+                    await self._handle_rejected_key(provider, exc, provider.auth_failure_hint)
+                return
+            except (ProviderQuotaError, ProviderUnavailableError) as exc:
+                self._stop_provider(provider, exc)
                 return
             except ProviderError as exc:
                 logger.warning("Provider %s failed on %s: %s", provider.name, target.query.category, exc)
@@ -281,14 +303,60 @@ class _Collection:
                 logger.warning("Provider %s: %s", provider.name, search_page.warning)
                 self.alert(search_page.warning)
 
-            collected = self._add_places(search_page.places, collected)
+            # Remembered as read, so a page must not be cut short: the rest of it would never be seen.
+            collected = self._add_places(search_page.places, collected, whole_page=bool(provider.progress_scope))
+            self._remember_progress(provider, target, page, search_page.has_more)
             if collected >= self.config.max_results_per_query or not search_page.has_more:
                 return
 
-    def _add_places(self, places: list[RawPlace], collected: int) -> int:
+    def _first_page(self, provider: BaseMapProvider, target: SearchTarget) -> int | None:
+        """Where to continue this target; None if all of its pages were seen recently."""
+        if not provider.progress_scope:
+            return 1
+        progress = self.known_progress.get(_progress_key(provider, target))
+        if progress is None:
+            return 1
+        if progress.exhausted_at is None:
+            return progress.next_page
+        if datetime.now(UTC) - progress.exhausted_at < timedelta(days=self.config.recheck_days):
+            return None
+        return 1
+
+    def _remember_progress(self, provider: BaseMapProvider, target: SearchTarget, page: int, has_more: bool) -> None:
+        if provider.progress_scope:
+            key = _progress_key(provider, target)
+            self.new_progress[key] = SearchProgress(
+                key=key,
+                provider=provider.name,
+                next_page=page + 1,
+                exhausted_at=None if has_more else datetime.now(UTC),
+            )
+
+    def _stop_provider(self, provider: BaseMapProvider, error: ProviderError) -> None:
+        """Repeating will not help and could get the key suspended."""
+        logger.error("Provider %s stopped for this run: %s", provider.name, error)
+        self.record_error(str(error))
+        self.alert(str(error))
+        self.drop_provider(provider)
+
+    async def _handle_rejected_key(self, provider: BaseMapProvider, error: ProviderError, hint: str) -> None:
+        """A rejected key will not start working by itself: no more requests with it, the leads stay available."""
+        async with self.session_maker() as session:
+            await disable_provider(session, provider.name, hint)
+        self.drop_provider(provider)
+        self.succeeded.discard(provider.name)
+        text = (
+            f"{provider.name}: {hint}. Источник отключён, накопленные лиды выдаются как обычно. Что делать: укажите "
+            f"новый ключ и перезапустите бота, источник включится сам; для прежнего ключа: /provider_on {provider.name}"
+        )
+        logger.error("Provider switched off: %s (%s)", text, error)
+        self.record_error(text)
+        self.alert(text)
+
+    def _add_places(self, places: list[RawPlace], collected: int, whole_page: bool = False) -> int:
         """Add places up to the limit per query, without repeats. Returns the new count for this query."""
         for place in places:
-            if collected >= self.config.max_results_per_query:
+            if collected >= self.config.max_results_per_query and not whole_page:
                 break
             collected += 1
             if place.external_id not in self.seen_ids:
@@ -361,11 +429,12 @@ async def collect_leads(
     now = datetime.now(UTC)
     async with session_maker() as session:
         states = await get_provider_states(session)
+        known_progress = await get_search_progress(session)
     skipped = {provider.name: unavailable_reason(provider, states.get(provider.name), now) for provider in providers}
     usable = [provider for provider in providers if skipped[provider.name] is None]
     resting = {name for name, reason in skipped.items() if reason == REST_REASON}
 
-    collection = _Collection(usable, config, budget, session_maker)
+    collection = _Collection(usable, config, budget, session_maker, known_progress)
     result = collection.result
     result.skipped = {name: reason for name, reason in skipped.items() if reason is not None}
     for name, reason in result.skipped.items():
@@ -392,11 +461,15 @@ async def collect_leads(
     finally:
         await _close_providers(providers)
     result.next_cursor = (start + result.targets_processed) % len(targets) if targets else 0
+    for name, count in collection.walked_targets.items():
+        if count == len(targets):
+            result.skipped[name] = f"все запросы пройдены до конца, повторный обход через {config.recheck_days} дн."
 
     async with session_maker() as session:
         for name in collection.succeeded:
             await record_provider_success(session, name)
         stats = await save_collected_places(session, collection.places)
+        await save_search_progress(session, list(collection.new_progress.values()))
     result.found = stats["total_found"]
     result.qualified = stats["qualified"]
     result.saved_new = stats["saved_new"]

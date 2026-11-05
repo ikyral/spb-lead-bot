@@ -89,6 +89,13 @@ class Lead(Base):
     exported_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
     # On the server: when the lead arrived from an export file.
     imported_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    # The source's own category. `category` above is the niche the organization was searched for.
+    rubric: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+
+    @property
+    def has_contacts(self) -> bool:
+        """Is there anything to contact the organization by, without opening its card?"""
+        return any(value and value.strip() for value in (self.phone, self.raw_website, self.socials, self.email))
 
     def __repr__(self) -> str:
         return (
@@ -110,6 +117,21 @@ class ProviderState(Base):
     last_block_reason: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
     last_block_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
     last_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    # API requests spent with the key identified by key_fingerprint (a hash, never the key itself).
+    requests_total: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    key_fingerprint: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
+
+
+class SearchProgress(Base):
+    """How far a provider with a limited quota has walked one search target."""
+
+    __tablename__ = "search_progress"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32))
+    next_page: Mapped[int] = mapped_column(Integer, default=1)
+    # All pages have been seen; the target is left alone until COLLECT_RECHECK_DAYS pass.
+    exhausted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
 
 
 class ImportLog(Base):
@@ -156,3 +178,5 @@ class CollectorState(Base):
     requests_used: Mapped[int] = mapped_column(Integer, default=0)
     # With an external collector: when admins were last asked to bring a new file.
     last_pool_reminder_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    # The last warning about the API key running out: '<expiry date>:<day of the warning or "expired">'.
+    key_warning_mark: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)

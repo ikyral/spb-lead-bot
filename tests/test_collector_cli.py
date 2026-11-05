@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -81,6 +82,7 @@ def cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         _env_file=None,
         COLLECTOR_DB_PATH=str(tmp_path / "data" / "collector.db"),
         COLLECTOR_EXPORT_DIR=str(tmp_path / "exports"),
+        COLLECTOR_PROVIDERS="2gis_scraper",
         COLLECT_QUERIES="dentist_clinic",
         COLLECT_DISTRICTS="Центральный",
     )
@@ -91,8 +93,8 @@ def cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     holder.exports = tmp_path / "exports"
     holder.settings = settings
 
-    def fake_build(names, key, options=None):
-        holder.names, holder.options = names, options
+    def fake_build(names, key, options=None, *twogis_args):
+        holder.names, holder.options, holder.twogis_args = names, options, twogis_args
         return ProviderSet(providers=[holder.provider])
 
     monkeypatch.setattr(collector_cli, "build_providers", fake_build)
@@ -122,10 +124,25 @@ def _set_state(tmp_path: Path, **values) -> None:
     asyncio.run(run())
 
 
+def test_collector_with_a_key_counts_its_requests_and_shows_what_is_left(
+    cli, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    settings = cli.settings.model_copy(update={"COLLECTOR_PROVIDERS": "2gis", "TWOGIS_API_KEY": SecretStr("KEY")})
+    monkeypatch.setattr(collector_cli, "settings", settings)
+    cli.provider.name = "2gis"
+
+    assert collector_cli.main([]) == 0
+
+    options, spend_request = cli.twogis_args
+    assert options.demo_key is True
+    assert callable(spend_request)
+    assert "API 2ГИС: израсходовано запросов 0 из 1000, осталось 1000." in capsys.readouterr().out
+
+
 def test_settings_need_no_bot_token() -> None:
     settings = Settings(_env_file=None)
     assert settings.BOT_TOKEN.get_secret_value() == ""
-    assert settings.COLLECTOR_PROVIDERS == "2gis_scraper"
+    assert settings.COLLECTOR_PROVIDERS == "2gis"
     assert settings.SCRAPER_HEADLESS is True
 
 
@@ -289,7 +306,7 @@ def test_no_usable_source_is_an_error(cli, monkeypatch: pytest.MonkeyPatch, caps
     monkeypatch.setattr(
         collector_cli,
         "build_providers",
-        lambda names, key, options=None: ProviderSet(disabled={"2gis_scraper": "не установлен playwright"}),
+        lambda names, key, options=None, *_twogis: ProviderSet(disabled={"2gis_scraper": "не установлен playwright"}),
     )
     assert collector_cli.main([]) == 1
     assert "не установлен playwright" in capsys.readouterr().out
@@ -357,7 +374,7 @@ def _external_runner(session_maker, provider=None, reminder=None, min_pool: int 
 
 
 def test_empty_provider_list_is_different_from_not_set() -> None:
-    assert Settings(_env_file=None).COLLECT_PROVIDERS == "osm"
+    assert Settings(_env_file=None).COLLECT_PROVIDERS == "2gis,osm"
     assert _config(COLLECT_PROVIDERS="").providers == []
 
 

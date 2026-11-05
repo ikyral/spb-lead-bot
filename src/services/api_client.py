@@ -120,8 +120,14 @@ class ApiClient:
         max_response_bytes: int = MAX_RESPONSE_BYTES,
         secrets: Iterable[str | None] = (),
         sleep: Sleep = asyncio.sleep,
+        no_retry_statuses: frozenset[int] = frozenset(),
+        before_request: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.name = name
+        # Temporary failures that this API must still not be asked about again.
+        self._no_retry_statuses = no_retry_statuses
+        # Runs before every attempt, retries included; what it raises stops the request.
+        self._before_request = before_request
         self._client = client
         self._limiter = limiter or RateLimiter(0)
         self._timeout = timeout
@@ -169,7 +175,7 @@ class ApiClient:
                     logger.debug("%s %s %s -> %d", self.name, method, host, status)
                     return ApiResponse(status=status, data=payload)
                 error = self._error_for_status(status, details)
-                retryable = status in _RETRYABLE_STATUSES
+                retryable = status in _RETRYABLE_STATUSES and status not in self._no_retry_statuses
             except httpx.HTTPError as exc:
                 # Only the class name: messages of some httpx errors may contain the URL with the key.
                 error = ProviderTemporaryError(f"{self.name}: сетевая ошибка ({type(exc).__name__})")
@@ -192,6 +198,8 @@ class ApiClient:
         params: Mapping[str, str | int] | None,
         data: Mapping[str, str] | None,
     ) -> tuple[int, bytes, float | None]:
+        if self._before_request is not None:
+            await self._before_request()
         await self._limiter.acquire()
         if self._client is not None:
             return await self._read(self._client, method, url, params, data)

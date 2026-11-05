@@ -2,10 +2,15 @@
 
 import re
 
+# The source says nothing about the site: not the same as 'no_site', which means there is none.
+SITE_UNKNOWN: str = "unknown"
+
 STATUS_POINTS: dict[str, int] = {
     "dead_site": 45,
     "social_only": 35,
     "no_site": 25,
+    # Contacts are in the source's card: a real lead, ranked below those that can be contacted right away.
+    SITE_UNKNOWN: 30,
 }
 
 HIGH_MARGIN_KEYWORDS: tuple[str, ...] = (
@@ -58,8 +63,9 @@ def calculate_lead_score(
     Calculate lead score (0..100) based on website status, contacts, and category.
 
     - Returns 0 if site_status == 'has_site'.
-    - Base points: dead_site (+45), social_only (+35), no_site (+25).
-    - Contacts: phone (+25), socials (+15), neither phone nor socials (-30).
+    - Base points: dead_site (+45), social_only (+35), unknown (+30), no_site (+25).
+    - Contacts: phone (+25), socials (+15), neither phone nor socials (-30, except 'unknown':
+      the source did not report contacts, which says nothing about the organization).
     - Margin bonus: high_margin is True or matches high margin keywords (+15).
     - Final result clamped to [0, 100].
     """
@@ -75,7 +81,7 @@ def calculate_lead_score(
         score += 25
     if has_socials:
         score += 15
-    if not has_phone and not has_socials:
+    if not has_phone and not has_socials and site_status != SITE_UNKNOWN:
         score -= 30
 
     is_high = (

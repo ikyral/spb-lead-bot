@@ -105,7 +105,70 @@ async def test_main_wires_the_collector_into_the_bot_lifetime(monkeypatch: pytes
     assert seen["scheduler_running_after"] is False
     assert status.next_run_at is not None
     assert status.active_providers == ["osm"]
-    assert status.disabled_providers == {}
+    assert status.disabled_providers == {"2gis": "не задан DGIS_API_KEY"}  # still runs, on OSM
+    assert status.dgis_key is None
+    assert status.batch_size == 30
+
+
+@pytest.mark.asyncio
+async def test_main_counts_requests_of_the_key_and_warns_about_its_end(
+    monkeypatch: pytest.MonkeyPatch, session_maker
+) -> None:
+    """With a key the limits must really reach the provider: a test of each part would not notice a missing link."""
+    from aiogram import Dispatcher
+
+    from src.bot.notifier import AdminNotifier
+    from src.services.scheduler import KEY_CHECK_JOB_ID
+
+    seen: dict = {}
+
+    async def fake_polling(self: Dispatcher, bot, **kwargs) -> None:
+        await self.emit_startup(bot=bot, **self.workflow_data)
+        runner = self["collector_runner"]
+        seen["status"] = await runner.get_status()
+        seen["provider"] = runner._provider_set.providers[0]
+        seen["job"] = runner._scheduler.get_job(KEY_CHECK_JOB_ID)
+        seen["notice"] = runner._key_notice
+        await self.emit_shutdown(bot=bot, **self.workflow_data)
+        await bot.session.close()
+
+    async def no_init_db() -> None:
+        return None
+
+    monkeypatch.setattr(Dispatcher, "start_polling", fake_polling)
+    monkeypatch.setattr(main, "init_db", no_init_db)
+    monkeypatch.setattr(main, "async_session_maker", session_maker)
+    monkeypatch.setattr(main, "settings_error", None)
+    current = Settings(
+        _env_file=None, BOT_TOKEN="123456:TEST", ADMIN_TG_ID=1, DGIS_API_KEY="KEY", DGIS_KEY_CREATED_AT="2026-11-01",
+        DGIS_REQUEST_CONTACTS=True,
+    )
+    monkeypatch.setattr(main, "settings", current)
+
+    # Routers are module globals, and main() has already run in this process.
+    routers = (main.search_router, main.leads_router, main.issue_router, main.collector_router, main.imports_router)
+    for router in routers:
+        router._parent_router = None
+
+    await main.main()
+
+    status = seen["status"]
+    assert status.active_providers == ["2gis", "osm"]
+    assert (status.dgis_key.used, status.dgis_key.limit, status.dgis_key.reserve) == (0, 1000, 50)
+    assert status.dgis_key.expires_on.isoformat() == "2026-12-01"
+    assert status.dgis_key.request_contacts is True
+
+    provider = seen["provider"]
+    assert provider._options.request_contacts is True
+    assert provider._api._before_request is not None
+    await provider._api._before_request()
+    async with session_maker() as session:
+        from src.database.repo import get_provider_states
+
+        assert (await get_provider_states(session))["2gis"].requests_total == 1
+
+    assert seen["job"] is not None
+    assert seen["notice"].__self__.__class__ is AdminNotifier
 
 
 def test_invalid_value_in_environment_is_reported_not_a_crash_on_import() -> None:

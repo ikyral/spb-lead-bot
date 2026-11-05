@@ -94,12 +94,14 @@ class ImportService:
         inbox_dir: Path,
         max_bytes: int,
         max_leads: int,
+        require_contact: bool = False,
     ) -> None:
         self._session_maker = session_maker
         self._report = report
         self._inbox_dir = inbox_dir
         self.max_bytes = max_bytes
         self._max_leads = max_leads
+        self._require_contact = require_contact
         self._lock = asyncio.Lock()
 
     async def import_bytes(
@@ -122,7 +124,9 @@ class ImportService:
     async def _import(self, data: bytes, name: str, source: str) -> ImportResult:
         result = ImportResult(source=source, file_name=name)
         try:
-            parsed = await asyncio.to_thread(parse_lead_file, data, self.max_bytes, self._max_leads)
+            parsed = await asyncio.to_thread(
+                parse_lead_file, data, self.max_bytes, self._max_leads, self._require_contact
+            )
             result.total = parsed.total
             result.rejected.update(parsed.rejected)
             if parsed.places:

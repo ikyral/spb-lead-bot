@@ -32,6 +32,7 @@ from src.services.providers.registry import build_providers
 from src.services.scraper import twogis_site
 from src.services.scraper.browser import PageSnapshot, PlaywrightSession
 from src.services.scraper.robots import RobotsRules, RobotsUnavailableError, fetch_robots, parse_robots
+from src.services.twogis_links import build_card_url
 
 FIXTURES = Path(__file__).parent / "fixtures"
 QUERY = SearchQuery(text="стоматология", category="dentist_clinic", high_margin=True)
@@ -115,7 +116,7 @@ def test_public_urls() -> None:
     assert twogis_site.build_search_url("spb", "кафе / бар") == (
         "https://2gis.ru/spb/search/%D0%BA%D0%B0%D1%84%D0%B5%20%2F%20%D0%B1%D0%B0%D1%80"
     )
-    assert twogis_site.build_card_url("spb", "70000001_abc") == "https://2gis.ru/spb/firm/70000001"
+    assert build_card_url("spb", "70000001_abc") == "https://2gis.ru/spb/firm/70000001"
 
 
 @pytest.mark.parametrize(
@@ -233,7 +234,7 @@ async def test_page_is_read_from_json_and_cards_give_missing_contacts() -> None:
     assert (first.source, first.category, first.high_margin) == ("2gis", "dentist_clinic", True)
     assert first.district == "Центральный"
     assert first.phone == "+7 (812) 555-01-01"
-    assert first.source_url == "https://2gis.ru/firm/70000001018420390"
+    assert first.source_url == "https://2gis.ru/spb/firm/70000001018420390"
     assert second.phone == "+7 921 000-00-02"
     assert second.email == "info@dentpro.example"
     assert second.raw_website == "https://dentpro.example/?utm_source=2gis"
@@ -748,7 +749,7 @@ def test_registry_knows_the_scraper_and_explains_what_is_off() -> None:
     assert result.disabled == {"2gis": "не задан DGIS_API_KEY"}
 
     with_key = build_providers(["2gis_scraper", "2gis"], twogis_api_key="key")
-    assert with_key.providers[1].fallback_for == "2gis_scraper"
+    assert with_key.providers[1].fallback_for is None  # the API is the main source and does not wait for the reader
 
 
 def test_registry_without_playwright_installed(monkeypatch: pytest.MonkeyPatch) -> None:

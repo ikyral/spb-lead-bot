@@ -6,6 +6,10 @@ import httpx
 import pytest
 
 from src.services.providers import OSMOverpassProvider, TwoGisProvider, parse_csv_leads
+from src.services.providers.twogis import TwoGisOptions
+
+# These tests are about paging as such. The limits of a demo key: test_no_contacts_mode.py.
+PAID_KEY = TwoGisOptions(demo_key=False)
 
 
 def test_csv_external_ids_are_stable() -> None:
@@ -296,7 +300,7 @@ async def test_twogis_fetches_all_pages_until_total() -> None:
         2: httpx.Response(200, json=_twogis_page(51, 50, total=120)),
         3: httpx.Response(200, json=_twogis_page(101, 20, total=120)),
     }
-    provider = TwoGisProvider(api_key="test_key", client=_paged_client(pages, requested))
+    provider = TwoGisProvider(api_key="test_key", client=_paged_client(pages, requested), options=PAID_KEY)
     places = await provider.search_places("Центральный", "dentist_clinic")
 
     assert len(places) == 120
@@ -334,7 +338,7 @@ async def test_twogis_page_cap_limits_billable_requests(monkeypatch: pytest.Monk
     monkeypatch.setattr(twogis, "TWOGIS_MAX_PAGES", 2)
     requested: list[dict] = []
     pages = {n: httpx.Response(200, json=_twogis_page(n * 100, 50, total=1000)) for n in range(1, 5)}
-    places = await TwoGisProvider(api_key="k", client=_paged_client(pages, requested)).search_places(
+    places = await TwoGisProvider(api_key="k", client=_paged_client(pages, requested), options=PAID_KEY).search_places(
         "Центральный", "dentist_clinic"
     )
     assert (len(places), len(requested)) == (100, 2)
@@ -384,7 +388,7 @@ async def test_twogis_deduplicates_items_repeated_across_pages() -> None:
         1: httpx.Response(200, json=_twogis_page(1, 50, total=60)),
         2: httpx.Response(200, json=_twogis_page(45, 15, total=60)),  # ids 45..50 repeat
     }
-    places = await TwoGisProvider(api_key="k", client=_paged_client(pages, requested)).search_places(
+    places = await TwoGisProvider(api_key="k", client=_paged_client(pages, requested), options=PAID_KEY).search_places(
         "Центральный", "dentist_clinic"
     )
     ids = [p.external_id for p in places]

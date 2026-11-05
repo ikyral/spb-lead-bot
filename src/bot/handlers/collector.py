@@ -79,7 +79,7 @@ async def handle_collect_off(message: Message, collector_runner: CollectorRunner
 @router.message(Command("provider_on"))
 async def handle_provider_on(message: Message, command: CommandObject, collector_runner: CollectorRunner) -> None:
     """Turn a source back on after blocks. This is the only way out of an automatic switch-off."""
-    name = (command.args or "2gis_scraper").strip()
+    name = (command.args or "").strip() or ("2gis" if collector_runner.known_provider("2gis") else "2gis_scraper")
     if not collector_runner.known_provider(name):
         await message.answer(f"Неизвестный источник: {html.escape(name)}. Список: /collect_status", parse_mode="HTML")
         return

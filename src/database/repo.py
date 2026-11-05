@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import Connection, CursorResult, func, inspect, select, text, update
+from sqlalchemy import ColumnElement, Connection, CursorResult, case, func, inspect, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -23,6 +23,7 @@ from src.database.models import (
     ImportLog,
     Lead,
     ProviderState,
+    SearchProgress,
 )
 
 engine: AsyncEngine = create_async_engine(settings.DB_URL, echo=False)
@@ -53,16 +54,20 @@ NEW_LEAD_COLUMNS: tuple[str, ...] = (
     "contact_status_at",
     "exported_at",
     "imported_at",
+    "rubric",
 )
 # The same for the collector_state table.
-NEW_STATE_COLUMNS: tuple[str, ...] = ("last_pool_reminder_at",)
+NEW_STATE_COLUMNS: tuple[str, ...] = ("last_pool_reminder_at", "key_warning_mark")
+# The same for the provider_state table.
+NEW_PROVIDER_COLUMNS: tuple[str, ...] = ("requests_total", "key_fingerprint")
 # Blocks in a row after which a provider stays off until an admin turns it on.
 MAX_CONSECUTIVE_BLOCKS: int = 3
 
 
 def _add_missing_columns(sync_conn: Connection) -> None:
     """create_all() does not alter existing tables, so older databases get new columns here."""
-    for model, names in ((Lead, NEW_LEAD_COLUMNS), (CollectorState, NEW_STATE_COLUMNS)):
+    models = ((Lead, NEW_LEAD_COLUMNS), (CollectorState, NEW_STATE_COLUMNS), (ProviderState, NEW_PROVIDER_COLUMNS))
+    for model, names in models:
         table_name = model.__tablename__
         existing = {column["name"] for column in inspect(sync_conn).get_columns(table_name)}
         for name in names:
@@ -71,6 +76,9 @@ def _add_missing_columns(sync_conn: Connection) -> None:
                 sync_conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {name} {ddl_type}"))
                 if name == "contact_status":
                     _move_contact_results_out_of_crm_status(sync_conn)
+                elif name == "requests_total":
+                    # NULL would never compare below the limit, and no request could be spent.
+                    sync_conn.execute(text("UPDATE provider_state SET requests_total = 0"))
 
 
 def _move_contact_results_out_of_crm_status(sync_conn: Connection) -> None:
@@ -222,22 +230,29 @@ async def get_leads(
     return list(result.scalars().all())
 
 
+def _has_contacts_clause() -> ColumnElement[bool]:
+    """The same as Lead.has_contacts, in SQL."""
+    columns = (Lead.phone, Lead.raw_website, Lead.socials, Lead.email)
+    return or_(*(func.trim(func.coalesce(column, "")) != "" for column in columns))
+
+
 async def issue_next_leads(session: AsyncSession, limit: int) -> list[Lead]:
     """
-    Hand out the oldest `limit` new leads: they become 'issued' in a single atomic statement.
+    Hand out `limit` new leads, those with contacts first and the oldest first within that.
 
-    Concurrent calls can never return the same lead. The repeated status check in the outer
-    WHERE matters on databases where the subquery can see a stale snapshot.
+    They become 'issued' in a single atomic statement, so concurrent calls can never return the same
+    lead. The repeated status check in the outer WHERE matters on databases where the subquery can
+    see a stale snapshot.
     """
-    oldest_new = (
+    next_new = (
         select(Lead.id)
         .where(Lead.crm_status == STATUS_NEW)
-        .order_by(Lead.created_at, Lead.id)
+        .order_by(case((_has_contacts_clause(), 0), else_=1), Lead.created_at, Lead.id)
         .limit(limit)
     )
     stmt = (
         update(Lead)
-        .where(Lead.id.in_(oldest_new), Lead.crm_status == STATUS_NEW)
+        .where(Lead.id.in_(next_new), Lead.crm_status == STATUS_NEW)
         .values(crm_status=STATUS_ISSUED, issued_at=datetime.now(UTC))
         .returning(Lead)
         .execution_options(synchronize_session=False)
@@ -245,7 +260,7 @@ async def issue_next_leads(session: AsyncSession, limit: int) -> list[Lead]:
     leads = list((await session.scalars(stmt)).all())
     await session.commit()
     # RETURNING has no guaranteed order.
-    return sorted(leads, key=lambda lead: (lead.created_at, lead.id))
+    return sorted(leads, key=lambda lead: (not lead.has_contacts, lead.created_at, lead.id))
 
 
 async def return_undelivered_leads(session: AsyncSession, lead_ids: list[int]) -> None:
@@ -264,6 +279,24 @@ async def count_new_leads(session: AsyncSession) -> int:
     """Number of leads not handed out yet."""
     result = await session.execute(select(func.count(Lead.id)).where(Lead.crm_status == STATUS_NEW))
     return int(result.scalar_one())
+
+
+async def count_new_leads_with_contacts(session: AsyncSession) -> int:
+    """How many of the leads not handed out yet can be contacted without opening their card."""
+    result = await session.execute(
+        select(func.count(Lead.id)).where(Lead.crm_status == STATUS_NEW, _has_contacts_clause())
+    )
+    return int(result.scalar_one())
+
+
+async def set_lead_phone(session: AsyncSession, lead_id: int, phone: str) -> Lead | None:
+    """Save a phone an admin found in the card. Returns the updated lead, None if there is no such lead."""
+    lead = await session.get(Lead, lead_id)
+    if lead is None:
+        return None
+    lead.phone = phone
+    await session.commit()
+    return lead
 
 
 async def get_status_counts(session: AsyncSession) -> dict[str, int]:
@@ -406,12 +439,67 @@ async def record_provider_block(
     return state
 
 
+async def disable_provider(session: AsyncSession, name: str, reason: str) -> ProviderState:
+    """Switch a provider off until an admin turns it on or its key is replaced."""
+    state = await _provider_state(session, name)
+    now = datetime.now(UTC)
+    state.disabled_at = now
+    state.last_block_at = now
+    state.last_block_reason = reason[:512]
+    await session.commit()
+    return state
+
+
+async def sync_provider_key(session: AsyncSession, name: str, fingerprint: str) -> None:
+    """A new key starts with an empty counter, and what happened to the old key does not apply to it."""
+    try:
+        state = await _provider_state(session, name)
+    except IntegrityError:
+        # A parallel call has just created the row: a manual search and a collection can meet here.
+        await session.rollback()
+        state = await _provider_state(session, name)
+    if state.key_fingerprint != fingerprint:
+        if state.key_fingerprint is not None:
+            state.requests_total = 0
+            state.disabled_at = None
+            state.blocked_until = None
+            state.consecutive_blocks = 0
+        state.key_fingerprint = fingerprint
+    await session.commit()
+
+
+async def spend_provider_request(session: AsyncSession, name: str, fingerprint: str, ceiling: int | None) -> bool:
+    """Count one API request, unless the ceiling is reached. One UPDATE: parallel searches cannot overrun it."""
+    await sync_provider_key(session, name, fingerprint)
+    stmt = update(ProviderState).where(ProviderState.name == name)
+    if ceiling is not None:
+        stmt = stmt.where(ProviderState.requests_total < ceiling)
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(stmt.values(requests_total=ProviderState.requests_total + 1)),
+    )
+    await session.commit()
+    return result.rowcount > 0
+
+
 async def enable_provider(session: AsyncSession, name: str) -> None:
     """An admin's decision: forget the blocks and the pause."""
     state = await _provider_state(session, name)
     state.consecutive_blocks = 0
     state.blocked_until = None
     state.disabled_at = None
+    await session.commit()
+
+
+async def get_search_progress(session: AsyncSession) -> dict[str, SearchProgress]:
+    """How far every search target has been walked, by its key."""
+    return {row.key: row for row in (await session.scalars(select(SearchProgress))).all()}
+
+
+async def save_search_progress(session: AsyncSession, rows: list[SearchProgress]) -> None:
+    """Store new positions. Called after the leads of those pages are saved: otherwise a crash would lose them."""
+    for row in rows:
+        await session.merge(row)
     await session.commit()
 
 

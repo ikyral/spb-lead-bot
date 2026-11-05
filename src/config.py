@@ -1,3 +1,4 @@
+from datetime import date
 from pathlib import Path, PurePosixPath
 
 from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
@@ -16,10 +17,21 @@ class Settings(BaseSettings):
     # Required by main.py. The collector for a separate computer (collect_cli.py) works without them.
     BOT_TOKEN: SecretStr = SecretStr("")
     ADMIN_TG_ID: int = 0
-    # For manual search and, if listed in COLLECT_PROVIDERS, collection.
+    # The main source of leads (provider 2gis) and manual search.
     # DGIS_API_KEY and the older name TWOGIS_API_KEY both work; DGIS_API_KEY wins.
     TWOGIS_API_KEY: SecretStr | None = None
     DGIS_API_KEY: SecretStr | None = None
+    # Demo keys allow 10 items on a page and 5 pages per query. false only for a paid key.
+    DGIS_DEMO_KEY: bool = True
+    # Ask for items.contact_groups. It needs paid access; without it organizations come without contacts.
+    DGIS_REQUEST_CONTACTS: bool = False
+    # Requests allowed for one key, 0 = no limit. A demo key has 1000 in total.
+    # Collection stops DGIS_REQUEST_RESERVE requests short of the limit.
+    DGIS_REQUEST_LIMIT: int = Field(default=1000, ge=0)
+    DGIS_REQUEST_RESERVE: int = Field(default=50, ge=0)
+    # Optional. A demo key lives 30 days from this date; admins are warned DGIS_KEY_WARN_DAYS before.
+    DGIS_KEY_CREATED_AT: date | None = None
+    DGIS_KEY_WARN_DAYS: int = Field(default=5, ge=1, le=29)
     DB_URL: str = "sqlite+aiosqlite:///./leads.db"
     # Additional admins, comma-separated. ADMIN_TG_ID stays required and is always an admin.
     ADMIN_TG_IDS: str = ""
@@ -32,6 +44,8 @@ class Settings(BaseSettings):
     # Leads are handed out in batches on request; the pool is refilled when it runs low (0 = never).
     LEADS_BATCH_SIZE: int = Field(default=30, ge=1, le=100)
     LEADS_MIN_POOL: int = Field(default=60, ge=0)
+    # false: an organization from 2GIS without a phone or a site is a lead, the owner looks in its card.
+    LEADS_REQUIRE_CONTACT: bool = False
 
     # Automatic collection. Search targets and the schedule are validated by src.services.collector.
     # false, or an empty COLLECT_PROVIDERS, means leads come from an external collector as files.
@@ -40,8 +54,9 @@ class Settings(BaseSettings):
     COLLECT_INTERVAL_MINUTES: int | None = Field(default=None, ge=1)  # when set, replaces COLLECT_CRON
     COLLECT_TIMEZONE: str = "Europe/Moscow"
     COLLECT_RUN_ON_START: bool = False
-    # 2gis_scraper and 2gis are opt-in: the site answers the scraper with a captcha, the API costs money.
-    COLLECT_PROVIDERS: str = "osm"
+    # 2gis is the main source and needs no access to contacts; without a key it is skipped.
+    # 2gis_scraper is opt-in and not listed here: the site answers it with a captcha.
+    COLLECT_PROVIDERS: str = "2gis,osm"
     COLLECT_QUERIES: str = ""  # category keys and/or free-text queries; empty = all categories
     COLLECT_DISTRICTS: str = ""  # empty = all SPb districts
     COLLECT_BBOX: str = ""  # 'south,west,north,east'; replaces COLLECT_DISTRICTS
@@ -50,9 +65,12 @@ class Settings(BaseSettings):
     COLLECT_MAX_RESULTS_PER_QUERY: int = Field(default=100, ge=1)
     COLLECT_MAX_REQUESTS_PER_RUN: int = Field(default=60, ge=1)
     COLLECT_MAX_REQUESTS_PER_DAY: int = Field(default=200, ge=1)
+    # A fully walked search target of the 2GIS API is not requested again for this long.
+    COLLECT_RECHECK_DAYS: int = Field(default=30, ge=1)
 
-    # Reading public pages of 2GIS. The lower bounds keep the bot polite whatever is configured.
+    # The city in links to 2GIS cards, for the API provider as well.
     SCRAPER_CITY_SLUG: str = "spb"
+    # Reading public pages of 2GIS. The lower bounds keep the bot polite whatever is configured.
     SCRAPER_MIN_DELAY_SECONDS: float = Field(default=3.0, ge=3.0)
     SCRAPER_MAX_DELAY_SECONDS: float = Field(default=8.0, ge=3.0)
     SCRAPER_MAX_PAGES_PER_RUN: int = Field(default=200, ge=1, le=500)
@@ -64,7 +82,7 @@ class Settings(BaseSettings):
     SCRAPER_HEADLESS: bool = True  # false only for manual debugging on a computer with a screen
 
     # The collector for a separate computer (collect_cli.py). Relative paths are from the project root.
-    COLLECTOR_PROVIDERS: str = "2gis_scraper"
+    COLLECTOR_PROVIDERS: str = "2gis"
     COLLECTOR_DB_PATH: str = "data/collector.db"
     COLLECTOR_EXPORT_DIR: str = "exports"
 

@@ -23,7 +23,13 @@ from src.bot.formatters import (
 )
 from src.bot.handlers import collector as collector_handlers
 from src.bot.handlers import issue, leads
-from src.bot.keyboards import LEAD_OUTCOMES, STALE_BUTTON_TEXT, get_lead_status_keyboard, get_main_menu_keyboard
+from src.bot.keyboards import (
+    LEAD_OUTCOMES,
+    STALE_BUTTON_TEXT,
+    get_issued_lead_keyboard,
+    get_lead_status_keyboard,
+    get_main_menu_keyboard,
+)
 from src.bot.middlewares import AdminOnlyMiddleware
 from src.bot.notifier import AdminNotifier
 from src.config import Settings, settings
@@ -430,7 +436,9 @@ def test_card_has_every_requested_field_and_escapes_html() -> None:
     assert "Стоматологии и клиники" in card
     for value in ("Невский, 10", "+78125550101", "info@smile.ru", "https://vk.com/smile"):
         assert value in card
-    assert '<a href="https://2gis.ru/firm/1?a=1&amp;b=2">Карточка 2ГИС</a>' in card
+    assert "смотри в карточке" not in card  # the phone is known
+    assert "2gis.ru" not in card  # the link is on the button
+    assert get_issued_lead_keyboard(lead).inline_keyboard[0][0].url == "https://2gis.ru/firm/1?a=1&b=2"
 
 
 def test_card_without_contacts_or_safe_link() -> None:
@@ -633,8 +641,13 @@ def test_collector_status_before_the_first_run_and_after_it() -> None:
         external_mode=False,
         last_import=None,
         imported_total=0,
+        pool_with_contacts=4,
+        batch_size=3,
+        dgis_key=None,
     )
     text_ = format_collector_status(status)
+    assert "В запасе: <b>10</b> (с контактами: <b>4</b>, без контактов: <b>6</b>)" in text_
+    assert "примерно на <b>3</b> дн." in text_
     assert "06.11.2026 04:00 МСК" in text_
     assert "не задан TWOGIS_API_KEY" in text_
     assert "Сбор ещё не запускался" in text_
@@ -718,8 +731,12 @@ def test_status_shows_paused_and_switched_off_providers() -> None:
         external_mode=False,
         last_import=None,
         imported_total=0,
+        pool_with_contacts=0,
+        batch_size=30,
+        dgis_key=None,
     )
     text_ = format_collector_status(status)
+    assert "Запас пуст" in text_
     assert "⏸ 2gis_scraper: пауза до" in text_
     assert "сайт показал капчу" in text_
     assert "⛔ other: отключён" in text_
@@ -902,9 +919,11 @@ ROLLBACK_SCHEMA = [
     "ALTER TABLE leads DROP COLUMN contact_status_at",
     "ALTER TABLE leads DROP COLUMN exported_at",
     "ALTER TABLE leads DROP COLUMN imported_at",
+    "ALTER TABLE leads DROP COLUMN rubric",
     "DROP TABLE import_log",
     "DROP TABLE collector_state",
     "DROP TABLE provider_state",
+    "DROP TABLE search_progress",
 ]
 
 
