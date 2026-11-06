@@ -11,8 +11,15 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from src.config import settings
 from src.database.models import CONTACT_CONTACTED, CONTACT_NO_ANSWER, CONTACT_REJECTED, CONTACT_REPLIED, Lead
 from src.services.providers.base import SPB_DISTRICTS, TARGET_CATEGORIES
-from src.services.site_status import SITE_FOUND, SITE_NO_SITE, SOURCE_MANUAL, yandex_search_url
-from src.services.twogis_links import twogis_card_url
+from src.services.site_status import (
+    NO_SITE_STATUSES,
+    SITE_DEAD,
+    SITE_FOUND,
+    SITE_NO_SITE,
+    SOURCE_MANUAL,
+    yandex_search_url,
+)
+from src.services.twogis_links import twogis_card_url, twogis_search_url
 
 DISTRICT_NAMES: list[str] = list(SPB_DISTRICTS.keys())
 CATEGORY_KEYS: list[str] = list(TARGET_CATEGORIES.keys())
@@ -20,6 +27,7 @@ CATEGORY_KEYS: list[str] = list(TARGET_CATEGORIES.keys())
 # Shown when callback data is malformed, forged, or from a keyboard of an older bot version.
 STALE_BUTTON_TEXT: str = "Кнопка устарела. Откройте меню заново."
 OPEN_CARD_BUTTON_TEXT: str = "🔎 Открыть в 2ГИС"
+FIND_IN_2GIS_BUTTON_TEXT: str = "🔎 Найти в 2ГИС"
 ADD_PHONE_BUTTON_TEXT: str = "✏️ Добавить телефон"
 SITE_YES_BUTTON_TEXT: str = "🌐 Сайт есть"
 SITE_NO_BUTTON_TEXT: str = "✅ Сайта нет"
@@ -161,12 +169,16 @@ def get_lead_status_keyboard(
     can_add_phone: bool = False,
     search_url: str | None = None,
     site_verdict: bool | None = None,
+    twogis_search: str | None = None,
 ) -> InlineKeyboardMarkup:
-    """Buttons of a handed-out lead: its card, statuses with the current one marked, its site, adding a phone."""
+    """Buttons of a handed-out lead: its card or a search, statuses with the current one marked, its site, a phone."""
     builder = InlineKeyboardBuilder()
     rows: list[int] = []
     if card_url:
         builder.button(text=OPEN_CARD_BUTTON_TEXT, url=card_url)
+        rows.append(1)
+    elif twogis_search:
+        builder.button(text=FIND_IN_2GIS_BUTTON_TEXT, url=twogis_search)
         rows.append(1)
     for status, title in LEAD_OUTCOMES.items():
         text = f"✅ {title}" if status == current_status else title
@@ -187,6 +199,8 @@ def get_lead_status_keyboard(
 
 def get_issued_lead_keyboard(lead: Lead) -> InlineKeyboardMarkup:
     """The buttons of a card of this lead: the same when it is sent and whenever it is updated."""
+    # A lead that needs a site must be easy to look at, even if it came from a source without a card on 2GIS.
+    needs_a_look = lead.site_status in (*NO_SITE_STATUSES, SITE_DEAD)
     return get_lead_status_keyboard(
         lead.id,
         lead.contact_status,
@@ -194,6 +208,7 @@ def get_issued_lead_keyboard(lead: Lead) -> InlineKeyboardMarkup:
         can_add_phone=not lead.phone,
         search_url=yandex_search_url(lead.name, lead.address),
         site_verdict=manual_site_verdict(lead),
+        twogis_search=twogis_search_url(lead.name, lead.address, settings.SCRAPER_CITY_SLUG) if needs_a_look else None,
     )
 
 

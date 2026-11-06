@@ -6,6 +6,7 @@ import html
 from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+from src.config import settings
 from src.database.models import (
     CONTACT_CONTACTED,
     CONTACT_NO_ANSWER,
@@ -15,7 +16,7 @@ from src.database.models import (
     STATUS_NEW,
     Lead,
 )
-from src.services.providers.base import TARGET_CATEGORIES
+from src.services.providers.base import TARGET_CATEGORIES, niche_title
 from src.services.site_status import (
     SITE_DEAD,
     SITE_FOUND,
@@ -27,13 +28,14 @@ from src.services.site_status import (
     SOURCE_2GIS_CARD,
     SOURCE_MANUAL,
 )
-from src.services.twogis_links import twogis_card_url
+from src.services.twogis_links import twogis_card_url, twogis_search_url
 
 if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this module must not import
     from src.database.models import ImportLog, ProviderState
     from src.database.repo import PoolStats
-    from src.services.lead_enrich import EnrichStats
+    from src.services.lead_enrich import EnrichStats, UsefulLead
     from src.services.lead_import import ImportResult
+    from src.services.niche_priority import NicheStats
     from src.services.scheduler import CollectorStatus, DgisKeyStatus, RunReport
 
 # Telegram's limit for one message.
@@ -41,6 +43,8 @@ MAX_MESSAGE_LENGTH: int = 4096
 # Field limits for a lead card: normally the first one fits, the second is for pathological data.
 _CARD_FIELD_LIMITS: tuple[int, ...] = (300, 100)
 _MSK = timezone(timedelta(hours=3), "MSK")
+_REPORT_FIELD_LIMIT: int = 300
+_NICHE_NAME_LIMIT: int = 60
 _PHONE_IN_CARD_LINE: str = "📞 <b>Телефон:</b> смотри в карточке"
 
 # Short names for the statistics, in the order of handing out. They say no more than the cards do.
@@ -291,13 +295,21 @@ def format_collection_report(report: RunReport) -> str:
     return "\n".join(lines)
 
 
+def format_import_messages(result: ImportResult) -> list[str]:
+    """All the messages about an imported file: a file with results of reading cards may need several."""
+    if result.ok and result.enrichment is not None:
+        name = html.escape(result.file_name)
+        return _enrichment_messages(name, result.total, result.enrichment, result.pool_size)
+    return [format_import_report(result)]
+
+
 def format_import_report(result: ImportResult) -> str:
     """Format the outcome of an imported file. The file name comes from outside and is escaped."""
     name = html.escape(result.file_name)
     if not result.ok:
         return f"⚠️ <b>Импорт не выполнен</b>: {name}\n\nПричина: {html.escape(result.error or 'неизвестна')}"
     if result.enrichment is not None:
-        return _format_enrichment_report(name, result.total, result.enrichment, result.pool_size)
+        return _enrichment_messages(name, result.total, result.enrichment, result.pool_size)[0]
     lines = [
         f"📥 <b>Импорт завершён</b>: {name}\n",
         f"• В файле: <b>{result.total}</b>",
@@ -310,7 +322,54 @@ def format_import_report(result: ImportResult) -> str:
     return "\n".join(lines)
 
 
-def _format_enrichment_report(name: str, total: int, stats: EnrichStats, pool_size: int) -> str:
+def split_messages(blocks: list[str], separator: str = "\n\n") -> list[str]:
+    """Join blocks of text into messages within Telegram's limit, never cutting a block with its tags in two."""
+    messages: list[str] = []
+    current = ""
+    for block in blocks:
+        candidate = f"{current}{separator}{block}" if current else block
+        if len(candidate) <= MAX_MESSAGE_LENGTH:
+            current = candidate
+        else:
+            if current:
+                messages.append(current)
+            current = block
+    if current:
+        messages.append(current)
+    return messages
+
+
+def _useful_lead_block(lead: UsefulLead) -> str:
+    def field(value: str) -> str:
+        return html.escape(value[:_REPORT_FIELD_LIMIT])
+
+    lines = [f"🏢 <b>{field(lead.name)}</b>", f"🏷 {field(niche_title(lead.category))}"]
+    if lead.address:
+        lines.append(f"📫 {field(lead.address)}")
+    if lead.phone:
+        lines.append(f"📞 {field(lead.phone)}")
+    if lead.site_status == SITE_SOCIAL_ONLY:
+        lines.append("📱 только соцсеть вместо сайта")
+    if lead.site_status == SITE_DEAD and lead.website:
+        lines.append(f"🌐 {field(lead.website)}")
+    url = twogis_card_url(lead.source_url) or twogis_search_url(lead.name, lead.address, settings.SCRAPER_CITY_SLUG)
+    title = "Открыть в 2ГИС" if twogis_card_url(lead.source_url) else "Найти в 2ГИС"
+    lines.append(f'🗺 <a href="{html.escape(url, quote=True)}">{title}</a>')
+    return "\n".join(lines)
+
+
+def _useful_leads_blocks(useful: list[UsefulLead]) -> list[str]:
+    without_site = [lead for lead in useful if lead.site_status != SITE_DEAD]
+    dead = [lead for lead in useful if lead.site_status == SITE_DEAD]
+    blocks: list[str] = []
+    for title, leads in (("Сайта нет", without_site), ("Сайт не открывается", dead)):
+        if leads:
+            blocks.append(f"<b>{title}: {len(leads)}</b>")
+            blocks += [_useful_lead_block(lead) for lead in leads]
+    return blocks or ["Полезных лидов в этом файле нет"]
+
+
+def _enrichment_messages(name: str, total: int, stats: EnrichStats, pool_size: int) -> list[str]:
     lines = [
         f"🔎 <b>Карточки 2ГИС обработаны</b>: {name}\n",
         f"• В файле: <b>{total}</b>",
@@ -323,7 +382,48 @@ def _format_enrichment_report(name: str, total: int, stats: EnrichStats, pool_si
     ]
     lines += [f"   – {html.escape(reason)}: {count}" for reason, count in stats.ignored.most_common()]
     lines.append(f"\n📦 В запасе: <b>{pool_size}</b>")
-    return "\n".join(lines)
+    return split_messages(["\n".join(lines), *_useful_leads_blocks(stats.useful)])
+
+
+def format_unknown_niche(text: str, niches: list[str]) -> list[str]:
+    """What to say about a niche that does not exist, with the list of those that do."""
+    header = (
+        f"Неизвестная ниша: {html.escape(text[:_NICHE_NAME_LIMIT])}\n"
+        "Использование: /export_unknown [N] [ниша]\n\n<b>Ниши:</b>"
+    )
+    lines = [f"• <code>{html.escape(niche)}</code> — {html.escape(niche_title(niche))}" for niche in niches]
+    return split_messages([header, *lines], separator="\n")
+
+
+def format_niche_table(stats: list[NicheStats]) -> list[str]:
+    """The table of /niches, in as many messages as it takes. Each message is a table of its own."""
+    if not stats:
+        return ["Лидов пока нет, считать нечего."]
+    legend = (
+        "📊 <b>Ниши по доле полезных лидов</b>\n"
+        "Полезные: без сайта и сайт не открывается. Доля сглажена: (полезные + 1) / (проверено + 2), "
+        "поэтому у непроверенной ниши 50%. Сайта нет считается вместе с «только соцсеть»."
+    )
+    header = f"{'доля':>4} {'пров':>4} {'нет':>3} {'мёртв':>5} {'есть':>4} {'unkn':>4}  ниша"
+    rows = [
+        f"{round(item.share * 100):>3}% {item.checked:>4} {item.no_site:>3} {item.dead:>5} "
+        f"{item.has_site:>4} {item.unknown:>4}  {html.escape(niche_title(item.category)[:_NICHE_NAME_LIMIT])}"
+        for item in stats
+    ]
+    wrapper = len("<pre></pre>") + len(header) + 1
+    tables: list[str] = []
+    current: list[str] = []
+    for row in rows:
+        if current and wrapper + sum(len(line) + 1 for line in current) + len(row) > MAX_MESSAGE_LENGTH:
+            tables.append(_niche_table(header, current))
+            current = []
+        current.append(row)
+    tables.append(_niche_table(header, current))
+    return split_messages([legend, *tables])
+
+
+def _niche_table(header: str, rows: list[str]) -> str:
+    return "<pre>" + "\n".join([header, *rows]) + "</pre>"
 
 
 def _import_lines(last: ImportLog | None, imported_total: int) -> list[str]:

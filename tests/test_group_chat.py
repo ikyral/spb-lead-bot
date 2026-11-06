@@ -515,7 +515,10 @@ def _cards(message: MagicMock) -> list[str]:
     cards = []
     for call in message.answer.await_args_list:
         markup = call.kwargs.get("reply_markup")
-        if markup is not None and markup.inline_keyboard[0][0].callback_data.startswith("ls:"):
+        # By any button: a card may start with a link to 2GIS, which has no callback data.
+        if markup is not None and any(
+            (button.callback_data or "").startswith("ls:") for row in markup.inline_keyboard for button in row
+        ):
             cards.append(call.args[0])
     return cards
 

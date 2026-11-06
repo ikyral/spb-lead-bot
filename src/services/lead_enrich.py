@@ -57,9 +57,22 @@ _EMAIL_COLUMN_MAX: int = 255
 _SEPARATOR: str = ", "
 
 
+@dataclass(frozen=True)
+class UsefulLead:
+    """A lead this file showed to need a site: what the owner needs to see it right away."""
+
+    name: str
+    category: str
+    site_status: str
+    address: str | None = None
+    phone: str | None = None
+    website: str | None = None
+    source_url: str | None = None
+
+
 @dataclass
 class EnrichStats:
-    """Outcome of a file. Holds counts and fixed reasons, never the content of leads."""
+    """Outcome of a file: counts and fixed reasons, and for the report the leads worth a look. Not for logs."""
 
     updated: int = 0
     sites_working: int = 0
@@ -68,6 +81,7 @@ class EnrichStats:
     no_site: int = 0
     not_recognized: int = 0
     ignored: Counter[str] = field(default_factory=Counter)
+    useful: list[UsefulLead] = field(default_factory=list)
 
     @property
     def sites_found(self) -> int:
@@ -230,6 +244,19 @@ async def _apply_records(
         for number in new_numbers:
             owners[number] = lead.id
         _count_update(stats, values["site_status"])
+        # A chain is not handed out, so there is nothing to tell the owner about it.
+        if values["site_status"] != SITE_FOUND and not lead.is_chain:
+            stats.useful.append(
+                UsefulLead(
+                    name=lead.name,
+                    category=lead.category,
+                    site_status=values["site_status"],
+                    address=lead.address,
+                    phone=values["phone"],
+                    website=values["raw_website"],
+                    source_url=lead.source_url,
+                )
+            )
     await session.commit()
 
 

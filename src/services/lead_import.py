@@ -39,7 +39,7 @@ _FILE_NAME_MAX = 255
 
 @dataclass
 class ImportResult:
-    """Outcome of importing one file. Holds counts and fixed reasons, never the content of leads."""
+    """Outcome of importing one file. Only counts and fixed reasons, except for `enrichment.useful` in the report."""
 
     source: str
     file_name: str
