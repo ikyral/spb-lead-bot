@@ -13,7 +13,14 @@ SAME_PLACE_MAX_DISTANCE_M: float = 150.0
 
 # Fields copied from a duplicate when the kept place has no value.
 _FILLABLE_FIELDS: tuple[str, ...] = (
-    "district", "address", "phone", "socials", "map_url", "email", "source_url", "rubric",
+    "district",
+    "address",
+    "phone",
+    "socials",
+    "map_url",
+    "email",
+    "source_url",
+    "rubric",
 )
 
 _PHONE_SEPARATORS_RE = re.compile(r"[,;]")
@@ -96,9 +103,7 @@ class DuplicateIndex:
         if norm_name and norm_address:
             self._by_name_address.setdefault((norm_name, norm_address), key)
 
-    def find(
-        self, name: str | None, phone: str | None, map_url: str | None, address: str | None = None
-    ) -> int | None:
+    def find(self, name: str | None, phone: str | None, map_url: str | None, address: str | None = None) -> int | None:
         """Return the key of a matching known business, or None."""
         for number in normalize_phones(phone):
             if number in self._by_phone:
@@ -124,8 +129,7 @@ def _fill_from_duplicate(target: RawPlace, source: RawPlace) -> None:
     # A real website beats a social link used as 'website': otherwise a business with
     # a working site would become a false social_only / no_site lead.
     if source.raw_website and (
-        not target.raw_website
-        or (_is_social_url(target.raw_website) and not _is_social_url(source.raw_website))
+        not target.raw_website or (_is_social_url(target.raw_website) and not _is_social_url(source.raw_website))
     ):
         if target.raw_website and not target.socials:
             target.socials = target.raw_website

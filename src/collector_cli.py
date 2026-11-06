@@ -473,4 +473,3 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 - the last line of defense: reported and saved, with the traceback
         _report_unexpected(exc, settings)
         return EXIT_ERROR
-

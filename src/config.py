@@ -185,7 +185,7 @@ class Settings(BaseSettings):
         # Replace the path in the original string: keeps driver and query params, and avoids
         # URL-escaping a Windows drive ('C:' -> 'C%3A') that render_as_string would do.
         start = value.index(database)
-        return value[:start] + resolved + value[start + len(database):]
+        return value[:start] + resolved + value[start + len(database) :]
 
 
 def resolve_path(value: str) -> Path:

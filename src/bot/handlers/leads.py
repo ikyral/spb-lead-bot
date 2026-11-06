@@ -126,12 +126,7 @@ async def handle_in_work_leads(message: Message) -> None:
 async def handle_lead_action(callback: CallbackQuery) -> None:
     """Handle card actions: work, reject, pitch, a verdict about the site, prev, next."""
     parts = (callback.data or "").split(":")
-    if (
-        len(parts) != 4
-        or not parts[1].isdigit()
-        or parts[2] not in LEAD_ACTIONS
-        or not parts[3].isdigit()
-    ):
+    if len(parts) != 4 or not parts[1].isdigit() or parts[2] not in LEAD_ACTIONS or not parts[3].isdigit():
         await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
         return
     _, lead_id_str, action, offset_str = parts
@@ -223,24 +218,66 @@ async def handle_export_csv(callback: CallbackQuery) -> None:
 
     output = io.StringIO()
     writer = csv.writer(output, delimiter=";")
-    writer.writerow([
-        "ID", "Источник", "Название", "Категория", "Район", "Адрес", "Телефон",
-        "Соцсети", "Сайт", "Статус сайта", "Оценка", "CRM статус", "Карта", "Дата добавления (МСК)",
-        "Email", "Карточка источника", "Дата выдачи (МСК)", "Результат контакта",
-        "Кто отметил", "Когда отмечено (МСК)",
-        "Найденный сайт", "Уверенность", "Откуда статус сайта", "Сайт проверен (МСК)",
-    ])
+    writer.writerow(
+        [
+            "ID",
+            "Источник",
+            "Название",
+            "Категория",
+            "Район",
+            "Адрес",
+            "Телефон",
+            "Соцсети",
+            "Сайт",
+            "Статус сайта",
+            "Оценка",
+            "CRM статус",
+            "Карта",
+            "Дата добавления (МСК)",
+            "Email",
+            "Карточка источника",
+            "Дата выдачи (МСК)",
+            "Результат контакта",
+            "Кто отметил",
+            "Когда отмечено (МСК)",
+            "Найденный сайт",
+            "Уверенность",
+            "Откуда статус сайта",
+            "Сайт проверен (МСК)",
+        ]
+    )
     for lead in leads:
-        writer.writerow([_csv_safe(value) for value in (
-            lead.id, lead.source, lead.name, lead.category, lead.district or "", lead.address or "",
-            lead.phone or "", lead.socials or "", lead.raw_website or "", lead.site_status,
-            lead.score, lead.crm_status, lead.map_url or "",
-            _format_msk(lead.created_at),
-            lead.email or "", lead.source_url or "", _format_msk(lead.issued_at), lead.contact_status or "",
-            lead.contact_status_by or "", _format_msk(lead.contact_status_at),
-            lead.site_url or "", lead.site_confidence or "", lead.site_source or "",
-            _format_msk(lead.site_checked_at),
-        )])
+        writer.writerow(
+            [
+                _csv_safe(value)
+                for value in (
+                    lead.id,
+                    lead.source,
+                    lead.name,
+                    lead.category,
+                    lead.district or "",
+                    lead.address or "",
+                    lead.phone or "",
+                    lead.socials or "",
+                    lead.raw_website or "",
+                    lead.site_status,
+                    lead.score,
+                    lead.crm_status,
+                    lead.map_url or "",
+                    _format_msk(lead.created_at),
+                    lead.email or "",
+                    lead.source_url or "",
+                    _format_msk(lead.issued_at),
+                    lead.contact_status or "",
+                    lead.contact_status_by or "",
+                    _format_msk(lead.contact_status_at),
+                    lead.site_url or "",
+                    lead.site_confidence or "",
+                    lead.site_source or "",
+                    _format_msk(lead.site_checked_at),
+                )
+            ]
+        )
 
     csv_bytes = output.getvalue().encode("utf-8-sig")
     file = BufferedInputFile(csv_bytes, filename=f"spb_leads_{crm_status}.csv")

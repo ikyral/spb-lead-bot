@@ -51,9 +51,7 @@ _NO_CONTACTS_WARNING: str = (
     "продаж 2ГИС) и DGIS_REQUEST_CONTACTS=true. Иначе задайте LEADS_REQUIRE_CONTACT=false: тогда лиды "
     "выдаются со ссылкой на карточку."
 )
-_AUTH_FAILURE_HINT: str = (
-    "2ГИС не принял ключ: срок демо-ключа мог закончиться, ключ мог быть заблокирован"
-)
+_AUTH_FAILURE_HINT: str = "2ГИС не принял ключ: срок демо-ключа мог закончиться, ключ мог быть заблокирован"
 _AUTH_FAILURE_CONTACTS_HINT: str = ", либо у него нет доступа к контактам (проверьте DGIS_REQUEST_CONTACTS)"
 
 
@@ -159,9 +157,7 @@ class TwoGisProvider(BaseMapProvider):
     def _allowed_page_size(self, page_size: int) -> int:
         if page_size > self._max_page_size and not self._page_size_noted:
             self._page_size_noted = True
-            logger.info(
-                "2GIS: page size %d lowered to %d, the most this key allows", page_size, self._max_page_size
-            )
+            logger.info("2GIS: page size %d lowered to %d, the most this key allows", page_size, self._max_page_size)
         return min(page_size, self._max_page_size)
 
     def _note_missing_contacts(self) -> str | None:
@@ -262,7 +258,10 @@ class TwoGisProvider(BaseMapProvider):
         else:
             logger.warning(
                 "2GIS results truncated at %d pages (%d places) for %s / %s",
-                self._max_pages, len(places), area.district, query.category,
+                self._max_pages,
+                len(places),
+                area.district,
+                query.category,
             )
 
         return places
@@ -389,9 +388,7 @@ def _site_address(contact: dict[str, Any]) -> str | None:
     return None
 
 
-def extract_contacts(
-    item: dict[str, Any]
-) -> tuple[list[str], list[str], list[str], list[str]]:
+def extract_contacts(item: dict[str, Any]) -> tuple[list[str], list[str], list[str], list[str]]:
     """Extract phones, websites, socials and emails from contact_groups."""
     phones: list[str] = []
     websites: list[str] = []

@@ -176,7 +176,7 @@ _EXISTENCE_CHECK_CHUNK = 500
 async def _existing_external_ids(session: AsyncSession, external_ids: list[str]) -> set[str]:
     existing: set[str] = set()
     for start in range(0, len(external_ids), _EXISTENCE_CHECK_CHUNK):
-        chunk = external_ids[start:start + _EXISTENCE_CHECK_CHUNK]
+        chunk = external_ids[start : start + _EXISTENCE_CHECK_CHUNK]
         result = await session.execute(select(Lead.external_id).where(Lead.external_id.in_(chunk)))
         existing.update(result.scalars())
     return existing
@@ -425,7 +425,7 @@ async def get_leads_by_external_ids(session: AsyncSession, external_ids: list[st
     """The leads known by these IDs."""
     leads: dict[str, Lead] = {}
     for start in range(0, len(external_ids), _EXISTENCE_CHECK_CHUNK):
-        chunk = external_ids[start:start + _EXISTENCE_CHECK_CHUNK]
+        chunk = external_ids[start : start + _EXISTENCE_CHECK_CHUNK]
         for lead in (await session.scalars(select(Lead).where(Lead.external_id.in_(chunk)))).all():
             leads[lead.external_id] = lead
     return leads
@@ -433,9 +433,7 @@ async def get_leads_by_external_ids(session: AsyncSession, external_ids: list[st
 
 async def count_new_leads_with_contacts(session: AsyncSession) -> int:
     """How many of the leads not handed out yet can be contacted without opening their card."""
-    result = await session.execute(
-        select(func.count(Lead.id)).where(_in_pool_clause(), _has_contacts_clause())
-    )
+    result = await session.execute(select(func.count(Lead.id)).where(_in_pool_clause(), _has_contacts_clause()))
     return int(result.scalar_one())
 
 
@@ -520,7 +518,7 @@ async def get_unexported_leads(session: AsyncSession, limit: int) -> list[Lead]:
 async def mark_leads_exported(session: AsyncSession, lead_ids: list[int], exported_at: datetime) -> None:
     """Remember that these leads went into a file, so they are not exported again."""
     for start in range(0, len(lead_ids), _EXISTENCE_CHECK_CHUNK):
-        chunk = lead_ids[start:start + _EXISTENCE_CHECK_CHUNK]
+        chunk = lead_ids[start : start + _EXISTENCE_CHECK_CHUNK]
         await session.execute(update(Lead).where(Lead.id.in_(chunk)).values(exported_at=exported_at))
     await session.commit()
 
@@ -600,9 +598,7 @@ async def record_provider_success(session: AsyncSession, name: str) -> None:
         await session.commit()
 
 
-async def record_provider_block(
-    session: AsyncSession, name: str, reason: str, backoff_hours: float
-) -> ProviderState:
+async def record_provider_block(session: AsyncSession, name: str, reason: str, backoff_hours: float) -> ProviderState:
     """
     Register a refusal from a site: the pause doubles with every block in a row,
     and after MAX_CONSECUTIVE_BLOCKS the provider stays off until an admin turns it on.
@@ -743,11 +739,7 @@ async def update_crm_status(
     new_status: str,
 ) -> bool:
     """Update CRM status of a lead by ID ('new', 'in_work', 'rejected')."""
-    stmt = (
-        update(Lead)
-        .where(Lead.id == lead_id)
-        .values(crm_status=new_status)
-    )
+    stmt = update(Lead).where(Lead.id == lead_id).values(crm_status=new_status)
     # UPDATE returns a CursorResult at runtime; Session.execute is typed as the generic Result.
     result = cast("CursorResult[Any]", await session.execute(stmt))
     await session.commit()

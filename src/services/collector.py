@@ -162,11 +162,7 @@ def load_collector_config(settings: Settings) -> CollectorConfig:
         schedule_text=f"{schedule_text} ({settings.COLLECT_TIMEZONE})",
         timezone=timezone,
         providers=providers,
-        targets=[
-            SearchTarget(query, area)
-            for query in _parse_queries(settings.COLLECT_QUERIES)
-            for area in areas
-        ],
+        targets=[SearchTarget(query, area) for query in _parse_queries(settings.COLLECT_QUERIES) for area in areas],
         max_pages=settings.COLLECT_MAX_PAGES,
         page_size=settings.COLLECT_PAGE_SIZE,
         max_results_per_query=settings.COLLECT_MAX_RESULTS_PER_QUERY,
@@ -379,9 +375,7 @@ class _Collection:
     async def _handle_block(self, provider: BaseMapProvider, error: ProviderBlockedError) -> None:
         """Stop right away, tell the admins, and do not come back for hours."""
         async with self.session_maker() as session:
-            state = await record_provider_block(
-                session, provider.name, str(error), self.config.block_backoff_hours
-            )
+            state = await record_provider_block(session, provider.name, str(error), self.config.block_backoff_hours)
         self.drop_provider(provider)
         self.succeeded.discard(provider.name)
         if state.disabled_at is not None:

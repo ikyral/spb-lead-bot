@@ -16,7 +16,10 @@ def test_csv_external_ids_are_stable() -> None:
     """IDs of already imported CSV leads must never change, otherwise re-imports create duplicates."""
     places = parse_csv_leads(Path("data/test_leads.csv").read_bytes())
     assert [p.external_id for p in places] == [
-        "csv_ba557a73ccc5", "csv_fabaddede281", "csv_bed2b36eed14", "csv_f3ce564fe7bf",
+        "csv_ba557a73ccc5",
+        "csv_fabaddede281",
+        "csv_bed2b36eed14",
+        "csv_f3ce564fe7bf",
     ]
 
 
@@ -29,7 +32,9 @@ def test_parse_real_csv_leads() -> None:
     assert p1.name == "Стоматология Улыбка СПб"
     assert (p1.category, p1.district, p1.address) == ("Стоматология", "Петроградский", "Большой пр. П.С., 44")
     assert (p1.phone, p1.raw_website, p1.socials) == (
-        "+7 (812) 555-01-01", "https://broken-domain-dentist-spb-404.ru", "https://vk.com/dent_spb_test"
+        "+7 (812) 555-01-01",
+        "https://broken-domain-dentist-spb-404.ru",
+        "https://vk.com/dent_spb_test",
     )
     assert (p1.source, p1.high_margin) == ("csv", True)
     assert p1.external_id.startswith("csv_")
@@ -39,11 +44,18 @@ def test_parse_real_csv_leads() -> None:
     assert p2.high_margin is True
 
     assert (p3.name, p3.raw_website, p3.socials, p3.high_margin) == (
-        "Студия мебели ЛофтНева", None, "https://t.me/loftneva_test", True
+        "Студия мебели ЛофтНева",
+        None,
+        "https://t.me/loftneva_test",
+        True,
     )
 
     assert (p4.name, p4.category, p4.raw_website, p4.socials, p4.high_margin) == (
-        "Кофейня с рабочим сайтом", "Кафе", "https://ya.ru", None, False
+        "Кофейня с рабочим сайтом",
+        "Кафе",
+        "https://ya.ru",
+        None,
+        False,
     )
 
 
@@ -53,7 +65,10 @@ def test_parse_csv_cp1251_and_comma() -> None:
     places = parse_csv_leads(content.encode("cp1251"))
     assert len(places) == 1
     assert (places[0].name, places[0].phone, places[0].socials, places[0].high_margin) == (
-        "Тест Клиника", "+79990001122", "https://vk.com/c", True
+        "Тест Клиника",
+        "+79990001122",
+        "https://vk.com/c",
+        True,
     )
 
 
@@ -69,22 +84,34 @@ async def test_osm_overpass_mock_parsing() -> None:
     mock_payload = {
         "elements": [
             {
-                "type": "node", "id": 101, "lat": 59.93, "lon": 30.31,
+                "type": "node",
+                "id": 101,
+                "lat": 59.93,
+                "lon": 30.31,
                 "tags": {
-                    "name": "Дент Про", "phone": "+7 812 111-22-33", "website": "https://dentpro.ru",
-                    "addr:street": "Невский пр.", "addr:housenumber": "22",
+                    "name": "Дент Про",
+                    "phone": "+7 812 111-22-33",
+                    "website": "https://dentpro.ru",
+                    "addr:street": "Невский пр.",
+                    "addr:housenumber": "22",
                 },
             },
             {
-                "type": "way", "id": 202, "center": {"lat": 59.94, "lon": 30.32},
+                "type": "way",
+                "id": 202,
+                "center": {"lat": 59.94, "lon": 30.32},
                 "tags": {
-                    "name": "Клиника Смайл", "contact:phone": "+7 812 333-44-55",
+                    "name": "Клиника Смайл",
+                    "contact:phone": "+7 812 333-44-55",
                     "contact:vk": "https://vk.com/smile_spb",
                 },
             },
             {"type": "node", "id": 303, "tags": {"amenity": "dentist"}},
             {
-                "type": "node", "id": 404, "lat": 59.95, "lon": 30.33,
+                "type": "node",
+                "id": 404,
+                "lat": 59.95,
+                "lon": 30.33,
                 "tags": {"name": "ВК Стоматология", "website": "https://vk.com/dent_vk"},
             },
         ]
@@ -97,7 +124,11 @@ async def test_osm_overpass_mock_parsing() -> None:
     assert places[0].map_url == "https://yandex.ru/maps/?pt=30.31,59.93&z=17&l=map"
     assert places[0].high_margin is True
 
-    assert (places[1].external_id, places[1].name, places[1].socials) == ("osm_202", "Клиника Смайл", "https://vk.com/smile_spb")
+    assert (places[1].external_id, places[1].name, places[1].socials) == (
+        "osm_202",
+        "Клиника Смайл",
+        "https://vk.com/smile_spb",
+    )
     assert places[1].map_url == "https://yandex.ru/maps/?pt=30.32,59.94&z=17&l=map"
 
     assert (places[2].external_id, places[2].socials) == ("osm_404", "https://vk.com/dent_vk")
@@ -128,19 +159,16 @@ async def test_osm_multiple_websites_separated_by_semicolon() -> None:
     # First real website wins
     assert (places["osm_1"].raw_website, places["osm_1"].socials) == ("https://first-site.ru", None)
     # A social link listed first must not hide the real website; it is kept as a social contact
-    assert (places["osm_2"].raw_website, places["osm_2"].socials) == (
-        "https://real-clinic.ru", "https://vk.com/clinic"
-    )
+    assert (places["osm_2"].raw_website, places["osm_2"].socials) == ("https://real-clinic.ru", "https://vk.com/clinic")
     # Only social links: the first one is checked (-> social_only), all are kept as socials
     assert (places["osm_3"].raw_website, places["osm_3"].socials) == (
-        "https://vk.com/clinic", "https://vk.com/clinic, https://t.me/clinic"
+        "https://vk.com/clinic",
+        "https://vk.com/clinic, https://t.me/clinic",
     )
     # Separators only -> no website at all
     assert (places["osm_4"].raw_website, places["osm_4"].socials) == (None, None)
     # Explicit contact:* socials take precedence, as for single-value tags
-    assert (places["osm_5"].raw_website, places["osm_5"].socials) == (
-        "https://site5.ru", "https://vk.com/contact_vk"
-    )
+    assert (places["osm_5"].raw_website, places["osm_5"].socials) == ("https://site5.ru", "https://vk.com/contact_vk")
 
 
 @pytest.mark.asyncio
@@ -260,7 +288,10 @@ async def test_twogis_provider() -> None:
     p = places[0]
     assert (p.external_id, p.source, p.name, p.district) == ("2gis_70000001", "2gis", "АвтоСервис 24", "Петроградский")
     assert (p.address, p.phone, p.raw_website, p.socials) == (
-        "ул. Мира, 10", "+7 812 777-88-99", "https://autoservice24.ru", "https://vk.com/as24"
+        "ул. Мира, 10",
+        "+7 812 777-88-99",
+        "https://autoservice24.ru",
+        "https://vk.com/as24",
     )
     assert p.map_url == "https://yandex.ru/maps/?pt=30.31,59.96&z=17&l=map"
     assert p.high_margin is True

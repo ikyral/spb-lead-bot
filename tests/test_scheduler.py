@@ -55,15 +55,17 @@ class Provider(BaseMapProvider):
         if self.error is not None:
             raise self.error
         number = self.calls
-        return SearchPage(places=[
-            RawPlace(
-                external_id=f"fake_{number}",
-                source="fake",
-                name=f"Организация {number}",
-                category="dentist_clinic",
-                phone=f"+7 812 555-{number:02d}-{number:02d}",
-            )
-        ])
+        return SearchPage(
+            places=[
+                RawPlace(
+                    external_id=f"fake_{number}",
+                    source="fake",
+                    name=f"Организация {number}",
+                    category="dentist_clinic",
+                    phone=f"+7 812 555-{number:02d}-{number:02d}",
+                )
+            ]
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -149,7 +151,10 @@ async def test_nothing_new_is_silent_on_schedule_but_reported_when_someone_waits
             return SearchPage(places=[])
 
     for trigger, expected in (
-        (TRIGGER_SCHEDULE, False), (TRIGGER_LOW_POOL, False), (TRIGGER_MANUAL, True), (TRIGGER_BATCH, True),
+        (TRIGGER_SCHEDULE, False),
+        (TRIGGER_LOW_POOL, False),
+        (TRIGGER_MANUAL, True),
+        (TRIGGER_BATCH, True),
     ):
         reports = Reports()
         await _runner(session_maker, NothingFound(), reports).run_once(trigger)

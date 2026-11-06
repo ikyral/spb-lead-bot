@@ -115,8 +115,13 @@ def test_index_is_declared_on_model() -> None:
 
 def _lead_data(i: int, **overrides) -> dict:
     data = {
-        "external_id": f"osm_{i}", "source": "osm", "name": f"Lead {i}", "category": "horeca",
-        "site_status": "no_site", "score": 60, "crm_status": "new",
+        "external_id": f"osm_{i}",
+        "source": "osm",
+        "name": f"Lead {i}",
+        "category": "horeca",
+        "site_status": "no_site",
+        "score": 60,
+        "crm_status": "new",
     }
     data.update(overrides)
     return data
@@ -233,10 +238,12 @@ async def test_created_at_is_read_back_as_aware_utc(engine: AsyncEngine, session
     session.add(Lead(**_lead_data(2)))  # Python default: now(UTC)
     await session.commit()
     async with engine.begin() as conn:  # server default: CURRENT_TIMESTAMP (UTC)
-        await conn.execute(text(
-            "INSERT INTO leads (external_id, source, name, category, site_status, score, crm_status) "
-            "VALUES ('osm_3', 'osm', 'Raw', 'horeca', 'no_site', 60, 'new')"
-        ))
+        await conn.execute(
+            text(
+                "INSERT INTO leads (external_id, source, name, category, site_status, score, crm_status) "
+                "VALUES ('osm_3', 'osm', 'Raw', 'horeca', 'no_site', 60, 'new')"
+            )
+        )
 
     async with async_sessionmaker(engine)() as fresh:
         rows = dict((await fresh.execute(select(Lead.external_id, Lead.created_at))).all())

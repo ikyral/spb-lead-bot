@@ -87,9 +87,7 @@ class DgisQuota:
     it is sent, so a failed one is counted too: the counter may overstate, never understate.
     """
 
-    def __init__(
-        self, session_maker: async_sessionmaker[AsyncSession], api_key: str, policy: DgisKeyPolicy
-    ) -> None:
+    def __init__(self, session_maker: async_sessionmaker[AsyncSession], api_key: str, policy: DgisKeyPolicy) -> None:
         self._session_maker = session_maker
         self._fingerprint = key_fingerprint(api_key)
         self.policy = policy
@@ -102,9 +100,7 @@ class DgisQuota:
     async def spend(self) -> None:
         """Count one request, or refuse it. The message is meant for the admin."""
         async with self._session_maker() as session:
-            allowed = await spend_provider_request(
-                session, DGIS_PROVIDER_NAME, self._fingerprint, self.policy.ceiling
-            )
+            allowed = await spend_provider_request(session, DGIS_PROVIDER_NAME, self._fingerprint, self.policy.ceiling)
         if not allowed:
             raise ProviderQuotaError(
                 f"2ГИС: израсходован лимит ключа: {self.policy.ceiling} запросов из {self.policy.limit} "

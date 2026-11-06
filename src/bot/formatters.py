@@ -402,14 +402,16 @@ def format_collector_status(status: CollectorStatus) -> str:
     state = status.state
     now = datetime.now(UTC)
     if status.external_mode:
-        return "\n".join([
-            "🤖 <b>Сбор лидов</b>\n",
-            "Режим: <b>внешний сборщик</b>. Этот сервер сам не собирает, лиды приходят файлами.",
-            *_stock_lines(status),
-            *_site_stock_lines(status),
-            *(_dgis_key_lines(status.dgis_key) if status.dgis_key else []),
-            *_import_lines(status.last_import, status.imported_total),
-        ])
+        return "\n".join(
+            [
+                "🤖 <b>Сбор лидов</b>\n",
+                "Режим: <b>внешний сборщик</b>. Этот сервер сам не собирает, лиды приходят файлами.",
+                *_stock_lines(status),
+                *_site_stock_lines(status),
+                *(_dgis_key_lines(status.dgis_key) if status.dgis_key else []),
+                *_import_lines(status.last_import, status.imported_total),
+            ]
+        )
 
     lines = [
         "🤖 <b>Автосбор лидов</b>\n",
@@ -422,8 +424,7 @@ def format_collector_status(status: CollectorStatus) -> str:
     if not status.active_providers:
         lines.append("нет доступных")
     lines += [
-        f"⚠️ {html.escape(name)} отключён: {html.escape(reason)}"
-        for name, reason in status.disabled_providers.items()
+        f"⚠️ {html.escape(name)} отключён: {html.escape(reason)}" for name, reason in status.disabled_providers.items()
     ]
     lines.append("")
     lines += _stock_lines(status)

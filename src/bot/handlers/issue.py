@@ -95,7 +95,8 @@ async def _answer_safely(message: Message, text: str, reply_markup: InlineKeyboa
         if message.bot is not None:
             try:
                 await message.bot.send_message(
-                    exc.migrate_to_chat_id, f"{text}\n\nГруппа стала супергруппой, нажмите кнопку ещё раз.",
+                    exc.migrate_to_chat_id,
+                    f"{text}\n\nГруппа стала супергруппой, нажмите кнопку ещё раз.",
                     parse_mode="HTML",
                 )
             except TelegramAPIError as send_error:

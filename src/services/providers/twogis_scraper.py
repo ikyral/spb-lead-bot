@@ -235,9 +235,7 @@ class TwoGisScraperProvider(BaseMapProvider):
         """Not used for manual search: an admin waiting for a reply and long pauses do not go together."""
         return []
 
-    async def search(
-        self, query: SearchQuery, area: SearchArea, page: int = 1, page_size: int = 50
-    ) -> SearchPage:
+    async def search(self, query: SearchQuery, area: SearchArea, page: int = 1, page_size: int = 50) -> SearchPage:
         """Read one page of search results, opening cards of organizations listed without contacts."""
         if self._results >= self._options.max_results_per_run:
             raise ProviderBudgetExhausted("лимит результатов за запуск")
@@ -464,4 +462,3 @@ class TwoGisScraperProvider(BaseMapProvider):
             self._unrecognized_in_a_row = 0
             result.complete.append({**item, **card})
         return result
-

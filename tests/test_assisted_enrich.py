@@ -370,7 +370,7 @@ def test_a_masked_url_has_no_query_and_no_ids() -> None:
 
 
 def test_inline_state_is_reported_by_name_only() -> None:
-    html = "<script>var initialState = JSON.parse('{\"phone\":\"+7921\"}'); window.__data = {\"a\":1};</script>"
+    html = '<script>var initialState = JSON.parse(\'{"phone":"+7921"}\'); window.__data = {"a":1};</script>'
 
     assert inline_state_names(html) == ["initialState", "__data"]
 
@@ -1089,10 +1089,10 @@ async def test_a_failed_page_stops_listening_and_cancels_the_reads() -> None:
 
 
 def test_new_code_has_nothing_that_touches_or_hides_from_a_captcha() -> None:
-    sources = "\n".join(
-        inspect.getsource(module).lower()
-        for module in (assisted_runs, lead_enrich)
-    ) + (PROJECT_ROOT / "src/collector_cli.py").read_text(encoding="utf-8").lower()
+    sources = (
+        "\n".join(inspect.getsource(module).lower() for module in (assisted_runs, lead_enrich))
+        + (PROJECT_ROOT / "src/collector_cli.py").read_text(encoding="utf-8").lower()
+    )
     for word in (
         "stealth",
         "webdriver",

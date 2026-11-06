@@ -163,11 +163,7 @@ def test_collector_does_not_import_the_bot() -> None:
 
 
 def test_real_entry_point_runs_without_a_token(tmp_path: Path) -> None:
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in ("BOT_TOKEN", "ADMIN_TG_ID", "DB_URL")
-    }
+    env = {key: value for key, value in os.environ.items() if key not in ("BOT_TOKEN", "ADMIN_TG_ID", "DB_URL")}
     env.update(
         COLLECTOR_DB_PATH=str(tmp_path / "c.db"),
         COLLECTOR_EXPORT_DIR=str(tmp_path / "exports"),
@@ -175,7 +171,11 @@ def test_real_entry_point_runs_without_a_token(tmp_path: Path) -> None:
     )
     result = subprocess.run(
         [sys.executable, "collect_cli.py", "--export-only"],
-        cwd=PROJECT_ROOT, capture_output=True, timeout=120, check=False, env=env,
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        timeout=120,
+        check=False,
+        env=env,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Выгружено лидов: 0".encode() in result.stdout
@@ -559,7 +559,12 @@ async def test_status_in_external_mode_shows_imports_and_the_pool(session_maker)
         )
         session.add(
             Lead(
-                external_id="a", source="x", name="n", category="c", site_status="no_site", crm_status="new",
+                external_id="a",
+                source="x",
+                name="n",
+                category="c",
+                site_status="no_site",
+                crm_status="new",
                 imported_at=datetime.now(UTC),
             )
         )
@@ -726,4 +731,3 @@ def test_a_log_that_cannot_be_written_does_not_hide_the_error(cli, tmp_path: Pat
     out = capsys.readouterr().out
     assert "Непредвиденная ошибка: KeyError" in out
     assert "не записаны" in out
-

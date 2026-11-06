@@ -43,9 +43,7 @@ class OSMOverpassProvider(BaseMapProvider):
         self.endpoints = endpoints or list(DEFAULT_OVERPASS_ENDPOINTS)
         self._api = ApiClient("Overpass", client=client, limiter=_RATE_LIMITER, timeout=timeout)
 
-    def build_query(
-        self, bbox: tuple[float, float, float, float], osm_tags: Iterable[tuple[str, str]]
-    ) -> str:
+    def build_query(self, bbox: tuple[float, float, float, float], osm_tags: Iterable[tuple[str, str]]) -> str:
         """Construct Overpass QL query for given bounding box and OSM tags."""
         south, west, north, east = bbox
         lines = ["[out:json][timeout:25];", "("]
@@ -76,9 +74,7 @@ class OSMOverpassProvider(BaseMapProvider):
         places, _complete = await self._query_endpoints(query, SearchArea(bbox=bbox, district=district_name))
         return places
 
-    async def search(
-        self, query: SearchQuery, area: SearchArea, page: int = 1, page_size: int = 50
-    ) -> SearchPage:
+    async def search(self, query: SearchQuery, area: SearchArea, page: int = 1, page_size: int = 50) -> SearchPage:
         """
         Overpass has no pages: everything comes at once, so only page 1 exists.
 
@@ -113,7 +109,9 @@ class OSMOverpassProvider(BaseMapProvider):
                 if remark.startswith("runtime error"):
                     logger.warning(
                         "Overpass endpoint %s returned an incomplete result (%d places): %s",
-                        endpoint, len(places), remark,
+                        endpoint,
+                        len(places),
+                        remark,
                     )
                     if len(places) > len(partial):
                         partial = places
@@ -127,7 +125,9 @@ class OSMOverpassProvider(BaseMapProvider):
             logger.warning(
                 "All Overpass endpoints failed to complete the query for %s / %s; "
                 "using an incomplete result with %d places",
-                district_name, category_key, len(partial),
+                district_name,
+                category_key,
+                len(partial),
             )
         return partial, False
 
@@ -163,9 +163,7 @@ class OSMOverpassProvider(BaseMapProvider):
             raw_site = tags.get("website") or tags.get("contact:website") or tags.get("url")
             # OSM separates multiple values with ';'. Prefer the first real website,
             # so a social link listed first does not hide it.
-            site_candidates = [
-                part.strip() for part in str(raw_site or "").split(";") if part.strip()
-            ]
+            site_candidates = [part.strip() for part in str(raw_site or "").split(";") if part.strip()]
             real_sites = [u for u in site_candidates if not is_social_domain(url_host(u))]
             social_sites = [u for u in site_candidates if is_social_domain(url_host(u))]
             if real_sites:

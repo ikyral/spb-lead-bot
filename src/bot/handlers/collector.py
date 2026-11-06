@@ -89,4 +89,3 @@ async def handle_provider_on(message: Message, command: CommandObject, collector
         "Если сайт снова откажет, источник остановится сам.",
         parse_mode="HTML",
     )
-

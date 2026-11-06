@@ -153,11 +153,17 @@ async def test_twogis_page_from_fixture_keeps_only_valid_organizations() -> None
     page = await _twogis(_fixture("twogis_items.json")).search(QUERY, AREA, page=1, page_size=50)
 
     assert [place.external_id for place in page.places] == [
-        "2gis_70000001018420390_abc123def", "2gis_70000001018420391", "2gis_70000001018420393",
+        "2gis_70000001018420390_abc123def",
+        "2gis_70000001018420391",
+        "2gis_70000001018420393",
     ]
     first = page.places[0]
     assert (first.source, first.name, first.category, first.district, first.high_margin) == (
-        "2gis", "Улыбка, стоматология", "dentist_clinic", "Центральный", True
+        "2gis",
+        "Улыбка, стоматология",
+        "dentist_clinic",
+        "Центральный",
+        True,
     )
     assert first.email == "Info@Smile-Spb.ru"
     assert first.source_url == "https://2gis.ru/spb/firm/70000001018420390"
@@ -500,4 +506,3 @@ def test_env_example_is_a_valid_configuration() -> None:
     assert settings.TWOGIS_API_KEY is None
     assert (settings.LEADS_BATCH_SIZE, settings.LEADS_MIN_POOL) == (30, 60)
     assert config.providers == ["2gis", "osm"]
-

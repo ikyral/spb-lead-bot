@@ -11,6 +11,7 @@ from src.services.scorer import calculate_lead_score, is_high_margin_category
 
 # --- Scorer Tests ---
 
+
 def test_score_has_site_returns_zero() -> None:
     """If site_status is has_site, lead score must always be 0."""
     assert calculate_lead_score("dentist_clinic", "has_site", "+79991112233", "vk.com/group", True) == 0
@@ -120,15 +121,14 @@ def test_csv_loader_uses_the_same_margin_rules() -> None:
     from src.services.providers.csv_loader import parse_csv_leads
 
     csv_bytes = (
-        "Название;Рубрика;Телефон\n"
-        "Сапожник;Ремонт обуви;+7 999 000-00-01\n"
-        "РемСтрой;Ремонт квартир;+7 999 000-00-02\n"
+        "Название;Рубрика;Телефон\nСапожник;Ремонт обуви;+7 999 000-00-01\nРемСтрой;Ремонт квартир;+7 999 000-00-02\n"
     ).encode()
     shoe, renovation = parse_csv_leads(csv_bytes)
     assert (shoe.high_margin, renovation.high_margin) == (False, True)
 
 
 # --- Checker Tests ---
+
 
 def test_is_social_domain() -> None:
     """Verify social domain matcher for direct domains and subdomains."""
@@ -155,6 +155,7 @@ async def test_analyze_website_empty_or_whitespace() -> None:
 @pytest.mark.asyncio
 async def test_analyze_website_direct_social_no_network() -> None:
     """URLs with social domains must return ('social_only', url) without making network calls."""
+
     # Provide a client whose handler would raise if any request is executed
     def unreached_handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("Network request should not have been made!")
@@ -180,6 +181,7 @@ async def test_analyze_website_direct_social_no_network() -> None:
 @pytest.mark.asyncio
 async def test_analyze_website_has_site_success() -> None:
     """Active website returning status 200 should return ('has_site', final_url)."""
+
     def mock_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text="Welcome", request=request)
 
@@ -193,6 +195,7 @@ async def test_analyze_website_has_site_success() -> None:
 @pytest.mark.asyncio
 async def test_analyze_website_redirects_to_social() -> None:
     """Website redirecting to a social domain should be classified as ('social_only', redirected_url)."""
+
     def mock_handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "short-link.ru":
             return httpx.Response(302, headers={"Location": "https://vk.com/company_page"}, request=request)
@@ -210,6 +213,7 @@ async def test_analyze_website_redirects_to_social() -> None:
 @pytest.mark.asyncio
 async def test_analyze_website_dead_site_status_error() -> None:
     """HTTP 4xx/5xx responses must return ('dead_site', 'HTTP/Connection error')."""
+
     def mock_handler_404(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, request=request)
 
@@ -230,6 +234,7 @@ async def test_analyze_website_dead_site_status_error() -> None:
 @pytest.mark.asyncio
 async def test_analyze_website_dead_site_exceptions() -> None:
     """Network timeouts, connection errors, and invalid URLs must return ('dead_site', 'HTTP/Connection error')."""
+
     def mock_handler_timeout(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectTimeout("Connection timed out", request=request)
 
