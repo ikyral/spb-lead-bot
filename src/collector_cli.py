@@ -48,6 +48,7 @@ EXIT_INTERRUPTED = 130
 
 SCRAPER_PROVIDER_NAME = "2gis_scraper"
 CHECK_LOG_PATH = "logs/scraper_check.json"
+SAMPLES_DIR = "data/samples"
 ERROR_LOG_PATH = "logs/collector_errors.log"
 
 _HIDDEN = "<скрыто>"
@@ -77,6 +78,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="вместе с --assisted: прочитать карточки из файла команды /export_unknown и записать файл для бота",
     )
     parser.add_argument(
+        "--save-sample",
+        action="store_true",
+        help="вместе с --check: сохранить страницы и их состояние в data/samples, чтобы разбирать формат без сайта",
+    )
+    parser.add_argument(
         "--assisted",
         action="store_true",
         help="парсер 2ГИС с видимым окном браузера: капчу проходит человек за компьютером, сборщик ждёт",
@@ -84,6 +90,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.assisted and (args.export_only or args.enable_provider):
         parser.error("--assisted нужен только для сбора")
+    if args.save_sample and not args.check:
+        parser.error("--save-sample работает только вместе с --check")
     if (args.check or args.enrich is not None) and not args.assisted:
         parser.error("--check и --enrich работают только вместе с --assisted: капчу проходит человек")
     return args
@@ -235,10 +243,12 @@ def _print_check(report: CheckReport) -> None:
         print(f"  {title}: {_value_or_reason(found.get(key), reason)}")
     if report.path is not None:
         print(f"Файл с найденным и структурой ответов: {report.path}")
+    for path in report.sample_files:
+        print(f"Образец: {path}")
     print(f"Проверок осталось за 24 часа: {report.runs_left}.")
 
 
-async def _check(current: Settings, session_maker: async_sessionmaker[AsyncSession]) -> int:
+async def _check(current: Settings, session_maker: async_sessionmaker[AsyncSession], save_sample: bool) -> int:
     target = _collector_config(current).targets[0]
     options = replace(
         ScraperOptions.from_settings(current, assisted=True),
@@ -252,6 +262,8 @@ async def _check(current: Settings, session_maker: async_sessionmaker[AsyncSessi
         resolve_path(CHECK_LOG_PATH),
         current.SCRAPER_BLOCK_BACKOFF_HOURS,
         options.city_slug,
+        current.SCRAPER_CHECK_MAX_PER_DAY,
+        resolve_path(SAMPLES_DIR) if save_sample else None,
     )
     _print_check(report)
     if report.refused or report.blocked:
@@ -331,7 +343,7 @@ async def _run(args: argparse.Namespace, current: Settings) -> int:
             return EXIT_OK
 
         if args.check:
-            return await _check(current, session_maker)
+            return await _check(current, session_maker, args.save_sample)
         if args.enrich is not None:
             return await _enrich(current, session_maker, args.enrich)
 

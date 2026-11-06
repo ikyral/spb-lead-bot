@@ -590,7 +590,6 @@ def test_nothing_touches_the_captcha_or_hides_automation(module: object) -> None
         ".keyboard",
         ".frame_locator",
         ".locator(",
-        ".evaluate(",
         "add_init_script",
         "automationcontrolled",
         "ignore_default_args",
@@ -604,3 +603,7 @@ def test_nothing_touches_the_captcha_or_hides_automation(module: object) -> None
         "args=",
     ):
         assert marker not in source, marker
+    # The one exception: the browser reads the variables of a page, and the script does nothing else.
+    assert source.count(".evaluate(") == (1 if module is browser_module else 0)
+    for action in ("dispatchevent", "fetch(", "document.", "xmlhttprequest", "localstorage", "cookie", "=>  {"):
+        assert action not in browser_module._READ_STATE_SCRIPT.lower()

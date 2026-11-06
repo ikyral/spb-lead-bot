@@ -6,6 +6,7 @@ captcha and the state of blocks are the ones of ordinary collection. Neither wri
 on this computer: the database gets only the counters of limits and blocks.
 """
 
+import asyncio
 import json
 import logging
 from collections import Counter
@@ -37,11 +38,11 @@ from src.services.providers.twogis import parse_catalog_items
 from src.services.providers.twogis_scraper import CardContacts, TwoGisScraperProvider, read_card_contacts
 from src.services.scraper import twogis_site
 from src.services.scraper.browser import PageSnapshot
-from src.services.scraper.diagnostics import inline_state_names, json_shape, masked_url
+from src.services.scraper.diagnostics import inline_state_names, json_shape, masked_url, state_outline
 
 logger = logging.getLogger(__name__)
 
-# The diagnostics skip the rest between runs, so they are limited by themselves.
+# The diagnostics skip the rest between runs, so they are limited by themselves: SCRAPER_CHECK_MAX_PER_DAY.
 CHECK_MAX_RUNS: int = 3
 CHECK_WINDOW: timedelta = timedelta(hours=24)
 CHECK_MAX_PAGES: int = 2
@@ -74,6 +75,7 @@ class CheckReport:
     recognized: dict[str, Any] = field(default_factory=dict)
     pages: list[dict[str, Any]] = field(default_factory=list)
     path: Path | None = None
+    sample_files: list[Path] = field(default_factory=list)
 
 
 def _describe_page(kind: str, snapshot: PageSnapshot) -> dict[str, Any]:
@@ -84,6 +86,8 @@ def _describe_page(kind: str, snapshot: PageSnapshot) -> dict[str, Any]:
         "final_url": masked_url(snapshot.final_url),
         "html_length": len(snapshot.html),
         "inline_state_variables": inline_state_names(snapshot.html),
+        "page_state": {name: state_outline(value) for name, value in snapshot.page_state.items()},
+        "page_state_problems": snapshot.page_state_problems,
         "responses": [
             {
                 "url": masked_url(url),
@@ -95,6 +99,17 @@ def _describe_page(kind: str, snapshot: PageSnapshot) -> dict[str, Any]:
             for url, body in zip(snapshot.json_urls, snapshot.json_bodies, strict=True)
         ],
     }
+
+
+def _write_sample(sample_dir: Path, stamp: str, kind: str, snapshot: PageSnapshot) -> list[Path]:
+    """The page as it is, data of organizations included: this stays on this computer, see .gitignore."""
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    html_path = sample_dir / f"{stamp}_{kind}.html"
+    state_path = sample_dir / f"{stamp}_{kind}_state.json"
+    html_path.write_text(snapshot.html, encoding="utf-8", newline="\n")
+    document = {"values": snapshot.page_state, "problems": snapshot.page_state_problems}
+    state_path.write_text(json.dumps(document, ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
+    return [html_path, state_path]
 
 
 def _recognized_fields(place: RawPlace, contacts: CardContacts | None) -> dict[str, Any]:
@@ -131,10 +146,19 @@ def _write_check_file(path: Path, report: CheckReport, now: datetime) -> None:
     report.path = path
 
 
-async def _inspect(provider: TwoGisScraperProvider, target: SearchTarget, report: CheckReport, city_slug: str) -> None:
+async def _inspect(
+    provider: TwoGisScraperProvider, target: SearchTarget, report: CheckReport, city_slug: str, sample_dir: Path | None
+) -> None:
     """One search page and one card of what it shows. Anything that went wrong stays in the report."""
+
+    async def keep(kind: str, page: PageSnapshot) -> None:
+        report.pages.append(_describe_page(kind, page))
+        if sample_dir is not None:
+            stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
+            report.sample_files += await asyncio.to_thread(_write_sample, sample_dir, stamp, kind, page)
+
     snapshot = await provider.inspect_search(target.query, target.area)
-    report.pages.append(_describe_page("search", snapshot))
+    await keep("search", snapshot)
 
     data = twogis_site.read_search_bodies(snapshot.bodies_from(twogis_site.is_search_response))
     firm_number: str | None = None
@@ -155,7 +179,7 @@ async def _inspect(provider: TwoGisScraperProvider, target: SearchTarget, report
         return
 
     snapshot = await provider.inspect_card(firm_number)
-    report.pages.append(_describe_page("card", snapshot))
+    await keep("card", snapshot)
     card = twogis_site.read_card_body(snapshot.bodies_from(twogis_site.is_card_response), firm_number)
     if card is None:
         report.card_problem = "нет ответа в ожидаемом формате: см. структуру ответов в файле"
@@ -172,6 +196,8 @@ async def run_check(
     log_path: Path,
     backoff_hours: float,
     city_slug: str,
+    max_runs: int = CHECK_MAX_RUNS,
+    sample_dir: Path | None = None,
 ) -> CheckReport:
     """
     Look at one live search page and one card, and leave a description of them in a file.
@@ -187,13 +213,13 @@ async def run_check(
         report.refused = unavailable_reason(provider, state, now)
         if report.refused is not None:
             return report
-        report.retry_at, report.runs_left = await claim_scraper_check(session, CHECK_MAX_RUNS, CHECK_WINDOW, now)
+        report.retry_at, report.runs_left = await claim_scraper_check(session, max_runs, CHECK_WINDOW, now)
     if report.retry_at is not None:
-        report.refused = f"не больше {CHECK_MAX_RUNS} проверок за 24 часа"
+        report.refused = f"не больше {max_runs} проверок за 24 часа"
         return report
 
     try:
-        await _inspect(provider, target, report, city_slug)
+        await _inspect(provider, target, report, city_slug, sample_dir)
     except ProviderBlockedError as exc:
         report.blocked = str(exc)
         async with session_maker() as session:

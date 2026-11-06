@@ -980,6 +980,7 @@ async def test_visit_keeps_the_address_of_every_response() -> None:
     page.title = AsyncMock(return_value="t")
     page.content = AsyncMock(return_value="<html></html>")
     page.wait_for_load_state = AsyncMock()
+    page.evaluate = AsyncMock(return_value=[{"problem": "нет"}, {"problem": "нет"}])
 
     def _response(url: str, body: bytes) -> MagicMock:
         response = MagicMock()
@@ -1014,6 +1015,7 @@ def _page_with_listeners() -> tuple[MagicMock, dict]:
     page.title = AsyncMock(return_value="t")
     page.content = AsyncMock(return_value="<html></html>")
     page.wait_for_load_state = AsyncMock()
+    page.evaluate = AsyncMock(return_value=[{"problem": "нет"}, {"problem": "нет"}])
     return page, handlers
 
 
