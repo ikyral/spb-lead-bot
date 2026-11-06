@@ -196,6 +196,9 @@ class BaseMapProvider(ABC):
     # A person had to pass a check during this run: the source did not simply let it in,
     # so such a run says nothing about blocks being over and does not clear their count.
     human_check_passed: bool = False
+    # The owner chose to run this time before min_hours_between_runs passed. Nothing else is skipped.
+    # Such a run says nothing about blocks being over either, so it does not clear their count.
+    ignore_interval: bool = False
     # False: the run told nothing about the site (no connection, a format the code does not understand),
     # so it does not use up min_hours_between_runs.
     run_counted: bool = True

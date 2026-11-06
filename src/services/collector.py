@@ -204,6 +204,13 @@ def _progress_key(provider: BaseMapProvider, target: SearchTarget) -> str:
     return hashlib.sha256(repr(parts).encode("utf-8")).hexdigest()
 
 
+def interval_ends_at(provider: BaseMapProvider, state: ProviderState | None) -> datetime | None:
+    """When the interval after the last run ends, None if there is no interval or no run."""
+    if not provider.min_hours_between_runs or state is None or state.last_run_at is None:
+        return None
+    return state.last_run_at + timedelta(hours=provider.min_hours_between_runs)
+
+
 def unavailable_reason(provider: BaseMapProvider, state: ProviderState | None, now: datetime) -> str | None:
     """Why a provider must not be used right now, or None if it may."""
     if state is None:
@@ -213,10 +220,9 @@ def unavailable_reason(provider: BaseMapProvider, state: ProviderState | None, n
         return f"отключён {cause}({state.last_block_reason}), нужно ручное включение"
     if state.blocked_until is not None and now < state.blocked_until:
         return f"пауза после блокировки ({state.last_block_reason})"
-    if provider.min_hours_between_runs and state.last_run_at is not None:
-        allowed_at = state.last_run_at + timedelta(hours=provider.min_hours_between_runs)
-        if now < allowed_at:
-            return REST_REASON
+    allowed_at = interval_ends_at(provider, state)
+    if allowed_at is not None and now < allowed_at and not provider.ignore_interval:
+        return REST_REASON
     return None
 
 
@@ -465,7 +471,9 @@ async def collect_leads(
                 await collection.collect_target(provider, target)
             result.targets_processed = offset + 1
     finally:
-        collection.succeeded -= {provider.name for provider in providers if provider.human_check_passed}
+        collection.succeeded -= {
+            provider.name for provider in providers if provider.human_check_passed or provider.ignore_interval
+        }
         not_counted = [p.name for p in usable if p.min_hours_between_runs and not p.run_counted]
         await _close_providers(providers)
     result.next_cursor = (start + result.targets_processed) % len(targets) if targets else 0

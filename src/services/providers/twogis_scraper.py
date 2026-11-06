@@ -90,6 +90,8 @@ class ScraperOptions:
     profile_dir: Path | None = None
     assisted_wait_minutes: float = 5.0
     assisted_max_captchas: int = 2
+    # Only the command line of the collector sets this, for one run: see --ignore-interval.
+    ignore_interval: bool = False
 
     @classmethod
     def from_settings(cls, settings: Settings, assisted: bool = False) -> "ScraperOptions":
@@ -209,6 +211,7 @@ class TwoGisScraperProvider(BaseMapProvider):
     ) -> None:
         self._options = options or ScraperOptions()
         self.min_hours_between_runs = self._options.min_hours_between_runs
+        self.ignore_interval = self._options.ignore_interval
         self._session_factory = session_factory or (
             lambda: PlaywrightSession(
                 page_timeout_seconds=self._options.page_timeout_seconds,
