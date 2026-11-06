@@ -14,6 +14,8 @@ env/
 exports/
 logs/
 data/inbox/
+# Профиль браузера сборщика: cookies и другие личные данные
+data/browser_profile/
 
 # Кэш Python и тестов
 __pycache__/

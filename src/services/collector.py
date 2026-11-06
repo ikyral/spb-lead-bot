@@ -459,6 +459,7 @@ async def collect_leads(
                 await collection.collect_target(provider, target)
             result.targets_processed = offset + 1
     finally:
+        collection.succeeded -= {provider.name for provider in providers if provider.human_check_passed}
         await _close_providers(providers)
     result.next_cursor = (start + result.targets_processed) % len(targets) if targets else 0
     for name, count in collection.walked_targets.items():

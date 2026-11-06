@@ -72,6 +72,8 @@ async def main() -> None:
         if twogis_key and twogis_key.strip()
         else None
     )
+    if settings.SCRAPER_ASSISTED:
+        logger.warning("SCRAPER_ASSISTED is ignored by the bot: it works only in the collector on a computer")
     provider_set = build_providers(
         collector_config.providers,
         twogis_key,

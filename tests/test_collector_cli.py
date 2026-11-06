@@ -353,6 +353,48 @@ def test_headless_window_changes_only_that_flag_and_limits_stay() -> None:
     assert headed.min_hours_between_runs == default.min_hours_between_runs
 
 
+def test_assisted_flag_turns_the_mode_on(cli) -> None:
+    assert collector_cli.main(["--no-export"]) == 0
+    assert (cli.options.assisted, cli.options.headless, cli.options.profile_dir) == (False, True, None)
+    assert collector_cli.main(["--no-export", "--assisted"]) == 0
+    assert (cli.options.assisted, cli.options.headless) == (True, False)
+    assert cli.options.profile_dir is not None
+
+
+def test_assisted_setting_turns_the_mode_on(cli, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(collector_cli, "settings", cli.settings.model_copy(update={"SCRAPER_ASSISTED": True}))
+    assert collector_cli.main(["--no-export"]) == 0
+    assert cli.options.assisted is True
+
+
+@pytest.mark.parametrize("other", [["--export-only"], ["--enable-provider", "2gis_scraper"]])
+def test_assisted_is_only_for_collecting(other: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        collector_cli.main(["--assisted", *other])
+
+
+def test_assisted_without_the_scraper_says_so_instead_of_doing_nothing(
+    cli, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(collector_cli, "settings", cli.settings.model_copy(update={"COLLECTOR_PROVIDERS": "osm"}))
+    assert collector_cli.main(["--assisted"]) == 1
+    assert "COLLECTOR_PROVIDERS" in capsys.readouterr().out
+    assert cli.provider.calls == 0
+
+
+def test_assisted_keeps_the_pause_and_does_not_clear_the_count(cli, capsys, tmp_path: Path) -> None:
+    cli.provider.error = ProviderBlockedError("капча не пройдена за 5 мин")
+    assert collector_cli.main(["--no-export", "--assisted"]) == 2
+    cli.provider.error = None
+    calls = cli.provider.calls
+    assert collector_cli.main(["--no-export", "--assisted"]) == 2
+    assert cli.provider.calls == calls
+    state = asyncio.run(_state(tmp_path))
+    assert state.consecutive_blocks == 1
+    assert state.blocked_until is not None
+    assert "Не запускайте сбор повторно" in capsys.readouterr().out
+
+
 # ---------- a server without its own collection ----------
 
 

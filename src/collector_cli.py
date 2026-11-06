@@ -4,6 +4,8 @@ The collector for a separate computer: one pass, a local database, a file for th
 No Telegram here and no bot token needed. It runs the same collection as the bot, with the same
 pauses, limits and stops: a block is registered in the local database and honoured by later runs.
 
+--assisted is for a person at the computer: at a captcha the browser window waits for them.
+
 Exit codes: 0 done, 1 error, 2 a source refused or is waiting after a refusal, 130 interrupted.
 """
 
@@ -36,6 +38,8 @@ EXIT_ERROR = 1
 EXIT_BLOCKED = 2
 EXIT_INTERRUPTED = 130
 
+SCRAPER_PROVIDER_NAME = "2gis_scraper"
+
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Сбор лидов на этом компьютере и выгрузка в файл для сервера.")
@@ -47,7 +51,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         metavar="ИСТОЧНИК",
         help="снять автоотключение и паузу источника после блокировок, например 2gis_scraper",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--assisted",
+        action="store_true",
+        help="парсер 2ГИС с видимым окном браузера: капчу проходит человек за компьютером, сборщик ждёт",
+    )
+    args = parser.parse_args(argv)
+    if args.assisted and (args.export_only or args.enable_provider):
+        parser.error("--assisted нужен только для сбора")
+    return args
 
 
 def _local_time(value: datetime | None) -> str:
@@ -122,12 +134,17 @@ def _key_lines(state: ProviderState | None, policy: DgisKeyPolicy) -> list[str]:
 
 
 async def _collect(
-    current: Settings, session_maker: async_sessionmaker[AsyncSession], outcome: _Outcome
+    current: Settings, session_maker: async_sessionmaker[AsyncSession], outcome: _Outcome, assisted: bool = False
 ) -> list[str]:
     """Run one pass of the usual collection. Returns the names of the providers configured here."""
     config = load_collector_config(current.model_copy(update={"COLLECT_PROVIDERS": current.COLLECTOR_PROVIDERS}))
     twogis_key = current.TWOGIS_API_KEY.get_secret_value() if current.TWOGIS_API_KEY else None
-    if not current.SCRAPER_HEADLESS:
+    if assisted and SCRAPER_PROVIDER_NAME not in config.providers:
+        # Otherwise the run would quietly go without a browser and without the mode that was asked for.
+        raise ValueError(
+            f"режим с участием человека нужен парсеру: добавьте {SCRAPER_PROVIDER_NAME} в COLLECTOR_PROVIDERS"
+        )
+    if not current.SCRAPER_HEADLESS and not assisted:
         logger.warning("SCRAPER_HEADLESS=false is for manual debugging only: do not use it on a schedule")
     dgis_quota = (
         DgisQuota(session_maker, twogis_key, DgisKeyPolicy.from_settings(current))
@@ -139,7 +156,7 @@ async def _collect(
     provider_set = build_providers(
         config.providers,
         twogis_key,
-        ScraperOptions.from_settings(current),
+        ScraperOptions.from_settings(current, assisted=assisted),
         TwoGisOptions.from_settings(current),
         dgis_quota.spend if dgis_quota else None,
     )
@@ -170,7 +187,7 @@ async def _run(args: argparse.Namespace, current: Settings) -> int:
 
         names: list[str] = []
         if not args.export_only:
-            names = await _collect(current, session_maker, outcome)
+            names = await _collect(current, session_maker, outcome, args.assisted or current.SCRAPER_ASSISTED)
         if not args.no_export:
             outcome.export = await export_new_leads(
                 session_maker,

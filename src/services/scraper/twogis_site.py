@@ -55,12 +55,17 @@ def detect_block(status: int | None, final_url: str, title: str, html: str) -> s
     """Return why the site refused to show the page, or None if it did not."""
     if status in _REFUSING_STATUSES:
         return f"сайт ответил кодом {status}"
-    if urlsplit(final_url).netloc.startswith(_CAPTCHA_HOST) or _CAPTCHA_TITLE in title.lower():
-        return "сайт показал капчу"
-    lowered = html.lower()
-    if any(marker in lowered for marker in _CAPTCHA_HTML_MARKERS):
+    if is_captcha(final_url, title, html):
         return "сайт показал капчу"
     return None
+
+
+def is_captcha(final_url: str, title: str, html: str) -> bool:
+    """Is this page the captcha of the site?"""
+    if urlsplit(final_url).netloc.startswith(_CAPTCHA_HOST) or _CAPTCHA_TITLE in title.lower():
+        return True
+    lowered = html.lower()
+    return any(marker in lowered for marker in _CAPTCHA_HTML_MARKERS)
 
 
 @dataclass

@@ -120,6 +120,9 @@ class BaseMapProvider(ABC):
     # When set, requests are too valuable to repeat: every target continues from the page where it
     # stopped. Progress made under one scope does not count for another (a paid key sees more pages).
     progress_scope: str | None = None
+    # A person had to pass a check during this run: the source did not simply let it in,
+    # so such a run says nothing about blocks being over and does not clear their count.
+    human_check_passed: bool = False
 
     @abstractmethod
     async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:

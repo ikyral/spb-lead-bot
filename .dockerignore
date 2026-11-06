@@ -22,6 +22,7 @@ db/
 exports/
 logs/
 data/inbox/
+data/browser_profile/
 
 # Кэш Python и тестов (в .dockerignore шаблоны без **/ действуют только в корне)
 **/__pycache__/
