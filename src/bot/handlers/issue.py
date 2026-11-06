@@ -47,6 +47,7 @@ from src.database.repo import (
     set_lead_phone,
     set_site_verdict,
 )
+from src.services.chains import rescore_new_leads
 from src.services.normalize import parse_manual_phone
 from src.services.scheduler import TRIGGER_BATCH, CollectorRunner, TopupDecision, TopupOutcome
 
@@ -396,6 +397,16 @@ async def handle_phone_reply(message: Message) -> None:
     except TelegramAPIError as exc:
         # The phone is saved; only the card on the screen is out of date.
         logger.warning("Could not update the card of lead %s: %s", prompt.lead_id, exc)
+
+
+@router.message(Command("rescore"))
+async def handle_rescore(message: Message) -> None:
+    """Score the pool by the current weights: leads saved earlier keep their old score until then."""
+    async with async_session_maker() as session:
+        total, changed = await rescore_new_leads(session, settings)
+    await _answer_safely(
+        message, f"🔢 Лидов в запасе пересчитано: <b>{total}</b>, оценка изменилась у <b>{changed}</b>."
+    )
 
 
 @router.callback_query(F.data == "panel:stats")

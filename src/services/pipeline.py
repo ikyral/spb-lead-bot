@@ -19,7 +19,7 @@ from src.services.providers.base import RawPlace
 from src.services.providers.csv_loader import parse_csv_leads
 from src.services.providers.osm import OSMOverpassProvider
 from src.services.providers.twogis import TwoGisOptions, TwoGisProvider
-from src.services.scorer import calculate_lead_score
+from src.services.scorer import calculate_lead_score, is_worth_saving
 from src.services.site_status import SITE_DEAD, SITE_UNKNOWN, confidence_of_check, source_of_status
 
 logger = logging.getLogger(__name__)
@@ -129,9 +129,10 @@ async def _process_and_save_places(
             phone=place.phone,
             socials=socials,
             high_margin=place.high_margin,
+            small_chain=chains.branches(place.name) == 2,
         )
 
-        if site_status == "has_site" or score < 30:
+        if not is_worth_saving(site_status, score):
             continue
 
         qualified += 1

@@ -14,6 +14,7 @@ from src.config import Settings
 from src.database.models import STATUS_NEW, Lead
 from src.database.repo import get_lead_fingerprints
 from src.services.dedup import normalize_address_key, normalize_name
+from src.services.scorer import calculate_lead_score
 
 # Well-known brands, found by whole words in the name. LEADS_CHAIN_BLOCKLIST replaces this list.
 DEFAULT_CHAIN_BLOCKLIST: tuple[str, ...] = (
@@ -96,6 +97,32 @@ async def load_chain_index(session: AsyncSession, settings: Settings) -> ChainIn
     for name, _phone, _map_url, address in await get_lead_fingerprints(session):
         index.add(name, address)
     return index
+
+
+async def rescore_new_leads(session: AsyncSession, settings: Settings) -> tuple[int, int]:
+    """
+    An admin's command: count chains again and score the pool by the current weights.
+
+    Returns how many leads are in the pool now that they are scored and how many scores changed.
+    Scores of leads already handed out are history and stay.
+    """
+    index = await load_chain_index(session, settings)
+    await refresh_chain_flags(session, index, reset=True)
+    leads = (await session.scalars(select(Lead).where(Lead.crm_status == STATUS_NEW))).all()
+    changed = 0
+    for lead in leads:
+        score = calculate_lead_score(
+            lead.category,
+            lead.site_status,
+            lead.phone,
+            lead.socials,
+            small_chain=index.branches(lead.name) == 2,
+        )
+        if score != lead.score:
+            lead.score = score
+            changed += 1
+    await session.commit()
+    return len(leads), changed
 
 
 async def refresh_chain_flags(session: AsyncSession, index: ChainIndex, reset: bool = False) -> int:

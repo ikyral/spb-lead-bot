@@ -32,10 +32,12 @@ from src.services.chains import (
     load_chain_index,
     parse_blocklist,
     refresh_chain_flags,
+    rescore_new_leads,
 )
 from src.services.pipeline import import_csv_harvest, save_collected_places
-from src.services.providers.base import RawPlace
+from src.services.providers.base import TARGET_CATEGORIES, RawPlace
 from src.services.scheduler import TopupDecision, TopupOutcome
+from src.services.scorer import MIN_LEAD_SCORE, calculate_lead_score, has_mobile_phone, is_worth_saving
 from src.services.site_status import (
     CONFIDENCE_HIGH,
     CONFIDENCE_LOW,
@@ -602,3 +604,131 @@ async def test_csv_import_goes_through_the_same_filter(session_maker, monkeypatc
         stats = await import_csv_harvest(session, data)
         assert stats["saved_new"] == 1
         assert [lead.name for lead in await issue_next_leads(session, 10)] == ["Маленькая мастерская Ивана"]
+
+
+# ---------- niches ----------
+
+
+def test_every_niche_can_be_searched_in_both_sources() -> None:
+    assert len(TARGET_CATEGORIES) == 18
+    for key, category in TARGET_CATEGORIES.items():
+        assert category["title"], key
+        assert category["query_2gis"], key
+        assert category["osm_tags"], key
+    assert {"barbershop", "tire_service", "cleaning", "renovation", "florists", "hotels", "horeca"} <= set(
+        TARGET_CATEGORIES
+    )
+
+
+def test_buttons_of_the_longest_district_and_niche_fit_into_telegram() -> None:
+    for key in TARGET_CATEGORIES:
+        assert len(f"cat:Василеостровский:{key}".encode()) <= 64
+
+
+# ---------- scoring ----------
+
+
+def test_confirmed_need_scores_higher_than_anything_unverified() -> None:
+    for confirmed in (SITE_DEAD, SITE_SOCIAL_ONLY, SITE_NO_SITE):
+        for unverified in (SITE_NOT_FOUND, SITE_UNCERTAIN, SITE_UNKNOWN):
+            assert calculate_lead_score("beauty", confirmed, "+78125550101", None) > calculate_lead_score(
+                "beauty", unverified, "+78125550101", None
+            )
+
+
+def test_more_certain_statuses_score_higher() -> None:
+    scores = [
+        calculate_lead_score("beauty", status, None, "vk.com/x")
+        for status in (SITE_DEAD, SITE_SOCIAL_ONLY, SITE_NO_SITE, SITE_NOT_FOUND, SITE_UNCERTAIN, SITE_UNKNOWN)
+    ]
+    assert scores == sorted(scores, reverse=True)
+    assert len(set(scores)) == len(scores)
+
+
+@pytest.mark.parametrize(
+    ("phone", "mobile"),
+    [
+        ("+7 921 000-00-02", True),
+        ("89210000002", True),
+        ("9210000002", True),
+        ("+7 (812) 555-01-01", False),
+        ("+7 812 555-01-01, +7 921 000-00-02", True),
+        ("+7999", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_mobile_phone_is_recognized(phone: str | None, mobile: bool) -> None:
+    assert has_mobile_phone(phone) is mobile
+
+
+def test_mobile_phone_is_worth_more_than_another_one() -> None:
+    mobile = calculate_lead_score("florists", SITE_UNKNOWN, "+7 921 000-00-02", None)
+    other = calculate_lead_score("florists", SITE_UNKNOWN, "+7 812 555-01-01", None)
+    assert mobile > other > calculate_lead_score("florists", SITE_UNKNOWN, None, None)
+
+
+def test_low_priority_niches_and_small_chains_score_lower() -> None:
+    usual = calculate_lead_score("florists", SITE_NO_SITE, "+78125550101", None)
+    assert calculate_lead_score("hotels", SITE_NO_SITE, "+78125550101", None) == usual - 10
+    assert calculate_lead_score("horeca", SITE_NO_SITE, "+78125550101", None) == usual - 10
+    assert calculate_lead_score("florists", SITE_NO_SITE, "+78125550101", None, small_chain=True) == usual - 10
+
+
+def test_known_site_scores_zero_and_is_never_saved() -> None:
+    assert calculate_lead_score("beauty", SITE_FOUND, "+79210000002", None) == 0
+    assert is_worth_saving(SITE_FOUND, 100) is False
+    assert is_worth_saving("has_site", 100) is False
+
+
+def test_unverified_leads_are_kept_whatever_their_score_is() -> None:
+    low = calculate_lead_score("horeca", SITE_UNKNOWN, None, None)
+    assert low < MIN_LEAD_SCORE
+    assert is_worth_saving(SITE_UNKNOWN, low) is True
+    assert is_worth_saving(SITE_NO_SITE, MIN_LEAD_SCORE - 1) is False
+
+
+@pytest.mark.usefixtures("_sites_are_not_checked")
+async def test_cafe_without_contacts_is_a_lead_with_a_demo_key(session_maker) -> None:
+    place = RawPlace(external_id="2gis_1", source="2gis", name="Кафе Ромашка", category="horeca", contacts_known=False)
+    async with session_maker() as session:
+        stats = await save_collected_places(session, [place])
+        assert stats["saved_new"] == 1
+        assert len(await get_leads(session, crm_status=STATUS_NEW, min_score=0)) == 1
+
+
+@pytest.mark.usefixtures("_handlers_use_the_test_database")
+async def test_low_score_lead_can_be_seen_while_browsing(session_maker) -> None:
+    await _save(session_maker, name="Кафе Ромашка", category="horeca", score=20)
+    message = MagicMock(spec=Message)
+    message.answer = AsyncMock()
+    await leads.handle_new_leads(message)
+    assert "Кафе Ромашка" in message.answer.await_args.args[0]
+
+
+async def test_rescore_uses_the_current_weights_and_leaves_handed_out_leads(session_maker) -> None:
+    old = await _save(session_maker, external_id="2gis_a", site_status=SITE_DEAD, phone="+79210000002", score=11)
+    same = await _save(session_maker, external_id="2gis_b", name="Другая", score=40)
+    issued = await _save(
+        session_maker,
+        external_id="2gis_c",
+        name="Третья",
+        score=11,
+        crm_status=STATUS_ISSUED,
+        issued_at=datetime.now(UTC),
+    )
+    async with session_maker() as session:
+        assert await rescore_new_leads(session, _chain_settings()) == (2, 1)
+        assert (await session.get(Lead, old)).score == 95
+        assert (await session.get(Lead, same)).score == 40
+        assert (await session.get(Lead, issued)).score == 11
+
+
+@pytest.mark.usefixtures("_handlers_use_the_test_database")
+async def test_rescore_command_answers_with_the_counts(session_maker, monkeypatch: pytest.MonkeyPatch) -> None:
+    await _save(session_maker, site_status=SITE_DEAD, phone="+79210000002", score=11)
+    monkeypatch.setattr(issue, "settings", _chain_settings())
+    message = _batch_message()
+    await issue.handle_rescore(message)
+    text = message.answer.await_args.args[0]
+    assert "<b>1</b>" in text

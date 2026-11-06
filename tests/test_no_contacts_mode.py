@@ -159,7 +159,8 @@ async def test_without_contacts_a_2gis_organization_is_a_lead_by_default(session
 
 
 async def test_low_margin_niche_also_qualifies_and_is_listed(session_maker) -> None:
-    assert calculate_lead_score("horeca", SITE_UNKNOWN, None, None) == 30
+    assert calculate_lead_score("beauty", SITE_UNKNOWN, None, None) == 40
+    assert calculate_lead_score("horeca", SITE_UNKNOWN, None, None) == 20
     async with session_maker() as session:
         await pipeline.save_collected_places(session, [_place(category="horeca")])
     assert len(await _saved(session_maker)) == 1

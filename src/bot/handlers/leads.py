@@ -83,7 +83,8 @@ async def render_lead_page(
     edit: bool = False,
 ) -> None:
     """Render a single lead card with pagination controls."""
-    leads = await get_leads(session, crm_status=crm_status, limit=1, offset=offset)
+    # min_score=0: a lead with an unchecked site may score low, and it is still in the pool.
+    leads = await get_leads(session, crm_status=crm_status, min_score=0, limit=1, offset=offset)
     if not leads:
         status_name = STATUS_NAMES.get(crm_status, crm_status)
         msg = f"📋 Лидов со статусом «{status_name}» пока нет." if offset == 0 else "🏁 Больше нет лидов в списке."
@@ -91,7 +92,7 @@ async def render_lead_page(
         return
 
     lead = leads[0]
-    next_leads = await get_leads(session, crm_status=crm_status, limit=1, offset=offset + 1)
+    next_leads = await get_leads(session, crm_status=crm_status, min_score=0, limit=1, offset=offset + 1)
     status_title = CARD_TITLES.get(crm_status, "📋 Лид")
     card_text = f"<b>{status_title} #{offset + 1}</b>\n\n" + format_lead_card(lead)
     kb = get_lead_card_keyboard(
