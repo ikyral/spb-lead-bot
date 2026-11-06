@@ -31,6 +31,7 @@ from src.database.models import (
 from src.services.scorer import calculate_lead_score
 from src.services.site_status import (
     CONFIDENCE_HIGH,
+    CONFIDENCE_LOW,
     ISSUE_GROUPS,
     SITE_FOUND,
     SITE_NO_SITE,
@@ -404,21 +405,57 @@ async def get_pool_stats(session: AsyncSession) -> PoolStats:
     )
 
 
-async def get_unknown_site_leads(session: AsyncSession, limit: int) -> list[Lead]:
-    """The best of the pool that nobody has looked at, whose card on 2GIS a collector can open."""
+async def get_unknown_site_candidates(session: AsyncSession, niche: str | None = None) -> list[Lead]:
+    """All of the pool that nobody has looked at and whose card on 2GIS a collector can open, the best first."""
     stmt = (
         select(Lead)
         .where(_in_pool_clause(), Lead.site_status == SITE_UNKNOWN, Lead.source.in_(TWOGIS_SOURCES))
         .order_by(Lead.score.desc(), Lead.created_at, Lead.id)
     )
+    if niche is not None:
+        stmt = stmt.where(Lead.category == niche)
     # A link is checked in Python, so a bad one cannot make a batch shorter than the pool allows.
-    leads: list[Lead] = []
-    for lead in (await session.scalars(stmt)).all():
-        if readable_card_number(lead.source_url) is not None:
-            leads.append(lead)
-            if len(leads) == limit:
-                break
-    return leads
+    return [lead for lead in (await session.scalars(stmt)).all() if readable_card_number(lead.source_url) is not None]
+
+
+async def get_unknown_site_leads(session: AsyncSession, limit: int) -> list[Lead]:
+    """The best of the pool that nobody has looked at, whose card on 2GIS a collector can open."""
+    return (await get_unknown_site_candidates(session))[:limit]
+
+
+async def get_niche_site_counts(session: AsyncSession) -> dict[str, dict[str, int]]:
+    """
+    Leads by niche and status of the site, for judging niches.
+
+    Everything checked counts, whatever became of the lead later. Chains are never handed out, and
+    'no site' with low confidence means only an empty tag in OSM, so neither says anything about a niche.
+    Unknown are only those that are still in the pool.
+    """
+    known = await session.execute(
+        select(Lead.category, Lead.site_status, func.count(Lead.id))
+        .where(
+            Lead.site_status != SITE_UNKNOWN,
+            func.coalesce(Lead.is_chain, False).is_(False),
+            func.coalesce(Lead.site_confidence, "") != CONFIDENCE_LOW,
+        )
+        .group_by(Lead.category, Lead.site_status)
+    )
+    unknown = await session.execute(
+        select(Lead.category, func.count(Lead.id))
+        .where(_in_pool_clause(), Lead.site_status == SITE_UNKNOWN)
+        .group_by(Lead.category)
+    )
+    counts: dict[str, dict[str, int]] = {}
+    for category, status, count in known.all():
+        counts.setdefault(category, {})[status] = int(count)
+    for category, count in unknown.all():
+        counts.setdefault(category, {})[SITE_UNKNOWN] = int(count)
+    return counts
+
+
+async def get_known_niches(session: AsyncSession) -> list[str]:
+    """The niches that have any leads at all."""
+    return [str(category) for category in (await session.scalars(select(Lead.category).distinct())).all()]
 
 
 async def get_leads_by_external_ids(session: AsyncSession, external_ids: list[str]) -> dict[str, Lead]:

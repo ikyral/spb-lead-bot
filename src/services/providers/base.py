@@ -152,6 +152,11 @@ class RawPlace:
     contacts_known: bool = True
 
 
+def niche_title(category: str) -> str:
+    """How a niche is called for a person."""
+    return str(TARGET_CATEGORIES.get(category, {}).get("title", category))
+
+
 @dataclass(frozen=True)
 class SearchQuery:
     """What to look for: a niche from TARGET_CATEGORIES or a free-text query."""

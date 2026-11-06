@@ -44,6 +44,8 @@ ISSUE_GROUPS: tuple[tuple[str, ...], ...] = (
 )
 # No verdict about the site yet: such leads are worth keeping whatever their score is.
 UNVERIFIED_STATUSES: frozenset[str] = frozenset({SITE_UNKNOWN, SITE_UNCERTAIN, SITE_NOT_FOUND})
+# No site of its own, as far as anyone can tell. A social network instead of a site is the same for a lead.
+NO_SITE_STATUSES: frozenset[str] = frozenset({SITE_NO_SITE, SITE_NOT_FOUND, SITE_SOCIAL_ONLY})
 # Used in the link only, so an absurdly long card cannot break the button.
 _SEARCH_TEXT_LIMIT: int = 200
 
