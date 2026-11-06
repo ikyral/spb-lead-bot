@@ -16,7 +16,16 @@ from src.database.models import (
     Lead,
 )
 from src.services.providers.base import TARGET_CATEGORIES
-from src.services.scorer import SITE_UNKNOWN
+from src.services.site_status import (
+    SITE_DEAD,
+    SITE_FOUND,
+    SITE_NO_SITE,
+    SITE_NOT_FOUND,
+    SITE_SOCIAL_ONLY,
+    SITE_UNCERTAIN,
+    SITE_UNKNOWN,
+    SOURCE_MANUAL,
+)
 from src.services.twogis_links import twogis_card_url
 
 if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this module must not import
@@ -68,30 +77,47 @@ def format_msk_time(value: datetime | None) -> str:
     return value.astimezone(_MSK).strftime("%d.%m.%Y %H:%M МСК")
 
 
+def _site_verdict_line(lead: Lead, field_limit: int) -> str | None:
+    """
+    A line that says exactly how much is known: 'no site' only where a source or a person says so.
+
+    None for a status with a line of its own in each form of a card.
+    """
+    url = html.escape((lead.site_url or lead.raw_website or "")[:field_limit])
+    if lead.site_status == SITE_NO_SITE:
+        if lead.site_source == SOURCE_MANUAL:
+            return "✅ Сайта нет (проверено вручную)"
+        return "🌐 Сайта нет (по данным источника)"
+    if lead.site_status == SITE_NOT_FOUND:
+        return "🌐 Сайт не найден в поиске"
+    if lead.site_status == SITE_UNCERTAIN:
+        return f"🌐 Возможно, сайт: {url}, проверьте" if url else "🌐 Возможно, сайт есть, проверьте"
+    if lead.site_status == SITE_UNKNOWN:
+        return "🌐 Статус неизвестен"
+    if lead.site_status == SITE_FOUND:
+        return f"🌐 Сайт есть ({url})" if url else "🌐 Сайт есть"
+    return None
+
+
 def format_lead_card(lead: Lead) -> str:
     """Format business lead details as an HTML message for Telegram."""
     category_title = TARGET_CATEGORIES.get(lead.category, {}).get("title", lead.category)
     safe_name = html.escape(lead.name)
     safe_category = html.escape(category_title)
 
-    if lead.site_status == "dead_site":
-        safe_site = html.escape(lead.raw_website or "не указан")
-        status_line = f"⚠️ Мертвый сайт / ошибка домена ({safe_site})"
-    elif lead.site_status == "social_only":
-        status_line = "📱 Только соцсеть вместо сайта"
-    elif lead.site_status == "no_site":
-        status_line = "❌ Нет сайта"
-    elif lead.site_status == SITE_UNKNOWN:
-        status_line = "❔ Смотри в карточке"
-    else:
-        safe_site = html.escape(lead.raw_website or "")
-        status_line = f"🌐 Есть сайт ({safe_site})"
+    site_line = _site_verdict_line(lead, _CARD_FIELD_LIMITS[0])
+    if site_line is None:
+        if lead.site_status == SITE_DEAD:
+            safe_site = html.escape(lead.raw_website or "не указан")
+            status_line = f"⚠️ Мертвый сайт / ошибка домена ({safe_site})"
+        elif lead.site_status == SITE_SOCIAL_ONLY:
+            status_line = "📱 Только соцсеть вместо сайта"
+        else:
+            safe_site = html.escape(lead.raw_website or "")
+            status_line = f"🌐 Есть сайт ({safe_site})"
+        site_line = f"🌐 <b>Статус сайта:</b> {status_line}"
 
-    lines = [
-        f"🏢 <b>{safe_name}</b> | {safe_category}",
-        f"🔥 {lead.score}/100",
-        f"🌐 <b>Статус сайта:</b> {status_line}",
-    ]
+    lines = [f"🏢 <b>{safe_name}</b> | {safe_category}", f"🔥 {lead.score}/100", site_line]
 
     if lead.district:
         lines.append(f"📍 <b>Район:</b> {html.escape(lead.district)}")
@@ -110,13 +136,14 @@ def format_lead_card(lead: Lead) -> str:
 
 
 def _site_line(lead: Lead, field_limit: int) -> str:
+    verdict = _site_verdict_line(lead, field_limit)
+    if verdict is not None:
+        return verdict
     site = html.escape((lead.raw_website or "")[:field_limit])
-    if lead.site_status == "dead_site":
+    if lead.site_status == SITE_DEAD:
         return f"🌐 <b>Сайт:</b> ⚠️ не работает ({site or 'адрес не указан'})"
-    if lead.site_status == "social_only":
+    if lead.site_status == SITE_SOCIAL_ONLY:
         return f"🌐 <b>Сайт:</b> 📱 только соцсеть{f' ({site})' if site else ''}"
-    if lead.site_status == "no_site":
-        return "🌐 <b>Сайт:</b> ❌ нет"
     return f"🌐 <b>Сайт:</b> {site}"
 
 
@@ -146,9 +173,7 @@ def _issued_card(lead: Lead, field_limit: int) -> str:
         lines.append(_PHONE_IN_CARD_LINE)
     if lead.email:
         lines.append(f"✉️ <b>Email:</b> {field(lead.email)}")
-    # Unknown means just that: "no site" here would be a claim nobody has checked.
-    if lead.site_status != SITE_UNKNOWN:
-        lines.append(_site_line(lead, field_limit))
+    lines.append(_site_line(lead, field_limit))
     if lead.socials:
         lines.append(f"🔗 <b>Соцсети:</b> {field(lead.socials)}")
     link = None if on_button else _card_link_line(lead)
@@ -352,7 +377,7 @@ def format_collector_status(status: CollectorStatus) -> str:
 def generate_pitch_text(lead: Lead) -> str:
     """Generate ready personalized outreach text for the business owner."""
     location_str = f"в районе {lead.district}" if lead.district else "в Санкт-Петербурге"
-    if lead.site_status == "dead_site":
+    if lead.site_status == SITE_DEAD:
         website = lead.raw_website or "указанный на картах"
         return (
             f"Здравствуйте! Обратил внимание на карточку вашей компании «{lead.name}» на картах СПб. "
@@ -363,7 +388,7 @@ def generate_pitch_text(lead: Lead) -> str:
             "Подскажите, актуален ли для вас этот вопрос?"
         )
 
-    if lead.site_status == "social_only":
+    if lead.site_status == SITE_SOCIAL_ONLY:
         return (
             f"Здравствуйте! У компании «{lead.name}» отличная карточка {location_str}, "
             "но вместо полноценного сайта указана только соцсеть. "
@@ -374,8 +399,17 @@ def generate_pitch_text(lead: Lead) -> str:
             "Было бы интересно взглянуть?"
         )
 
-    if lead.site_status == SITE_UNKNOWN:
-        # Nobody has checked the site yet: the text must not claim there is none.
+    if lead.site_status != SITE_NO_SITE or lead.site_source != SOURCE_MANUAL:
+        if lead.site_status == SITE_NO_SITE:
+            # A source only lists no site: that can be said to the owner, but not more than that.
+            return (
+                f"Здравствуйте! Нашел компанию «{lead.name}» на картах Санкт-Петербурга: в карточке не указан сайт. "
+                "Я разрабатываю сайты для локального бизнеса: они приводят клиентов из поиска Яндекса и Google "
+                "и повышают доверие к компании.\n\n"
+                f"Если сайта у «{lead.name}» пока нет или он устарел, могу предложить варианты под ваши задачи. "
+                "Удобно обсудить?"
+            )
+        # Nobody has confirmed anything about the site: the text must not claim there is none.
         return (
             f"Здравствуйте! Нашел компанию «{lead.name}» на картах Санкт-Петербурга. "
             "Я разрабатываю сайты для локального бизнеса: они приводят клиентов из поиска Яндекса и Google "

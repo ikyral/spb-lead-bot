@@ -444,7 +444,7 @@ def test_card_has_every_requested_field_and_escapes_html() -> None:
 def test_card_without_contacts_or_safe_link() -> None:
     card = format_issued_lead(_lead(1, source_url="javascript:alert(1)", map_url=None))
     assert "href" not in card
-    assert "❌ нет" in card
+    assert "Сайта нет (по данным источника)" in card
 
 
 def test_card_never_exceeds_the_telegram_limit() -> None:
@@ -600,10 +600,11 @@ async def test_csv_export_gets_new_columns_at_the_end(session_maker, monkeypatch
     document = callback.message.answer_document.await_args.kwargs["document"]
     header, row = list(csv.reader(io.StringIO(document.data.decode("utf-8-sig")), delimiter=";"))[:2]
     assert header[:2] == ["ID", "Источник"]
-    assert header[-6:] == [
+    assert header[-10:-4] == [
         "Email", "Карточка источника", "Дата выдачи (МСК)", "Результат контакта", "Кто отметил", "Когда отмечено (МСК)",
     ]
-    assert row[-4] != ""
+    assert header[-4:] == ["Найденный сайт", "Уверенность", "Откуда статус сайта", "Сайт проверен (МСК)"]
+    assert row[-8] != ""
 
 
 def test_main_menu_has_the_batch_button() -> None:

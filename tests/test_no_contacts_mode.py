@@ -1088,7 +1088,7 @@ def test_known_phone_is_shown_as_before_and_needs_no_button_to_add_it() -> None:
     card = format_issued_lead(lead)
     assert "📞 <b>Телефон:</b> +78125550101" in card
     assert "смотри в карточке" not in card
-    assert "❌ нет" in card
+    assert "Сайта нет (по данным источника)" in card
     assert ADD_PHONE_BUTTON_TEXT not in [button.text for row in _buttons(lead) for button in row]
 
 
