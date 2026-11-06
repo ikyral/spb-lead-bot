@@ -30,6 +30,7 @@ from src.services.twogis_links import twogis_card_url
 
 if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this module must not import
     from src.database.models import ImportLog, ProviderState
+    from src.database.repo import PoolStats
     from src.services.lead_import import ImportResult
     from src.services.scheduler import CollectorStatus, DgisKeyStatus, RunReport
 
@@ -40,6 +41,17 @@ _CARD_FIELD_LIMITS: tuple[int, ...] = (300, 100)
 _MSK = timezone(timedelta(hours=3), "MSK")
 _PHONE_IN_CARD_LINE: str = "📞 <b>Телефон:</b> смотри в карточке"
 
+# Short names for the statistics, in the order of handing out. They say no more than the cards do.
+_SITE_STATUS_TITLES: dict[str, str] = {
+    SITE_NO_SITE: "Сайта нет по данным источника или вручную",
+    SITE_DEAD: "Сайт не работает",
+    SITE_SOCIAL_ONLY: "Только соцсеть",
+    SITE_NOT_FOUND: "Сайт не найден в поиске",
+    SITE_UNCERTAIN: "Возможно, сайт есть",
+    SITE_UNKNOWN: "Статус неизвестен",
+}
+# Enough to see what prevails; a list of 18 niches would hide the rest of the message.
+_NICHES_SHOWN: int = 8
 _CONTACT_STATUS_TITLES: dict[str, str] = {
     CONTACT_CONTACTED: "✍️ Написал",
     CONTACT_REPLIED: "💬 Ответили",
@@ -201,13 +213,45 @@ def format_issued_lead(lead: Lead) -> str:
     return text
 
 
-def format_funnel_stats(counts: dict[str, int], contact_counts: dict[str, int], issued_total: int) -> str:
+def _pool_stats_lines(stats: PoolStats) -> list[str]:
+    """The pool by status of the site and by niche, how many wait for a check, how often sources were wrong."""
+    lines = ["", "<b>Запас по статусу сайта:</b>"]
+    lines += [
+        f"• {title}: <b>{stats.by_site[status]}</b>"
+        for status, title in _SITE_STATUS_TITLES.items()
+        if stats.by_site.get(status)
+    ]
+    if not stats.by_site:
+        lines.append("• пусто")
+    lines.append(f"⏳ Ждут проверки сайта: <b>{stats.waiting_for_check}</b>")
+    lines.append(f"🌐 Вердиктов «Сайт есть» вручную: <b>{stats.manual_site_found}</b>")
+    if stats.chains:
+        lines.append(f"🔗 Сетей не выдаётся: <b>{stats.chains}</b>")
+    if stats.by_niche:
+        lines += ["", "<b>Запас по нишам:</b>"]
+        niches = sorted(stats.by_niche.items(), key=lambda item: (-item[1], item[0]))
+        for key, count in niches[:_NICHES_SHOWN]:
+            title = str(TARGET_CATEGORIES.get(key, {}).get("title", key))
+            lines.append(f"• {html.escape(title)}: <b>{count}</b>")
+        if len(niches) > _NICHES_SHOWN:
+            lines.append(f"• другие: <b>{sum(count for _, count in niches[_NICHES_SHOWN:])}</b>")
+    return lines
+
+
+def format_funnel_stats(
+    counts: dict[str, int],
+    contact_counts: dict[str, int],
+    issued_total: int,
+    pool_stats: PoolStats | None = None,
+) -> str:
     """Format the pool size and what happened to the handed-out leads."""
     waiting = max(0, issued_total - sum(contact_counts.values()))
+    # Leads with a known site and chains are new too, but they will never be handed out.
+    pool_size = sum(pool_stats.by_site.values()) if pool_stats is not None else counts.get(STATUS_NEW, 0)
     lines = [
         "📊 <b>Лиды:</b>\n",
         f"• 📈 Всего: <b>{sum(counts.values())}</b>",
-        f"• 📦 Новых в запасе: <b>{counts.get(STATUS_NEW, 0)}</b>",
+        f"• 📦 Новых в запасе: <b>{pool_size}</b>",
         f"• 📤 Выдано всего: <b>{issued_total}</b>",
         f"• ⏳ Выдано, ждут действия: <b>{waiting}</b>",
         f"• ✍️ Написал: <b>{contact_counts.get(CONTACT_CONTACTED, 0)}</b>",
@@ -217,6 +261,8 @@ def format_funnel_stats(counts: dict[str, int], contact_counts: dict[str, int], 
     ]
     if counts.get(STATUS_IN_WORK):
         lines.append(f"• 💼 В работе: <b>{counts[STATUS_IN_WORK]}</b>")
+    if pool_stats is not None:
+        lines += _pool_stats_lines(pool_stats)
     return "\n".join(lines)
 
 
@@ -312,6 +358,10 @@ def _dgis_key_lines(key: DgisKeyStatus) -> list[str]:
     return lines
 
 
+def _site_stock_lines(status: CollectorStatus) -> list[str]:
+    return _pool_stats_lines(status.pool_stats) if status.pool_stats is not None else []
+
+
 def _provider_line(name: str, state: ProviderState | None, now: datetime) -> str:
     safe_name = html.escape(name)
     if state is None:
@@ -334,6 +384,7 @@ def format_collector_status(status: CollectorStatus) -> str:
             "🤖 <b>Сбор лидов</b>\n",
             "Режим: <b>внешний сборщик</b>. Этот сервер сам не собирает, лиды приходят файлами.",
             *_stock_lines(status),
+            *_site_stock_lines(status),
             *(_dgis_key_lines(status.dgis_key) if status.dgis_key else []),
             *_import_lines(status.last_import, status.imported_total),
         ])
@@ -354,6 +405,7 @@ def format_collector_status(status: CollectorStatus) -> str:
     ]
     lines.append("")
     lines += _stock_lines(status)
+    lines += _site_stock_lines(status)
     lines.append(f"Запросов за сутки: {status.requests_today} из {status.max_requests_per_day}")
     if status.dgis_key:
         lines += _dgis_key_lines(status.dgis_key)

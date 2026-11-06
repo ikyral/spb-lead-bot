@@ -35,6 +35,7 @@ from src.services.site_status import (
     SITE_NO_SITE,
     SITE_UNKNOWN,
     SOURCE_MANUAL,
+    UNVERIFIED_STATUSES,
     issue_group,
 )
 
@@ -363,6 +364,42 @@ async def count_unknown_site_leads(session: AsyncSession) -> int:
         select(func.count(Lead.id)).where(_in_pool_clause(), Lead.site_status == SITE_UNKNOWN)
     )
     return int(result.scalar_one())
+
+
+@dataclass(frozen=True)
+class PoolStats:
+    """What the pool consists of, and how often a source was wrong about a site."""
+
+    by_site: dict[str, int]
+    by_niche: dict[str, int]
+    # Verdicts 'there is a site' given by hand: the leads a source should not have offered.
+    manual_site_found: int
+    chains: int
+
+    @property
+    def waiting_for_check(self) -> int:
+        return sum(count for status, count in self.by_site.items() if status in UNVERIFIED_STATUSES)
+
+
+async def get_pool_stats(session: AsyncSession) -> PoolStats:
+    """Counts for the statistics and the status of collection."""
+
+    async def counts(column: Any) -> dict[str, int]:
+        rows = await session.execute(select(column, func.count(Lead.id)).where(_in_pool_clause()).group_by(column))
+        return {str(key): int(count) for key, count in rows.all()}
+
+    manual = await session.execute(
+        select(func.count(Lead.id)).where(Lead.site_status == SITE_FOUND, Lead.site_source == SOURCE_MANUAL)
+    )
+    chains = await session.execute(
+        select(func.count(Lead.id)).where(Lead.crm_status == STATUS_NEW, Lead.is_chain.is_(True))
+    )
+    return PoolStats(
+        by_site=await counts(Lead.site_status),
+        by_niche=await counts(Lead.category),
+        manual_site_found=int(manual.scalar_one()),
+        chains=int(chains.scalar_one()),
+    )
 
 
 async def count_new_leads_with_contacts(session: AsyncSession) -> int:

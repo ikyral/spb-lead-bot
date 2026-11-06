@@ -40,6 +40,7 @@ from src.database.repo import (
     count_new_leads,
     count_unknown_site_leads,
     get_contact_status_counts,
+    get_pool_stats,
     get_status_counts,
     issue_next_leads,
     return_undelivered_leads,
@@ -426,8 +427,9 @@ async def handle_leads_stats(message: Message) -> None:
         counts = await get_status_counts(session)
         contact_counts = await get_contact_status_counts(session)
         issued_total = await count_issued_leads(session)
+        pool_stats = await get_pool_stats(session)
     await message.answer(
-        format_funnel_stats(counts, contact_counts, issued_total),
+        format_funnel_stats(counts, contact_counts, issued_total, pool_stats),
         reply_markup=get_full_export_keyboard(),
         parse_mode="HTML",
     )

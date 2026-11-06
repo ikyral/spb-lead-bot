@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiogram.types import CallbackQuery, Message
 
-from src.bot.formatters import format_issued_lead, format_lead_card, generate_pitch_text
+from src.bot.formatters import format_funnel_stats, format_issued_lead, format_lead_card, generate_pitch_text
 from src.bot.handlers import issue, leads
 from src.bot.keyboards import (
     SEARCH_BUTTON_TEXT,
@@ -15,13 +15,14 @@ from src.bot.keyboards import (
     SITE_YES_BUTTON_TEXT,
     get_issued_lead_keyboard,
 )
-from src.config import Settings
+from src.config import PROJECT_ROOT, Settings
 from src.database.models import CONTACT_REPLIED, STATUS_ISSUED, STATUS_NEW, Lead
 from src.database.repo import (
     IssueRules,
     count_new_leads,
     count_unknown_site_leads,
     get_leads,
+    get_pool_stats,
     issue_next_leads,
     set_site_verdict,
 )
@@ -732,3 +733,104 @@ async def test_rescore_command_answers_with_the_counts(session_maker, monkeypatc
     await issue.handle_rescore(message)
     text = message.answer.await_args.args[0]
     assert "<b>1</b>" in text
+
+
+# ---------- statistics ----------
+
+
+async def test_pool_stats_count_what_is_really_in_the_pool(session_maker) -> None:
+    await _add(
+        session_maker,
+        {"site_status": SITE_UNKNOWN, "category": "beauty"},
+        {"site_status": SITE_UNKNOWN, "category": "beauty"},
+        {"site_status": SITE_DEAD, "category": "florists"},
+        {"site_status": SITE_NOT_FOUND, "category": "florists"},
+        {"site_status": SITE_FOUND, "site_source": SOURCE_MANUAL, "category": "florists"},
+        {"site_status": SITE_FOUND, "site_source": SOURCE_MANUAL, "crm_status": STATUS_ISSUED, "category": "beauty"},
+        {"site_status": SITE_FOUND, "site_source": "search", "category": "beauty"},
+        {"site_status": SITE_UNKNOWN, "is_chain": True, "category": "beauty"},
+    )
+    async with session_maker() as session:
+        stats = await get_pool_stats(session)
+    assert stats.by_site == {SITE_UNKNOWN: 2, SITE_DEAD: 1, SITE_NOT_FOUND: 1}
+    assert stats.by_niche == {"beauty": 2, "florists": 2}
+    assert stats.waiting_for_check == 3
+    assert stats.manual_site_found == 2  # also on leads already handed out; not what a search found
+    assert stats.chains == 1
+
+
+async def test_statistics_message_shows_the_pool_and_stays_honest(session_maker) -> None:
+    await _add(session_maker, {"site_status": SITE_UNKNOWN, "category": "<niche>"}, {"site_status": SITE_DEAD})
+    async with session_maker() as session:
+        stats = await get_pool_stats(session)
+    text = format_funnel_stats({"new": 2}, {}, 0, stats)
+    assert "Статус неизвестен: <b>1</b>" in text
+    assert "Сайт не работает: <b>1</b>" in text
+    assert "Ждут проверки сайта: <b>1</b>" in text
+    assert "Вердиктов «Сайт есть» вручную: <b>0</b>" in text
+    assert "&lt;niche&gt;" in text
+    assert "Стоматологии и клиники" in text
+
+
+async def test_pool_in_the_statistics_is_what_can_be_handed_out(session_maker) -> None:
+    await _add(
+        session_maker,
+        {"site_status": SITE_UNKNOWN},
+        {"site_status": SITE_FOUND, "site_source": SOURCE_MANUAL},
+        {"site_status": SITE_UNKNOWN, "is_chain": True},
+    )
+    async with session_maker() as session:
+        stats = await get_pool_stats(session)
+    assert "Новых в запасе: <b>1</b>" in format_funnel_stats({"new": 3}, {}, 0, stats)
+
+
+async def test_statistics_keep_working_without_the_pool_part() -> None:
+    assert "Запас по статусу" not in format_funnel_stats({"new": 2}, {}, 0)
+
+
+async def test_long_list_of_niches_is_cut_with_a_total(session_maker) -> None:
+    await _add(session_maker, *({"category": key} for key in list(TARGET_CATEGORIES)[:12]))
+    async with session_maker() as session:
+        stats = await get_pool_stats(session)
+    text = format_funnel_stats({"new": 12}, {}, 0, stats)
+    assert "другие: <b>4</b>" in text
+
+
+async def test_collection_status_shows_the_pool_by_site(session_maker) -> None:
+    from src.bot.formatters import format_collector_status
+    from src.services.collector import load_collector_config
+    from src.services.providers.registry import ProviderSet
+    from src.services.scheduler import CollectorRunner
+
+    await _add(session_maker, {"site_status": SITE_UNKNOWN})
+    config = load_collector_config(_chain_settings(COLLECT_PROVIDERS="osm"))
+    runner = CollectorRunner(session_maker, ProviderSet(), config, AsyncMock())
+    text = format_collector_status(await runner.get_status())
+    assert "Ждут проверки сайта: <b>1</b>" in text
+
+
+def test_every_setting_of_this_feature_is_in_the_example() -> None:
+    example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+    for name in ("LEADS_ISSUE_UNKNOWN", "LEADS_MAX_NICHE_SHARE", "LEADS_CHAIN_MIN_BRANCHES", "LEADS_CHAIN_BLOCKLIST"):
+        assert f"{name}=" in example
+    defaults = _chain_settings()
+    assert defaults.LEADS_ISSUE_UNKNOWN is True
+    assert defaults.LEADS_MAX_NICHE_SHARE == 0.5
+    assert defaults.LEADS_CHAIN_MIN_BRANCHES == 3
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [{"LEADS_MAX_NICHE_SHARE": 0}, {"LEADS_MAX_NICHE_SHARE": 1.5}, {"LEADS_CHAIN_MIN_BRANCHES": 1}],
+)
+def test_settings_that_make_no_sense_are_refused(bad: dict) -> None:
+    with pytest.raises(ValueError, match="LEADS_"):
+        _chain_settings(**bad)
+
+
+def test_the_bot_sends_nothing_to_search_engines_by_itself() -> None:
+    """The stage with a paid search API is postponed: only ordinary links for a person."""
+    sources = "".join(path.read_text(encoding="utf-8") for path in (PROJECT_ROOT / "src").rglob("*.py"))
+    assert "searchapi.api" not in sources
+    assert "SITE_DISCOVERY" not in sources
+    assert "api.search.brave" not in sources
