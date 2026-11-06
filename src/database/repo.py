@@ -584,6 +584,13 @@ async def record_provider_run(session: AsyncSession, name: str) -> None:
     await session.commit()
 
 
+async def restore_provider_run(session: AsyncSession, name: str, previous: datetime | None) -> None:
+    """The run told nothing about the site: as far as the rest between runs goes, it did not happen."""
+    state = await _provider_state(session, name)
+    state.last_run_at = previous
+    await session.commit()
+
+
 async def record_provider_success(session: AsyncSession, name: str) -> None:
     """The site answered normally: blocks are no longer 'in a row'."""
     state = await session.get(ProviderState, name)
@@ -707,6 +714,15 @@ async def claim_scraper_check(
     state.scraper_check_runs = ",".join(moment.isoformat(timespec="seconds") for moment in runs)
     await session.commit()
     return None, limit - len(runs)
+
+
+async def release_scraper_check(session: AsyncSession, claimed_at: datetime) -> None:
+    """Give back a diagnostics run that never reached the site."""
+    state = await get_collector_state(session)
+    claimed = claimed_at.isoformat(timespec="seconds")
+    runs = [part for part in (state.scraper_check_runs or "").split(",") if part and part != claimed]
+    state.scraper_check_runs = ",".join(runs) or None
+    await session.commit()
 
 
 async def get_leads_stats(session: AsyncSession) -> dict[str, int]:

@@ -13,13 +13,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from src.services.api_client import MAX_RESPONSE_BYTES, ProviderTemporaryError, ProviderUnavailableError
+from src.services.api_client import (
+    MAX_RESPONSE_BYTES,
+    NO_CONNECTION_TEXT,
+    ProviderNoConnectionError,
+    ProviderTemporaryError,
+    ProviderUnavailableError,
+)
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext, Page, Playwright, Response
@@ -32,6 +39,7 @@ CLOSE_TIMEOUT_SECONDS: float = 10.0
 NETWORK_IDLE_TIMEOUT_SECONDS: float = 15.0
 # Reading what a page shows must not hang the wait for a person.
 READ_PAGE_TIMEOUT_SECONDS: float = 10.0
+_NETWORK_ERROR_RE = re.compile(r"net::ERR_(?!ABORTED)")
 # Where pages of 2GIS keep the data they arrive with.
 PAGE_STATE_VARIABLES: tuple[str, ...] = ("initialState", "__REACT_QUERY_STATE__")
 # Only reads. A string comes back, so what is too big or cannot be serialized does not cross over half-way.
@@ -63,6 +71,10 @@ class PageSnapshot:
     def bodies_from(self, wanted: Callable[[str], bool]) -> list[dict[str, Any]]:
         """The bodies that came from the addresses of interest."""
         return [body for url, body in zip(self.json_urls, self.json_bodies, strict=True) if wanted(url)]
+
+    def bodies_from_or_all(self, wanted: Callable[[str], bool]) -> list[dict[str, Any]]:
+        """The same, for a page whose addresses are not known: then only the wanted ones were read at all."""
+        return self.bodies_from(wanted) if self.json_urls else self.json_bodies
 
 
 class PlaywrightSession:
@@ -117,8 +129,11 @@ class PlaywrightSession:
 
         reads: list[asyncio.Future[dict[str, Any] | None]] = []
         urls: list[str] = []
+        answered = False
 
         def on_response(response: Response) -> None:
+            nonlocal answered
+            answered = True
             if wants_body(response.url):
                 urls.append(response.url)
                 reads.append(asyncio.ensure_future(_read_json(response)))
@@ -149,8 +164,13 @@ class PlaywrightSession:
                 page_state_problems=page_state_problems,
             )
         except PlaywrightTimeoutError:
+            if not answered:
+                raise ProviderNoConnectionError(NO_CONNECTION_TEXT) from None
             raise ProviderTemporaryError("страница не загрузилась вовремя") from None
         except PlaywrightError as exc:
+            # Only a network error: a window closed by a person is an error of the browser, not of the network.
+            if not answered and _NETWORK_ERROR_RE.search(str(exc)):
+                raise ProviderNoConnectionError(NO_CONNECTION_TEXT) from None
             # The class only: Playwright's messages contain the URL.
             raise ProviderTemporaryError(f"ошибка браузера ({type(exc).__name__})") from None
         finally:
