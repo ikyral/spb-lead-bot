@@ -24,6 +24,7 @@ from src.services.site_status import (
     SITE_SOCIAL_ONLY,
     SITE_UNCERTAIN,
     SITE_UNKNOWN,
+    SOURCE_2GIS_CARD,
     SOURCE_MANUAL,
 )
 from src.services.twogis_links import twogis_card_url
@@ -31,6 +32,7 @@ from src.services.twogis_links import twogis_card_url
 if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this module must not import
     from src.database.models import ImportLog, ProviderState
     from src.database.repo import PoolStats
+    from src.services.lead_enrich import EnrichStats
     from src.services.lead_import import ImportResult
     from src.services.scheduler import CollectorStatus, DgisKeyStatus, RunReport
 
@@ -99,6 +101,8 @@ def _site_verdict_line(lead: Lead, field_limit: int) -> str | None:
     if lead.site_status == SITE_NO_SITE:
         if lead.site_source == SOURCE_MANUAL:
             return "✅ Сайта нет (проверено вручную)"
+        if lead.site_source == SOURCE_2GIS_CARD:
+            return "🌐 В 2ГИС сайт не указан"
         return "🌐 Сайта нет (по данным источника)"
     if lead.site_status == SITE_NOT_FOUND:
         return "🌐 Сайт не найден в поиске"
@@ -292,6 +296,8 @@ def format_import_report(result: ImportResult) -> str:
     name = html.escape(result.file_name)
     if not result.ok:
         return f"⚠️ <b>Импорт не выполнен</b>: {name}\n\nПричина: {html.escape(result.error or 'неизвестна')}"
+    if result.enrichment is not None:
+        return _format_enrichment_report(name, result.total, result.enrichment, result.pool_size)
     lines = [
         f"📥 <b>Импорт завершён</b>: {name}\n",
         f"• В файле: <b>{result.total}</b>",
@@ -301,6 +307,22 @@ def format_import_report(result: ImportResult) -> str:
     ]
     lines += [f"   – {html.escape(reason)}: {count}" for reason, count in result.rejected.most_common()]
     lines.append(f"\n📦 В запасе: <b>{result.pool_size}</b>")
+    return "\n".join(lines)
+
+
+def _format_enrichment_report(name: str, total: int, stats: EnrichStats, pool_size: int) -> str:
+    lines = [
+        f"🔎 <b>Карточки 2ГИС обработаны</b>: {name}\n",
+        f"• В файле: <b>{total}</b>",
+        f"• Обновлено лидов: <b>{stats.updated}</b>",
+        f"• Сайтов найдено: <b>{stats.sites_found}</b> (рабочих: {stats.sites_working}, "
+        f"не открываются: {stats.sites_dead}, соцсеть или агрегатор: {stats.sites_social})",
+        f"• Без сайта в карточке: <b>{stats.no_site}</b>",
+        f"• Не распознано: <b>{stats.not_recognized}</b>",
+        f"• Проигнорировано: <b>{stats.ignored_total}</b>",
+    ]
+    lines += [f"   – {html.escape(reason)}: {count}" for reason, count in stats.ignored.most_common()]
+    lines.append(f"\n📦 В запасе: <b>{pool_size}</b>")
     return "\n".join(lines)
 
 
