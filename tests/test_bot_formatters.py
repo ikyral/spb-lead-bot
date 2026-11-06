@@ -58,7 +58,7 @@ def test_format_lead_card_statuses():
 
     no_site_lead = _make_dummy_lead(site_status="no_site")
     card_no_site = format_lead_card(no_site_lead)
-    assert "❌ Нет сайта" in card_no_site
+    assert "Сайта нет (по данным источника)" in card_no_site
 
 
 def test_format_lead_card_html_escaping():
@@ -112,7 +112,10 @@ def test_generate_pitch_text():
     )
     pitch_no_site = generate_pitch_text(no_site_lead)
     assert "Автосервис Мастер" in pitch_no_site
-    assert "сайт под ключ" in pitch_no_site
+    assert "в карточке не указан сайт" in pitch_no_site  # a source says so, not more than that
+    assert "нет собственного сайта" not in pitch_no_site
+    no_site_lead.site_source = "manual"
+    assert "сайт под ключ" in generate_pitch_text(no_site_lead)  # a person has checked
 
 
 def test_keyboards_callback_data_limits():

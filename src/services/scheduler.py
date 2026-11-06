@@ -13,12 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.database.models import CollectorState, ImportLog, ProviderState
 from src.database.repo import (
+    PoolStats,
     count_imported_leads,
     count_new_leads,
     count_new_leads_with_contacts,
     enable_provider,
     get_collector_state,
     get_last_import,
+    get_pool_stats,
     get_provider_states,
 )
 from src.services.collector import CollectorConfig, CollectResult, collect_leads
@@ -120,6 +122,7 @@ class CollectorStatus:
     pool_with_contacts: int = 0
     batch_size: int = 0
     dgis_key: DgisKeyStatus | None = None
+    pool_stats: PoolStats | None = None
 
 
 ReportCallback = Callable[[RunReport], Awaitable[None]]
@@ -376,6 +379,7 @@ class CollectorRunner:
             provider_states = await get_provider_states(session)
             last_import = await get_last_import(session)
             imported_total = await count_imported_leads(session)
+            pool_stats = await get_pool_stats(session)
             await session.commit()
         job = self._scheduler.get_job(COLLECT_JOB_ID) if self._scheduler.running else None
         return CollectorStatus(
@@ -396,6 +400,7 @@ class CollectorRunner:
             pool_with_contacts=pool_with_contacts,
             batch_size=self._batch_size,
             dgis_key=self._dgis_key_status(provider_states.get(DGIS_PROVIDER_NAME)),
+            pool_stats=pool_stats,
         )
 
     def _dgis_key_status(self, state: ProviderState | None) -> DgisKeyStatus | None:

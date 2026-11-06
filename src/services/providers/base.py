@@ -52,7 +52,80 @@ TARGET_CATEGORIES: dict[str, dict[str, Any]] = {
         "title": "🏨 Отели и базы отдыха",
         "osm_tags": [("tourism", "hotel"), ("tourism", "guest_house"), ("tourism", "chalet")],
         "query_2gis": "отель гостиница база отдыха",
+        "high_margin": False,
+    },
+    # Small businesses, where a missing site is common and a landing page is an affordable purchase.
+    "barbershop": {
+        "title": "💈 Барбершопы",
+        "osm_tags": [("shop", "hairdresser")],
+        "query_2gis": "барбершоп",
+        "high_margin": False,
+    },
+    "nails": {
+        "title": "💅 Ногтевые студии",
+        "osm_tags": [("shop", "beauty")],
+        "query_2gis": "ногтевая студия маникюр",
+        "high_margin": False,
+    },
+    "massage": {
+        "title": "💆 Массаж",
+        "osm_tags": [("shop", "massage")],
+        "query_2gis": "массажный салон",
         "high_margin": True,
+    },
+    "tire_service": {
+        "title": "🛞 Шиномонтаж",
+        "osm_tags": [("shop", "tyres")],
+        "query_2gis": "шиномонтаж",
+        "high_margin": False,
+    },
+    "detailing": {
+        "title": "✨ Детейлинг",
+        "osm_tags": [("shop", "car_repair")],
+        "query_2gis": "детейлинг",
+        "high_margin": True,
+    },
+    "cleaning": {
+        "title": "🧹 Клининг",
+        "osm_tags": [("craft", "cleaning")],
+        "query_2gis": "клининговые услуги",
+        "high_margin": True,
+    },
+    "renovation": {
+        "title": "🏠 Ремонт квартир",
+        "osm_tags": [("craft", "builder"), ("craft", "plasterer"), ("craft", "tiler")],
+        "query_2gis": "ремонт квартир",
+        "high_margin": True,
+    },
+    "appliance_repair": {
+        "title": "🔧 Ремонт техники",
+        "osm_tags": [("craft", "electronics_repair"), ("shop", "appliance")],
+        "query_2gis": "ремонт бытовой техники",
+        "high_margin": False,
+    },
+    "workshop": {
+        "title": "🛠 Мастерские и ателье",
+        "osm_tags": [("craft", "tailor"), ("shop", "tailor"), ("craft", "shoemaker"), ("craft", "carpenter")],
+        "query_2gis": "мастерская ателье",
+        "high_margin": False,
+    },
+    "tutors": {
+        "title": "🎓 Репетиторы и студии",
+        "osm_tags": [("amenity", "language_school"), ("amenity", "music_school"), ("amenity", "dancing_school")],
+        "query_2gis": "репетитор учебная студия",
+        "high_margin": False,
+    },
+    "photographers": {
+        "title": "📷 Фотографы",
+        "osm_tags": [("craft", "photographer"), ("shop", "photo")],
+        "query_2gis": "фотограф фотостудия",
+        "high_margin": False,
+    },
+    "florists": {
+        "title": "💐 Цветочные",
+        "osm_tags": [("shop", "florist")],
+        "query_2gis": "цветочный магазин",
+        "high_margin": False,
     },
 }
 

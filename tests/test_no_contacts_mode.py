@@ -159,7 +159,8 @@ async def test_without_contacts_a_2gis_organization_is_a_lead_by_default(session
 
 
 async def test_low_margin_niche_also_qualifies_and_is_listed(session_maker) -> None:
-    assert calculate_lead_score("horeca", SITE_UNKNOWN, None, None) == 30
+    assert calculate_lead_score("beauty", SITE_UNKNOWN, None, None) == 40
+    assert calculate_lead_score("horeca", SITE_UNKNOWN, None, None) == 20
     async with session_maker() as session:
         await pipeline.save_collected_places(session, [_place(category="horeca")])
     assert len(await _saved(session_maker)) == 1
@@ -1079,8 +1080,11 @@ def test_buttons_of_a_lead_without_contacts() -> None:
     assert (rows[0][0].text, rows[0][0].url) == (OPEN_CARD_BUTTON_TEXT, "https://2gis.ru/spb/firm/1")
     statuses = [button.text for row in rows[1:3] for button in row]
     assert statuses == ["Написал", "Ответили", "Отказ", "Нет ответа"]
-    assert (rows[3][0].text, rows[3][0].callback_data) == (ADD_PHONE_BUTTON_TEXT, "lp:1")
-    assert all(len(button.callback_data.encode()) <= 64 for row in rows[1:] for button in row)
+    assert [button.callback_data for button in rows[3]] == ["sv:1:yes", "sv:1:no"]
+    assert rows[4][0].url.startswith("https://yandex.ru/search/")
+    assert (rows[5][0].text, rows[5][0].callback_data) == (ADD_PHONE_BUTTON_TEXT, "lp:1")
+    callbacks = [button.callback_data for row in rows[1:] for button in row if button.url is None]
+    assert all(len(data.encode()) <= 64 for data in callbacks)
 
 
 def test_known_phone_is_shown_as_before_and_needs_no_button_to_add_it() -> None:
@@ -1088,7 +1092,7 @@ def test_known_phone_is_shown_as_before_and_needs_no_button_to_add_it() -> None:
     card = format_issued_lead(lead)
     assert "📞 <b>Телефон:</b> +78125550101" in card
     assert "смотри в карточке" not in card
-    assert "❌ нет" in card
+    assert "Сайта нет (по данным источника)" in card
     assert ADD_PHONE_BUTTON_TEXT not in [button.text for row in _buttons(lead) for button in row]
 
 

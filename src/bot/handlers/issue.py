@@ -17,7 +17,13 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardMarkup, LinkPreviewOptions, Message
 
 from src.bot.chats import is_group_chat
-from src.bot.formatters import format_funnel_stats, format_issued_lead, format_msk_time, format_user_label
+from src.bot.formatters import (
+    format_funnel_stats,
+    format_issued_lead,
+    format_msk_time,
+    format_user_label,
+    site_verdict_text,
+)
 from src.bot.keyboards import (
     LEAD_OUTCOMES,
     STALE_BUTTON_TEXT,
@@ -28,16 +34,21 @@ from src.bot.keyboards import (
 from src.config import settings
 from src.database.models import Lead
 from src.database.repo import (
+    IssueRules,
     async_session_maker,
     count_issued_leads,
     count_new_leads,
+    count_unknown_site_leads,
     get_contact_status_counts,
+    get_pool_stats,
     get_status_counts,
     issue_next_leads,
     return_undelivered_leads,
     set_contact_status,
     set_lead_phone,
+    set_site_verdict,
 )
+from src.services.chains import rescore_new_leads
 from src.services.normalize import parse_manual_phone
 from src.services.scheduler import TRIGGER_BATCH, CollectorRunner, TopupDecision, TopupOutcome
 
@@ -126,10 +137,25 @@ def _describe_topup(decision: TopupDecision) -> str:
     return "⏸ Автосбор выключен. Запустить вручную: /collect_now"
 
 
+def _describe_held_back(held_back: int, unknown: int, rules: IssueRules, size: int) -> list[str]:
+    """Why leads still in the pool did not go into a short batch."""
+    lines: list[str] = []
+    waiting = 0 if rules.issue_unknown else unknown
+    if waiting:
+        lines.append(f"⏳ <b>{waiting}</b> ждут проверки сайта: сейчас такие лиды не выдаются (LEADS_ISSUE_UNKNOWN).")
+    if held_back > waiting:
+        lines.append(
+            f"⚖️ Ещё <b>{held_back - waiting}</b> не вошли в пачку: "
+            f"одна ниша занимает не больше {rules.niche_cap(size)} из {size}."
+        )
+    return lines
+
+
 async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> None:
     size = settings.LEADS_BATCH_SIZE
+    rules = IssueRules(issue_unknown=settings.LEADS_ISSUE_UNKNOWN, max_niche_share=settings.LEADS_MAX_NICHE_SHARE)
     async with async_session_maker() as session:
-        leads = await issue_next_leads(session, size)
+        leads = await issue_next_leads(session, size, rules)
 
     in_group = is_group_chat(message)
     pause = GROUP_MESSAGE_PAUSE_SECONDS if in_group else MESSAGE_PAUSE_SECONDS
@@ -162,6 +188,7 @@ async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> N
 
     async with async_session_maker() as session:
         pool_size = await count_new_leads(session)
+        unknown = await count_unknown_site_leads(session)
 
     delivered = len(leads) - len(undelivered)
     lines: list[str] = []
@@ -169,11 +196,22 @@ async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> N
         lines.append(f"✅ Выдано лидов: <b>{delivered}</b>. В запасе: <b>{pool_size}</b>.")
     if undelivered:
         lines.append(f"⚠️ Не удалось отправить: <b>{len(undelivered)}</b>, они остались в запасе.")
+    # What was held back by the rules: leads that failed to be delivered are reported above.
+    held_back = pool_size - len(undelivered) if len(leads) < size else 0
     if len(leads) < size:
         if not leads:
-            lines.append("📭 Новых лидов в запасе нет.")
+            lines.append("📭 Подходящих лидов сейчас нет." if held_back else "📭 Новых лидов в запасе нет.")
         else:
-            lines.append(f"В запасе было меньше {size}, выдал сколько есть.")
+            lines.append(
+                f"Подходящих было меньше {size}, выдал сколько есть."
+                if held_back
+                else f"В запасе было меньше {size}, выдал сколько есть."
+            )
+    if held_back > 0:
+        # More leads would not change the rules: the pool is refilled only if it is really low.
+        lines += _describe_held_back(held_back, unknown, rules, size)
+        await collector_runner.check_pool()
+    elif len(leads) < size:
         lines.append(_describe_topup(await collector_runner.request_topup(TRIGGER_BATCH)))
     else:
         await collector_runner.check_pool()
@@ -242,6 +280,38 @@ async def handle_lead_status(callback: CallbackQuery) -> None:
             )
         except TelegramAPIError as exc:
             # The status is saved; only the card on the screen is out of date.
+            logger.warning("Could not update the card of lead %s: %s", lead_id, exc)
+
+
+@router.callback_query(F.data.startswith("sv:"))
+async def handle_site_verdict(callback: CallbackQuery) -> None:
+    """Save what a person found out about the site of a handed-out lead and show it on the card."""
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3 or not parts[1].isdigit() or parts[2] not in ("yes", "no"):
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    lead_id, has_site = int(parts[1]), parts[2] == "yes"
+
+    async with async_session_maker() as session:
+        lead, changed = await set_site_verdict(session, lead_id, has_site)
+    if lead is None:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    if not changed:
+        await callback.answer("Эта отметка уже стоит")
+        return
+
+    await callback.answer(site_verdict_text(has_site))
+    if isinstance(callback.message, Message):
+        try:
+            await callback.message.edit_text(
+                format_issued_lead(lead),
+                reply_markup=get_issued_lead_keyboard(lead),
+                parse_mode="HTML",
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+        except TelegramAPIError as exc:
+            # The verdict is saved; only the card on the screen is out of date.
             logger.warning("Could not update the card of lead %s: %s", lead_id, exc)
 
 
@@ -330,6 +400,16 @@ async def handle_phone_reply(message: Message) -> None:
         logger.warning("Could not update the card of lead %s: %s", prompt.lead_id, exc)
 
 
+@router.message(Command("rescore"))
+async def handle_rescore(message: Message) -> None:
+    """Score the pool by the current weights: leads saved earlier keep their old score until then."""
+    async with async_session_maker() as session:
+        total, changed = await rescore_new_leads(session, settings)
+    await _answer_safely(
+        message, f"🔢 Лидов в запасе пересчитано: <b>{total}</b>, оценка изменилась у <b>{changed}</b>."
+    )
+
+
 @router.callback_query(F.data == "panel:stats")
 async def handle_stats_button(callback: CallbackQuery) -> None:
     """The same as /leads_stats from an inline button."""
@@ -347,8 +427,9 @@ async def handle_leads_stats(message: Message) -> None:
         counts = await get_status_counts(session)
         contact_counts = await get_contact_status_counts(session)
         issued_total = await count_issued_leads(session)
+        pool_stats = await get_pool_stats(session)
     await message.answer(
-        format_funnel_stats(counts, contact_counts, issued_total),
+        format_funnel_stats(counts, contact_counts, issued_total, pool_stats),
         reply_markup=get_full_export_keyboard(),
         parse_mode="HTML",
     )

@@ -203,7 +203,11 @@ def batch_env(session_maker, monkeypatch: pytest.MonkeyPatch):
     """Handlers use the module-level session maker; pauses are removed."""
     monkeypatch.setattr(issue, "async_session_maker", session_maker)
     monkeypatch.setattr(issue, "MESSAGE_PAUSE_SECONDS", 0)
-    monkeypatch.setattr(issue, "settings", Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=1, LEADS_BATCH_SIZE=3))
+    monkeypatch.setattr(
+        issue,
+        "settings",
+        Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=1, LEADS_BATCH_SIZE=3, LEADS_MAX_NICHE_SHARE=1),
+    )
     issue._issuing_to.clear()
     return session_maker
 
@@ -444,7 +448,7 @@ def test_card_has_every_requested_field_and_escapes_html() -> None:
 def test_card_without_contacts_or_safe_link() -> None:
     card = format_issued_lead(_lead(1, source_url="javascript:alert(1)", map_url=None))
     assert "href" not in card
-    assert "❌ нет" in card
+    assert "Сайта нет (по данным источника)" in card
 
 
 def test_card_never_exceeds_the_telegram_limit() -> None:
@@ -493,7 +497,8 @@ async def test_status_button_saves_the_status_and_updates_the_card(batch_env, st
     callback.answer.assert_awaited_once_with(f"Статус: {LEAD_OUTCOMES[status]}")
     edit = callback.message.edit_text.await_args
     assert "Организация 1" in edit.args[0]
-    marked = [b.text for row in edit.kwargs["reply_markup"].inline_keyboard for b in row if b.text.startswith("✅")]
+    buttons = [b for row in edit.kwargs["reply_markup"].inline_keyboard for b in row]
+    marked = [b.text for b in buttons if b.text.startswith("✅") and (b.callback_data or "").startswith("ls:")]
     assert marked == [f"✅ {LEAD_OUTCOMES[status]}"]
 
 
@@ -600,10 +605,11 @@ async def test_csv_export_gets_new_columns_at_the_end(session_maker, monkeypatch
     document = callback.message.answer_document.await_args.kwargs["document"]
     header, row = list(csv.reader(io.StringIO(document.data.decode("utf-8-sig")), delimiter=";"))[:2]
     assert header[:2] == ["ID", "Источник"]
-    assert header[-6:] == [
+    assert header[-10:-4] == [
         "Email", "Карточка источника", "Дата выдачи (МСК)", "Результат контакта", "Кто отметил", "Когда отмечено (МСК)",
     ]
-    assert row[-4] != ""
+    assert header[-4:] == ["Найденный сайт", "Уверенность", "Откуда статус сайта", "Сайт проверен (МСК)"]
+    assert row[-8] != ""
 
 
 def test_main_menu_has_the_batch_button() -> None:
@@ -903,10 +909,24 @@ OLD_SCHEMA = [
     """,
 ]
 
-NEW_COLUMNS = {"email", "source_url", "issued_at", "contact_status", "contact_status_by_id", "contact_status_by"}
+NEW_COLUMNS = {
+    "email",
+    "source_url",
+    "issued_at",
+    "contact_status",
+    "contact_status_by_id",
+    "contact_status_by",
+    "site_url",
+    "site_confidence",
+    "site_source",
+    "site_checked_at",
+    "is_chain",
+}
 
 # The rollback documented in README.md.
 ROLLBACK_SCHEMA = [
+    "UPDATE leads SET crm_status = 'rejected' WHERE site_status = 'site_found' AND crm_status = 'new'",
+    "UPDATE leads SET site_status = 'unknown' WHERE site_status IN ('site_found', 'site_uncertain', 'site_not_found')",
     "UPDATE leads SET crm_status = 'rejected' WHERE contact_status = 'rejected'",
     "UPDATE leads SET crm_status = 'in_work' WHERE crm_status = 'issued'",
     "DROP INDEX ix_leads_crm_status_created_at",
@@ -920,6 +940,11 @@ ROLLBACK_SCHEMA = [
     "ALTER TABLE leads DROP COLUMN exported_at",
     "ALTER TABLE leads DROP COLUMN imported_at",
     "ALTER TABLE leads DROP COLUMN rubric",
+    "ALTER TABLE leads DROP COLUMN site_url",
+    "ALTER TABLE leads DROP COLUMN site_confidence",
+    "ALTER TABLE leads DROP COLUMN site_source",
+    "ALTER TABLE leads DROP COLUMN site_checked_at",
+    "ALTER TABLE leads DROP COLUMN is_chain",
     "DROP TABLE import_log",
     "DROP TABLE collector_state",
     "DROP TABLE provider_state",
@@ -1034,3 +1059,19 @@ async def test_results_stored_in_crm_status_by_the_earlier_version_move_to_conta
         ("x_14", "rejected", None),
         ("x_15", "issued", None),
     ]
+
+
+async def test_rollback_leaves_no_new_site_status_for_the_old_version(old_database) -> None:
+    await init_db(old_database)
+    async with old_database.begin() as conn:
+        await conn.execute(text("UPDATE leads SET site_status = 'site_found' WHERE external_id = 'osm_1'"))
+        await conn.execute(text("UPDATE leads SET site_status = 'site_not_found' WHERE external_id = 'osm_2'"))
+    async with old_database.begin() as conn:
+        for statement in ROLLBACK_SCHEMA:
+            await conn.execute(text(statement))
+        rows = dict((await conn.execute(text("SELECT external_id, site_status FROM leads"))).all())
+        crm = dict((await conn.execute(text("SELECT external_id, crm_status FROM leads"))).all())
+    assert rows == {"osm_1": "unknown", "osm_2": "unknown"}
+    assert crm == {"osm_1": "rejected", "osm_2": "in_work"}  # a site was found: it must not go back to the pool
+    assert "site_url" not in await _columns(old_database)
+    assert "is_chain" not in await _columns(old_database)

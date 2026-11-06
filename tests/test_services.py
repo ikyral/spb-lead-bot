@@ -19,19 +19,19 @@ def test_score_has_site_returns_zero() -> None:
 
 
 def test_score_dead_site_with_phone_and_high_margin() -> None:
-    """dead_site (45) + phone (25) + high_margin (15) = 85."""
+    """dead_site (60) + other phone (15) + high_margin (10) = 85."""
     score = calculate_lead_score("dentist_clinic", "dead_site", "+7 (812) 555-01-01", None, True)
     assert score == 85
 
 
 def test_score_no_site_without_contacts_clamped_to_zero() -> None:
-    """no_site (25) - neither phone nor socials (30) = -5 -> clamped to 0."""
-    assert calculate_lead_score("horeca", "no_site", None, None, False) == 0
-    assert calculate_lead_score("unknown", "no_site", "   ", "", False) == 0
+    """no_site (50) - no contacts (35) = 15, not enough to be saved; a low priority niche clamps lower."""
+    assert calculate_lead_score("horeca", "no_site", None, None, False) == 5
+    assert calculate_lead_score("unknown", "no_site", "   ", "", False) == 15
 
 
 def test_score_dead_site_full_contacts_and_margin() -> None:
-    """dead_site (45) + phone (25) + socials (15) + high_margin (15) = 100."""
+    """dead_site (60) + mobile (25) + socials (10) + high_margin (10) = 105 -> clamped to 100."""
     score = calculate_lead_score(
         category_key="auto_repair",
         site_status="dead_site",
@@ -46,16 +46,16 @@ def test_score_social_only_combinations() -> None:
     """Verify various combinations for social_only."""
     # social_only (35) + phone (25) + socials (15) + high_margin (15) = 90
     assert calculate_lead_score("beauty", "social_only", "+7999", "vk.com/b", True) == 90
-    # social_only (35) + phone (25) = 60
+    # social_only (55) + other phone (15) + low priority (-10) = 60
     assert calculate_lead_score("horeca", "social_only", "+7999", None, False) == 60
-    # social_only (35) + socials (15) = 50
-    assert calculate_lead_score("horeca", "social_only", None, "t.me/cafe", False) == 50
-    # social_only (35) - 30 (no contacts) = 5
-    assert calculate_lead_score("horeca", "social_only", None, None, False) == 5
+    # social_only (55) + socials (10) + low priority (-10) = 55
+    assert calculate_lead_score("horeca", "social_only", None, "t.me/cafe", False) == 55
+    # social_only (55) - 35 (no contacts) + low priority (-10) = 10
+    assert calculate_lead_score("horeca", "social_only", None, None, False) == 10
 
 
 def test_score_dead_site_no_contacts_low_margin() -> None:
-    """dead_site (45) - 30 (no contacts) = 15."""
+    """dead_site (60) - 35 (no contacts) + low priority (-10) = 15."""
     assert calculate_lead_score("horeca", "dead_site", None, None, False) == 15
 
 
@@ -85,7 +85,7 @@ def test_score_high_margin_keywords_detection(category: str) -> None:
         socials=None,
         high_margin=False,
     )
-    assert score == 85
+    assert score == 95
 
 
 @pytest.mark.parametrize(
@@ -104,7 +104,7 @@ def test_score_high_margin_keywords_detection(category: str) -> None:
 def test_small_repair_shops_get_no_high_margin_bonus(category: str) -> None:
     """'ремонт' is a high-margin keyword (renovation, car repair), but small repair shops are not."""
     # dead_site (45) + phone (25), no margin bonus = 70
-    assert calculate_lead_score(category, "dead_site", "+79991112233", None, False) == 70
+    assert calculate_lead_score(category, "dead_site", "+79991112233", None, False) == 85
     assert is_high_margin_category(category) is False
 
 

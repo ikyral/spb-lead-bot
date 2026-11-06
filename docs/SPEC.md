@@ -6,6 +6,15 @@ Find local businesses in Saint Petersburg (SPb) that need website development se
 - `social_only`: Only VK, Telegram, Taplink, YClients, or Dikidi link instead of a standalone website.
 - `dead_site`: Website URL returns HTTP 4xx/5xx (except 401/403/429), SSL error, DNS failure, or timeout.
 
+Site statuses (`leads.site_status`, src/services/site_status.py), in the order of handing out:
+1. `no_site`, `dead_site`, `social_only`: a source, a check of the listed address, or a person's verdict.
+2. `site_not_found`: an automatic search found nothing. Not proof of there being no site.
+3. `site_uncertain`: there is a candidate in `site_url` that may belong to someone else.
+4. `unknown`: nobody has looked, e.g. the source gives no contacts.
+
+`site_found` (a working site is known) is never handed out. `has_site` is only the answer of the checker:
+such a place is not saved. No automatic search exists yet, so nothing sets `site_not_found` or `site_uncertain`.
+
 ## 2. Database Schema (leads table in SQLite)
 - `id`: Integer, Primary Key, Autoincrement
 - `external_id`: String(128), Unique, Indexed (Format: `osm_{id}`, `2gis_{id}`, `csv_{hash}`)
@@ -17,7 +26,7 @@ Find local businesses in Saint Petersburg (SPb) that need website development se
 - `phone`: String(128), Nullable
 - `socials`: String(512), Nullable
 - `raw_website`: String(512), Nullable
-- `site_status`: String(32), Not Null (`no_site`, `social_only`, `dead_site`, `has_site`)
+- `site_status`: String(32), Not Null (see section 1)
 - `score`: Integer, Not Null, Default 0 (Range: 0..100)
 - `crm_status`: String(32), Not Null, Default `new` (`new`, `in_work`, `rejected`, `issued` for handed-out leads)
 - `map_url`: String(512), Nullable
@@ -31,6 +40,11 @@ Find local businesses in Saint Petersburg (SPb) that need website development se
 - `contact_status_at`: DateTime, Nullable (when the status was set)
 - `exported_at`: DateTime, Nullable (on a collector's computer: when the lead went into an export file)
 - `imported_at`: DateTime, Nullable (on the server: when the lead arrived from an export file)
+- `site_url`: String(512), Nullable (the known site or the candidate)
+- `site_confidence`: String(16), Nullable (`high`, `medium`, `low`)
+- `site_source`: String(16), Nullable (`2gis`, `osm`, `search`, `manual`)
+- `site_checked_at`: DateTime, Nullable (when the status was determined)
+- `is_chain`: Boolean, Nullable (part of a chain: kept for counting branches, not handed out)
 
 The `collector_state` table has a single row with the automatic collection switch, the result of the last run, the position in the search targets and the daily request count. The `import_log` table records each imported file with counts only, never the content of leads. The `provider_state` table holds blocks of each source: how many in a row, the pause after them, the automatic switch-off and the last run.
 
@@ -87,9 +101,14 @@ Format: `(south_lat, west_lon, north_lat, east_lon)`
             "title": "🏨 Отели и базы отдыха",
             "osm_tags": [("tourism", "hotel"), ("tourism", "guest_house"), ("tourism", "chalet")],
             "query_2gis": "отель гостиница база отдыха",
-            "high_margin": True
-        }
+            "high_margin": False
+        },
+        # And small businesses, with OSM tags and queries in src/services/providers/base.py:
+        # barbershop, nails, massage, tire_service, detailing, cleaning, renovation,
+        # appliance_repair, workshop, tutors, photographers, florists.
     }
+
+`hotels` and `horeca` are collected but ranked lower: see the scoring formula.
 
 ## 5. Website Classification Rules (src/services/checker.py)
 - Social/Aggregator domains (`social_only`): `vk.com`, `vk.ru`, `t.me`, `taplink.cc`, `wa.me`, `instagram.com`, `yclients.com`, `dikidi.net`, `linktr.ee`.
@@ -102,19 +121,21 @@ Format: `(south_lat, west_lon, north_lat, east_lon)`
 - Otherwise -> `has_site`.
 
 ## 6. Lead Scoring Formula (src/services/scorer.py)
-- If `site_status == "has_site"` -> return `0`.
-- Status base points:
-  - `dead_site`: `+45`
-  - `social_only`: `+35`
-  - `no_site`: `+25`
+All weights are constants at the top of the module.
+- If a working site is known (`has_site`, `site_found`) -> return `0`.
+- Status base points: `dead_site` `+60`, `social_only` `+55`, `no_site` `+50`, `site_not_found` `+40`,
+  `site_uncertain` `+35`, `unknown` `+30`.
 - Contact points:
-  - Has `phone`: `+25`
-  - Has `socials`: `+15`
-  - Neither `phone` nor `socials`: `-30`
-- Category bonus:
-  - High-margin category: `+15` (category key with `high_margin: True`, or a free-text category such as a CSV
-    `Рубрика` containing a keyword from `HIGH_MARGIN_KEYWORDS`).
+  - Russian mobile `phone`: `+25`; another `phone`: `+15`
+  - Has `socials`: `+10`
+  - Neither `phone` nor `socials`: `-35`, except unverified statuses (`unknown`, `site_uncertain`, `site_not_found`)
+- Category:
+  - High-margin category: `+10` (category key in `HIGH_MARGIN_CATEGORY_KEYS`, `high_margin: True`, or a free-text
+    category such as a CSV `Рубрика` containing a keyword from `HIGH_MARGIN_KEYWORDS`).
   - Small repair shops (`ремонт обуви / одежды / телефонов / часов / ноутбуков / бытовой техники`, incl.
     `ремонт и пошив одежды`) get no bonus: these phrases are removed before keyword matching, so
     `Ремонт под ключ`, `Кузовной ремонт` and `Автосервис, ремонт телефонов` keep it.
-- Clamp final score between `0` and `100`. Only save leads with `score >= 30`.
+  - `hotels`, `horeca`: `-10`.
+- Two branches under one name: `-10`. Three or more, or a listed brand: a chain, not handed out at all.
+- Clamp final score between `0` and `100`. Save leads with a verdict from `score >= 30`, unverified ones at any score.
+- Existing leads keep their score until an admin runs `/rescore`.

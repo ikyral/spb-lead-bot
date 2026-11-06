@@ -16,11 +16,21 @@ from src.database.models import (
     Lead,
 )
 from src.services.providers.base import TARGET_CATEGORIES
-from src.services.scorer import SITE_UNKNOWN
+from src.services.site_status import (
+    SITE_DEAD,
+    SITE_FOUND,
+    SITE_NO_SITE,
+    SITE_NOT_FOUND,
+    SITE_SOCIAL_ONLY,
+    SITE_UNCERTAIN,
+    SITE_UNKNOWN,
+    SOURCE_MANUAL,
+)
 from src.services.twogis_links import twogis_card_url
 
 if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this module must not import
     from src.database.models import ImportLog, ProviderState
+    from src.database.repo import PoolStats
     from src.services.lead_import import ImportResult
     from src.services.scheduler import CollectorStatus, DgisKeyStatus, RunReport
 
@@ -31,6 +41,17 @@ _CARD_FIELD_LIMITS: tuple[int, ...] = (300, 100)
 _MSK = timezone(timedelta(hours=3), "MSK")
 _PHONE_IN_CARD_LINE: str = "📞 <b>Телефон:</b> смотри в карточке"
 
+# Short names for the statistics, in the order of handing out. They say no more than the cards do.
+_SITE_STATUS_TITLES: dict[str, str] = {
+    SITE_NO_SITE: "Сайта нет по данным источника или вручную",
+    SITE_DEAD: "Сайт не работает",
+    SITE_SOCIAL_ONLY: "Только соцсеть",
+    SITE_NOT_FOUND: "Сайт не найден в поиске",
+    SITE_UNCERTAIN: "Возможно, сайт есть",
+    SITE_UNKNOWN: "Статус неизвестен",
+}
+# Enough to see what prevails; a list of 18 niches would hide the rest of the message.
+_NICHES_SHOWN: int = 8
 _CONTACT_STATUS_TITLES: dict[str, str] = {
     CONTACT_CONTACTED: "✍️ Написал",
     CONTACT_REPLIED: "💬 Ответили",
@@ -68,30 +89,52 @@ def format_msk_time(value: datetime | None) -> str:
     return value.astimezone(_MSK).strftime("%d.%m.%Y %H:%M МСК")
 
 
+def _site_verdict_line(lead: Lead, field_limit: int) -> str | None:
+    """
+    A line that says exactly how much is known: 'no site' only where a source or a person says so.
+
+    None for a status with a line of its own in each form of a card.
+    """
+    url = html.escape((lead.site_url or lead.raw_website or "")[:field_limit])
+    if lead.site_status == SITE_NO_SITE:
+        if lead.site_source == SOURCE_MANUAL:
+            return "✅ Сайта нет (проверено вручную)"
+        return "🌐 Сайта нет (по данным источника)"
+    if lead.site_status == SITE_NOT_FOUND:
+        return "🌐 Сайт не найден в поиске"
+    if lead.site_status == SITE_UNCERTAIN:
+        return f"🌐 Возможно, сайт: {url}, проверьте" if url else "🌐 Возможно, сайт есть, проверьте"
+    if lead.site_status == SITE_UNKNOWN:
+        return "🌐 Статус неизвестен"
+    if lead.site_status == SITE_FOUND:
+        return f"🌐 Сайт есть ({url})" if url else "🌐 Сайт есть"
+    return None
+
+
+def site_verdict_text(has_site: bool) -> str:
+    """What a person sees after giving a verdict about the site."""
+    return "Сайт есть: лид больше не будет выдаваться" if has_site else "Сайта нет: отмечено"
+
+
 def format_lead_card(lead: Lead) -> str:
     """Format business lead details as an HTML message for Telegram."""
     category_title = TARGET_CATEGORIES.get(lead.category, {}).get("title", lead.category)
     safe_name = html.escape(lead.name)
     safe_category = html.escape(category_title)
 
-    if lead.site_status == "dead_site":
-        safe_site = html.escape(lead.raw_website or "не указан")
-        status_line = f"⚠️ Мертвый сайт / ошибка домена ({safe_site})"
-    elif lead.site_status == "social_only":
-        status_line = "📱 Только соцсеть вместо сайта"
-    elif lead.site_status == "no_site":
-        status_line = "❌ Нет сайта"
-    elif lead.site_status == SITE_UNKNOWN:
-        status_line = "❔ Смотри в карточке"
-    else:
-        safe_site = html.escape(lead.raw_website or "")
-        status_line = f"🌐 Есть сайт ({safe_site})"
+    site_line = _site_verdict_line(lead, _CARD_FIELD_LIMITS[0])
+    if site_line is None:
+        if lead.site_status == SITE_DEAD:
+            safe_site = html.escape(lead.raw_website or "не указан")
+            status_line = f"⚠️ Мертвый сайт / ошибка домена ({safe_site})"
+        elif lead.site_status == SITE_SOCIAL_ONLY:
+            status_line = "📱 Только соцсеть вместо сайта"
+        else:
+            safe_site = html.escape(lead.raw_website or "")
+            status_line = f"🌐 Есть сайт ({safe_site})"
+        site_line = f"🌐 <b>Статус сайта:</b> {status_line}"
 
-    lines = [
-        f"🏢 <b>{safe_name}</b> | {safe_category}",
-        f"🔥 {lead.score}/100",
-        f"🌐 <b>Статус сайта:</b> {status_line}",
-    ]
+    lines = [f"🏢 <b>{safe_name}</b> | {safe_category}", f"🔥 {lead.score}/100", site_line]
 
     if lead.district:
         lines.append(f"📍 <b>Район:</b> {html.escape(lead.district)}")
@@ -110,13 +153,14 @@ def format_lead_card(lead: Lead) -> str:
 
 
 def _site_line(lead: Lead, field_limit: int) -> str:
+    verdict = _site_verdict_line(lead, field_limit)
+    if verdict is not None:
+        return verdict
     site = html.escape((lead.raw_website or "")[:field_limit])
-    if lead.site_status == "dead_site":
+    if lead.site_status == SITE_DEAD:
         return f"🌐 <b>Сайт:</b> ⚠️ не работает ({site or 'адрес не указан'})"
-    if lead.site_status == "social_only":
+    if lead.site_status == SITE_SOCIAL_ONLY:
         return f"🌐 <b>Сайт:</b> 📱 только соцсеть{f' ({site})' if site else ''}"
-    if lead.site_status == "no_site":
-        return "🌐 <b>Сайт:</b> ❌ нет"
     return f"🌐 <b>Сайт:</b> {site}"
 
 
@@ -146,9 +190,7 @@ def _issued_card(lead: Lead, field_limit: int) -> str:
         lines.append(_PHONE_IN_CARD_LINE)
     if lead.email:
         lines.append(f"✉️ <b>Email:</b> {field(lead.email)}")
-    # Unknown means just that: "no site" here would be a claim nobody has checked.
-    if lead.site_status != SITE_UNKNOWN:
-        lines.append(_site_line(lead, field_limit))
+    lines.append(_site_line(lead, field_limit))
     if lead.socials:
         lines.append(f"🔗 <b>Соцсети:</b> {field(lead.socials)}")
     link = None if on_button else _card_link_line(lead)
@@ -171,13 +213,45 @@ def format_issued_lead(lead: Lead) -> str:
     return text
 
 
-def format_funnel_stats(counts: dict[str, int], contact_counts: dict[str, int], issued_total: int) -> str:
+def _pool_stats_lines(stats: PoolStats) -> list[str]:
+    """The pool by status of the site and by niche, how many wait for a check, how often sources were wrong."""
+    lines = ["", "<b>Запас по статусу сайта:</b>"]
+    lines += [
+        f"• {title}: <b>{stats.by_site[status]}</b>"
+        for status, title in _SITE_STATUS_TITLES.items()
+        if stats.by_site.get(status)
+    ]
+    if not stats.by_site:
+        lines.append("• пусто")
+    lines.append(f"⏳ Ждут проверки сайта: <b>{stats.waiting_for_check}</b>")
+    lines.append(f"🌐 Вердиктов «Сайт есть» вручную: <b>{stats.manual_site_found}</b>")
+    if stats.chains:
+        lines.append(f"🔗 Сетей не выдаётся: <b>{stats.chains}</b>")
+    if stats.by_niche:
+        lines += ["", "<b>Запас по нишам:</b>"]
+        niches = sorted(stats.by_niche.items(), key=lambda item: (-item[1], item[0]))
+        for key, count in niches[:_NICHES_SHOWN]:
+            title = str(TARGET_CATEGORIES.get(key, {}).get("title", key))
+            lines.append(f"• {html.escape(title)}: <b>{count}</b>")
+        if len(niches) > _NICHES_SHOWN:
+            lines.append(f"• другие: <b>{sum(count for _, count in niches[_NICHES_SHOWN:])}</b>")
+    return lines
+
+
+def format_funnel_stats(
+    counts: dict[str, int],
+    contact_counts: dict[str, int],
+    issued_total: int,
+    pool_stats: PoolStats | None = None,
+) -> str:
     """Format the pool size and what happened to the handed-out leads."""
     waiting = max(0, issued_total - sum(contact_counts.values()))
+    # Leads with a known site and chains are new too, but they will never be handed out.
+    pool_size = sum(pool_stats.by_site.values()) if pool_stats is not None else counts.get(STATUS_NEW, 0)
     lines = [
         "📊 <b>Лиды:</b>\n",
         f"• 📈 Всего: <b>{sum(counts.values())}</b>",
-        f"• 📦 Новых в запасе: <b>{counts.get(STATUS_NEW, 0)}</b>",
+        f"• 📦 Новых в запасе: <b>{pool_size}</b>",
         f"• 📤 Выдано всего: <b>{issued_total}</b>",
         f"• ⏳ Выдано, ждут действия: <b>{waiting}</b>",
         f"• ✍️ Написал: <b>{contact_counts.get(CONTACT_CONTACTED, 0)}</b>",
@@ -187,6 +261,8 @@ def format_funnel_stats(counts: dict[str, int], contact_counts: dict[str, int], 
     ]
     if counts.get(STATUS_IN_WORK):
         lines.append(f"• 💼 В работе: <b>{counts[STATUS_IN_WORK]}</b>")
+    if pool_stats is not None:
+        lines += _pool_stats_lines(pool_stats)
     return "\n".join(lines)
 
 
@@ -282,6 +358,10 @@ def _dgis_key_lines(key: DgisKeyStatus) -> list[str]:
     return lines
 
 
+def _site_stock_lines(status: CollectorStatus) -> list[str]:
+    return _pool_stats_lines(status.pool_stats) if status.pool_stats is not None else []
+
+
 def _provider_line(name: str, state: ProviderState | None, now: datetime) -> str:
     safe_name = html.escape(name)
     if state is None:
@@ -304,6 +384,7 @@ def format_collector_status(status: CollectorStatus) -> str:
             "🤖 <b>Сбор лидов</b>\n",
             "Режим: <b>внешний сборщик</b>. Этот сервер сам не собирает, лиды приходят файлами.",
             *_stock_lines(status),
+            *_site_stock_lines(status),
             *(_dgis_key_lines(status.dgis_key) if status.dgis_key else []),
             *_import_lines(status.last_import, status.imported_total),
         ])
@@ -324,6 +405,7 @@ def format_collector_status(status: CollectorStatus) -> str:
     ]
     lines.append("")
     lines += _stock_lines(status)
+    lines += _site_stock_lines(status)
     lines.append(f"Запросов за сутки: {status.requests_today} из {status.max_requests_per_day}")
     if status.dgis_key:
         lines += _dgis_key_lines(status.dgis_key)
@@ -352,7 +434,7 @@ def format_collector_status(status: CollectorStatus) -> str:
 def generate_pitch_text(lead: Lead) -> str:
     """Generate ready personalized outreach text for the business owner."""
     location_str = f"в районе {lead.district}" if lead.district else "в Санкт-Петербурге"
-    if lead.site_status == "dead_site":
+    if lead.site_status == SITE_DEAD:
         website = lead.raw_website or "указанный на картах"
         return (
             f"Здравствуйте! Обратил внимание на карточку вашей компании «{lead.name}» на картах СПб. "
@@ -363,7 +445,7 @@ def generate_pitch_text(lead: Lead) -> str:
             "Подскажите, актуален ли для вас этот вопрос?"
         )
 
-    if lead.site_status == "social_only":
+    if lead.site_status == SITE_SOCIAL_ONLY:
         return (
             f"Здравствуйте! У компании «{lead.name}» отличная карточка {location_str}, "
             "но вместо полноценного сайта указана только соцсеть. "
@@ -374,8 +456,17 @@ def generate_pitch_text(lead: Lead) -> str:
             "Было бы интересно взглянуть?"
         )
 
-    if lead.site_status == SITE_UNKNOWN:
-        # Nobody has checked the site yet: the text must not claim there is none.
+    if lead.site_status != SITE_NO_SITE or lead.site_source != SOURCE_MANUAL:
+        if lead.site_status == SITE_NO_SITE:
+            # A source only lists no site: that can be said to the owner, but not more than that.
+            return (
+                f"Здравствуйте! Нашел компанию «{lead.name}» на картах Санкт-Петербурга: в карточке не указан сайт. "
+                "Я разрабатываю сайты для локального бизнеса: они приводят клиентов из поиска Яндекса и Google "
+                "и повышают доверие к компании.\n\n"
+                f"Если сайта у «{lead.name}» пока нет или он устарел, могу предложить варианты под ваши задачи. "
+                "Удобно обсудить?"
+            )
+        # Nobody has confirmed anything about the site: the text must not claim there is none.
         return (
             f"Здравствуйте! Нашел компанию «{lead.name}» на картах Санкт-Петербурга. "
             "Я разрабатываю сайты для локального бизнеса: они приводят клиентов из поиска Яндекса и Google "

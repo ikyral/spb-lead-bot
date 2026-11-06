@@ -83,18 +83,18 @@ async def test_csv_pipeline_full_integration(
 
     dentist = leads_by_name["Стоматология Улыбка СПб"]
     assert dentist.site_status == "dead_site"
-    assert dentist.score == 100
+    assert dentist.score == 95  # 60 dead + 15 landline + 10 socials + 10 margin
     assert dentist.crm_status == "new"
     assert dentist.district == "Петроградский"
 
     detailing = leads_by_name["Детейлинг Гараж 78"]
     assert detailing.site_status == "social_only"
-    assert detailing.score == 90
+    assert detailing.score == 100  # 55 social only + 25 mobile + 10 socials + 10 margin
     assert detailing.crm_status == "new"
 
     furniture = leads_by_name["Студия мебели ЛофтНева"]
     assert furniture.site_status == "no_site"
-    assert furniture.score == 80
+    assert furniture.score == 85  # 50 no site + 15 landline + 10 socials + 10 margin
     assert furniture.crm_status == "new"
 
     # Verify CRM stats
