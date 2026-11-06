@@ -14,7 +14,9 @@ Exit codes: 0 done, 1 error, 2 a source refused or is waiting after a refusal, 1
 import argparse
 import asyncio
 import logging
+import re
 import sys
+import traceback
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
@@ -23,7 +25,7 @@ from pathlib import Path
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from src.config import Settings, resolve_path, settings, settings_error
+from src.config import Settings, SettingsError, resolve_path, settings, settings_error
 from src.database.models import ProviderState
 from src.database.repo import enable_provider, get_provider_states, init_db
 from src.services.assisted_runs import CHECK_MAX_PAGES, ENRICH_MAX_CARDS, CheckReport, EnrichRun, run_check, run_enrich
@@ -46,6 +48,12 @@ EXIT_INTERRUPTED = 130
 
 SCRAPER_PROVIDER_NAME = "2gis_scraper"
 CHECK_LOG_PATH = "logs/scraper_check.json"
+ERROR_LOG_PATH = "logs/collector_errors.log"
+
+_HIDDEN = "<скрыто>"
+# The query of a link holds API keys and search words, the part before '@' a password of a database.
+_URL_QUERY_RE = re.compile(r"(https?://[^\s'\"?]*)\?[^\s'\"]*")
+_URL_PASSWORD_RE = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -160,7 +168,7 @@ async def _collect(
     twogis_key = current.TWOGIS_API_KEY.get_secret_value() if current.TWOGIS_API_KEY else None
     if assisted and SCRAPER_PROVIDER_NAME not in config.providers:
         # Otherwise the run would quietly go without a browser and without the mode that was asked for.
-        raise ValueError(
+        raise SettingsError(
             f"режим с участием человека нужен парсеру: добавьте {SCRAPER_PROVIDER_NAME} в COLLECTOR_PROVIDERS"
         )
     if not current.SCRAPER_HEADLESS and not assisted:
@@ -353,6 +361,31 @@ async def _run(args: argparse.Namespace, current: Settings) -> int:
     return EXIT_OK
 
 
+def _without_secrets(text: str, current: Settings) -> str:
+    """What an error says may repeat a key or a link with it, and this text is printed and stays in a file."""
+    for secret in (current.BOT_TOKEN, current.TWOGIS_API_KEY, current.DGIS_API_KEY):
+        value = secret.get_secret_value().strip() if secret else ""
+        if value:
+            text = text.replace(value, _HIDDEN)
+    text = _URL_PASSWORD_RE.sub(f"://{_HIDDEN}@", text)
+    return _URL_QUERY_RE.sub(rf"\1?{_HIDDEN}", text)
+
+
+def _report_unexpected(exc: Exception, current: Settings) -> None:
+    """A bug or a failure nobody foresaw: say what it is, and keep the details for whoever fixes it."""
+    print(f"Непредвиденная ошибка: {type(exc).__name__}: {_without_secrets(str(exc), current)}")
+    details = _without_secrets("".join(traceback.format_exception(exc)), current)
+    path = resolve_path(ERROR_LOG_PATH)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as file:
+            file.write(f"--- {datetime.now(UTC).isoformat(timespec='seconds')}\n{details}\n")
+    except OSError as write_error:
+        print(f"Подробности не записаны: {write_error.strerror or type(write_error).__name__}.")
+        return
+    print(f"Подробности: {path}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     # Consoles and redirected logs on Windows use legacy encodings; Cyrillic must survive both.
@@ -373,7 +406,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_ERROR
     try:
         return asyncio.run(_run(args, settings))
-    except ValueError as exc:
+    except SettingsError as exc:
         print(f"Ошибка настроек: {exc}")
         return EXIT_ERROR
     except KeyboardInterrupt:
@@ -384,4 +417,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print("Прервано. Браузер закрыт, найденное до этого момента не сохранено.")
         return EXIT_INTERRUPTED
+    except Exception as exc:  # noqa: BLE001 - the last line of defense: reported and saved, with the traceback
+        _report_unexpected(exc, settings)
+        return EXIT_ERROR
 

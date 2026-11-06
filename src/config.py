@@ -10,6 +10,10 @@ from sqlalchemy.engine import make_url
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+class SettingsError(ValueError):
+    """The settings cannot work. The message is meant for the owner; any other ValueError is a bug."""
+
+
 class Settings(BaseSettings):
     """Application configuration loaded from environment variables and .env file."""
 
