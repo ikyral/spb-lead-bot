@@ -42,6 +42,10 @@ def _ssl_context() -> ssl.SSLContext:
     return httpx.create_ssl_context()
 
 
+FORMAT_NOT_RECOGNIZED_TEXT: str = "Формат страницы не распознан: нужна правка парсера, это не блокировка"
+NO_CONNECTION_TEXT: str = "Нет связи с сайтом 2ГИС: проверьте сеть и VPN, это не засчитано как посещение"
+
+
 class ProviderError(Exception):
     """A request to an external API failed."""
 
@@ -70,9 +74,25 @@ class ProviderBudgetExhausted(ProviderError):
     """The provider has used up its own limit for this run. Not a failure."""
 
 
+class ProviderStoppedError(ProviderError):
+    """Reading stopped for a reason that says nothing about how the site treats the bot. Not a block."""
+
+    def __init__(self, reason: str, partial: list[Any] | None = None) -> None:
+        super().__init__(reason)
+        self.partial = partial or []
+
+
+class ProviderFormatError(ProviderStoppedError):
+    """A page loaded normally, but the code does not understand what is in it."""
+
+
+class ProviderNoConnectionError(ProviderStoppedError):
+    """The site did not answer anything at all: the problem is on this side."""
+
+
 class ProviderBlockedError(ProviderError):
     """
-    The site refused automated access: captcha, 403, 429 or an unrecognized page.
+    The site refused automated access: captcha, 403, 429 or a page that came empty.
 
     `partial` holds what was received before the refusal.
     """

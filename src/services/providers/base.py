@@ -196,6 +196,9 @@ class BaseMapProvider(ABC):
     # A person had to pass a check during this run: the source did not simply let it in,
     # so such a run says nothing about blocks being over and does not clear their count.
     human_check_passed: bool = False
+    # False: the run told nothing about the site (no connection, a format the code does not understand),
+    # so it does not use up min_hours_between_runs.
+    run_counted: bool = True
 
     @abstractmethod
     async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:

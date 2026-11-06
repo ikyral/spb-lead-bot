@@ -6,6 +6,7 @@ captcha and the state of blocks are the ones of ordinary collection. Neither wri
 on this computer: the database gets only the counters of limits and blocks.
 """
 
+import asyncio
 import json
 import logging
 from collections import Counter
@@ -22,36 +23,48 @@ from src.database.repo import (
     record_provider_block,
     record_provider_run,
     record_provider_success,
+    release_scraper_check,
+    restore_provider_run,
 )
 from src.services.api_client import (
+    FORMAT_NOT_RECOGNIZED_TEXT,
     ProviderBlockedError,
     ProviderBudgetExhausted,
     ProviderError,
+    ProviderNoConnectionError,
     ProviderTemporaryError,
 )
 from src.services.collector import SearchTarget, unavailable_reason
 from src.services.lead_export import write_enrich_result
-from src.services.lead_file import EnrichRequest, EnrichRequestItem, enrich_result_record, is_valid_result_record
+from src.services.lead_file import (
+    EnrichRequest,
+    EnrichRequestItem,
+    enrich_result_record,
+    fit_result_lists,
+    is_valid_result_record,
+)
 from src.services.providers.base import RawPlace
 from src.services.providers.twogis import parse_catalog_items
-from src.services.providers.twogis_scraper import CardContacts, TwoGisScraperProvider, read_card_contacts
+from src.services.providers.twogis_scraper import (
+    MAX_UNRECOGNIZED_IN_A_ROW,
+    CardContacts,
+    TwoGisScraperProvider,
+    read_card_contacts,
+)
 from src.services.scraper import twogis_site
 from src.services.scraper.browser import PageSnapshot
-from src.services.scraper.diagnostics import inline_state_names, json_shape, masked_url
+from src.services.scraper.diagnostics import inline_state_names, json_shape, masked_url, state_outline
 
 logger = logging.getLogger(__name__)
 
-# The diagnostics skip the rest between runs, so they are limited by themselves.
+# The diagnostics skip the rest between runs, so they are limited by themselves: SCRAPER_CHECK_MAX_PER_DAY.
 CHECK_MAX_RUNS: int = 3
 CHECK_WINDOW: timedelta = timedelta(hours=24)
 CHECK_MAX_PAGES: int = 2
 ENRICH_MAX_CARDS: int = 30
-# In a row: the format of the site has changed or the site is refusing without saying so,
-# and all the other cards would load it for nothing.
-ENRICH_MAX_UNRECOGNIZED: int = 3
+ENRICH_MAX_UNRECOGNIZED: int = MAX_UNRECOGNIZED_IN_A_ROW
 # In a row: the browser or the connection does not work, for example the window was closed.
 ENRICH_MAX_FAILURES: int = 3
-_REASON_UNRECOGNIZED: str = f"{ENRICH_MAX_UNRECOGNIZED} карточки подряд не распознаны, формат сайта другой"
 
 
 # ---------- the diagnostics ----------
@@ -74,6 +87,7 @@ class CheckReport:
     recognized: dict[str, Any] = field(default_factory=dict)
     pages: list[dict[str, Any]] = field(default_factory=list)
     path: Path | None = None
+    sample_files: list[Path] = field(default_factory=list)
 
 
 def _describe_page(kind: str, snapshot: PageSnapshot) -> dict[str, Any]:
@@ -84,6 +98,8 @@ def _describe_page(kind: str, snapshot: PageSnapshot) -> dict[str, Any]:
         "final_url": masked_url(snapshot.final_url),
         "html_length": len(snapshot.html),
         "inline_state_variables": inline_state_names(snapshot.html),
+        "page_state": {name: state_outline(value) for name, value in snapshot.page_state.items()},
+        "page_state_problems": snapshot.page_state_problems,
         "responses": [
             {
                 "url": masked_url(url),
@@ -95,6 +111,17 @@ def _describe_page(kind: str, snapshot: PageSnapshot) -> dict[str, Any]:
             for url, body in zip(snapshot.json_urls, snapshot.json_bodies, strict=True)
         ],
     }
+
+
+def _write_sample(sample_dir: Path, stamp: str, kind: str, snapshot: PageSnapshot) -> list[Path]:
+    """The page as it is, data of organizations included: this stays on this computer, see .gitignore."""
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    html_path = sample_dir / f"{stamp}_{kind}.html"
+    state_path = sample_dir / f"{stamp}_{kind}_state.json"
+    html_path.write_text(snapshot.html, encoding="utf-8", newline="\n")
+    document = {"values": snapshot.page_state, "problems": snapshot.page_state_problems}
+    state_path.write_text(json.dumps(document, ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
+    return [html_path, state_path]
 
 
 def _recognized_fields(place: RawPlace, contacts: CardContacts | None) -> dict[str, Any]:
@@ -131,12 +158,21 @@ def _write_check_file(path: Path, report: CheckReport, now: datetime) -> None:
     report.path = path
 
 
-async def _inspect(provider: TwoGisScraperProvider, target: SearchTarget, report: CheckReport, city_slug: str) -> None:
+async def _inspect(
+    provider: TwoGisScraperProvider, target: SearchTarget, report: CheckReport, city_slug: str, sample_dir: Path | None
+) -> None:
     """One search page and one card of what it shows. Anything that went wrong stays in the report."""
-    snapshot = await provider.inspect_search(target.query, target.area)
-    report.pages.append(_describe_page("search", snapshot))
 
-    data = twogis_site.read_search_bodies(snapshot.bodies_from(twogis_site.is_search_response))
+    async def keep(kind: str, page: PageSnapshot) -> None:
+        report.pages.append(_describe_page(kind, page))
+        if sample_dir is not None:
+            stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
+            report.sample_files += await asyncio.to_thread(_write_sample, sample_dir, stamp, kind, page)
+
+    snapshot = await provider.inspect_search(target.query, target.area)
+    await keep("search", snapshot)
+
+    data = twogis_site.read_search_page(snapshot)
     firm_number: str | None = None
     if data is None:
         report.search_problem = "нет ответа в ожидаемом формате: см. структуру ответов в файле"
@@ -155,8 +191,8 @@ async def _inspect(provider: TwoGisScraperProvider, target: SearchTarget, report
         return
 
     snapshot = await provider.inspect_card(firm_number)
-    report.pages.append(_describe_page("card", snapshot))
-    card = twogis_site.read_card_body(snapshot.bodies_from(twogis_site.is_card_response), firm_number)
+    await keep("card", snapshot)
+    card = twogis_site.read_card_page(snapshot, firm_number)
     if card is None:
         report.card_problem = "нет ответа в ожидаемом формате: см. структуру ответов в файле"
         return
@@ -172,6 +208,8 @@ async def run_check(
     log_path: Path,
     backoff_hours: float,
     city_slug: str,
+    max_runs: int = CHECK_MAX_RUNS,
+    sample_dir: Path | None = None,
 ) -> CheckReport:
     """
     Look at one live search page and one card, and leave a description of them in a file.
@@ -187,17 +225,23 @@ async def run_check(
         report.refused = unavailable_reason(provider, state, now)
         if report.refused is not None:
             return report
-        report.retry_at, report.runs_left = await claim_scraper_check(session, CHECK_MAX_RUNS, CHECK_WINDOW, now)
+        report.retry_at, report.runs_left = await claim_scraper_check(session, max_runs, CHECK_WINDOW, now)
     if report.retry_at is not None:
-        report.refused = f"не больше {CHECK_MAX_RUNS} проверок за 24 часа"
+        report.refused = f"не больше {max_runs} проверок за 24 часа"
         return report
 
     try:
-        await _inspect(provider, target, report, city_slug)
+        await _inspect(provider, target, report, city_slug, sample_dir)
     except ProviderBlockedError as exc:
         report.blocked = str(exc)
         async with session_maker() as session:
             await record_provider_block(session, provider.name, str(exc), backoff_hours)
+    except ProviderNoConnectionError as exc:
+        report.failed = str(exc)
+        if not report.pages:
+            async with session_maker() as session:
+                await release_scraper_check(session, now)
+            report.runs_left += 1
     except ProviderBudgetExhausted:
         report.card_problem = (
             f"лимит проверки {CHECK_MAX_PAGES} страницы исчерпан: страница после капчи открывалась заново. "
@@ -241,6 +285,11 @@ class EnrichRun:
         return self.planned - len(self.records)
 
 
+def _without_query(url: str) -> str:
+    """A link to a messenger may carry a ready text in its query: long, and not a part of the address."""
+    return url.split("?", 1)[0].split("#", 1)[0]
+
+
 def _result_record(item: EnrichRequestItem, card: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
     """
     A card that was not understood is 'parsed: false', and never a card without a site.
@@ -251,14 +300,15 @@ def _result_record(item: EnrichRequestItem, card: dict[str, Any] | None, now: da
     contacts = read_card_contacts(card) if card is not None else None
     if contacts is None:
         return empty
+    phones, socials = fit_result_lists(contacts.phones, [_without_query(url) for url in contacts.socials])
     record = enrich_result_record(
         item.source,
         item.source_id,
         now,
         parsed=True,
-        phones=contacts.phones,
+        phones=phones,
         website=contacts.website,
-        socials=contacts.socials,
+        socials=socials,
         email=contacts.email,
     )
     return record if is_valid_result_record(record) else empty
@@ -280,7 +330,8 @@ async def _read_cards(provider: TwoGisScraperProvider, items: list[EnrichRequest
         run.records.append(_result_record(item, card, datetime.now(UTC)))
         unrecognized = 0 if run.records[-1]["parsed"] else unrecognized + 1
         if unrecognized >= ENRICH_MAX_UNRECOGNIZED:
-            raise ProviderBlockedError(_REASON_UNRECOGNIZED)
+            run.failed = FORMAT_NOT_RECOGNIZED_TEXT
+            return
 
 
 async def run_enrich(
@@ -306,14 +357,18 @@ async def run_enrich(
         run.refused = unavailable_reason(provider, state, datetime.now(UTC))
         if run.refused is not None or not items:
             return
+        # Taken in advance and given back only by a run that ended normally: a killed run stays counted.
+        previous_run = state.last_run_at if state is not None else None
         await record_provider_run(session, provider.name)
 
     human_passed = False
+    counted = True
     try:
         try:
             await _read_cards(provider, items, run)
         finally:
             human_passed = provider.human_check_passed
+            counted = provider.run_counted
             if run.records:
                 # Without waiting for anything: this also runs while the run is being cancelled.
                 run.path = write_enrich_result(export_dir, run.records)
@@ -328,6 +383,9 @@ async def run_enrich(
     finally:
         await provider.close()
 
+    if not counted:
+        async with session_maker() as session:
+            await restore_provider_run(session, provider.name, previous_run)
     if run.read and not (run.blocked or run.failed or run.stopped or human_passed):
         async with session_maker() as session:
             await record_provider_success(session, provider.name)

@@ -22,6 +22,7 @@ from src.services import pipeline
 from src.services.api_client import (
     ProviderBlockedError,
     ProviderBudgetExhausted,
+    ProviderNoConnectionError,
     ProviderTemporaryError,
     ProviderUnavailableError,
 )
@@ -215,8 +216,11 @@ async def test_missing_robots_means_allowed_but_unreadable_means_stop() -> None:
     def fail(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("boom")
 
+    async def no_wait(_delay: float) -> None:
+        return None
+
     with pytest.raises(RobotsUnavailableError):
-        await fetch_robots("https://x.example", "a", _robots_client(fail))
+        await fetch_robots("https://x.example", "a", _robots_client(fail), sleep=no_wait)
 
 
 # ---------- reading pages ----------
@@ -333,8 +337,6 @@ async def test_limits_start_over_for_the_next_run() -> None:
         (CAPTCHA_PAGE, "капч"),
         (PageSnapshot(status=403, final_url=NORMAL_URL, title="", html=""), "403"),
         (PageSnapshot(status=429, final_url=NORMAL_URL, title="", html=""), "429"),
-        (_ok_page(), "не распознана"),  # a page without the expected data
-        (_ok_page({"unexpected": True}), "не распознана"),
         (_ok_page({"meta": {"code": 403}}), "403"),
     ],
 )
@@ -353,10 +355,10 @@ async def test_captcha_on_a_card_keeps_what_was_read() -> None:
     assert [place.name for place in error.value.partial] == ["Улыбка, стоматология"]
 
 
-async def test_unrecognized_card_counts_as_a_refusal() -> None:
+async def test_an_unrecognized_card_is_left_out_and_is_not_a_refusal() -> None:
     session = FakeSession([_ok_page(_json("twogis_page_search.json")), _ok_page()])
-    with pytest.raises(ProviderBlockedError, match="карточка"):
-        await _provider(session).search(QUERY, AREA)
+    result = await _provider(session).search(QUERY, AREA)
+    assert [place.name for place in result.places] == ["Улыбка, стоматология"]
 
 
 async def test_robots_forbidding_stops_before_opening_anything() -> None:
@@ -482,7 +484,7 @@ async def test_browser_errors_do_not_leak_urls() -> None:
     assert "SECRET" not in str(error.value)
 
     page.goto = AsyncMock(side_effect=PlaywrightTimeoutError("Timeout at https://x.example/?key=SECRET"))
-    with pytest.raises(ProviderTemporaryError) as error:
+    with pytest.raises(ProviderNoConnectionError) as error:  # not a single response came
         await session.visit("https://x.example/", lambda url: False)
     assert "SECRET" not in str(error.value)
     assert page.remove_listener.call_count == 2

@@ -14,6 +14,8 @@ env/
 exports/
 logs/
 data/inbox/
+# Образцы страниц 2ГИС: в них данные организаций
+data/samples/
 # Профиль браузера сборщика: cookies и другие личные данные
 data/browser_profile/
 

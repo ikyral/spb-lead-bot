@@ -1,0 +1,30 @@
+{
+  "_comment": "Made up: the structure of a real page, none of its data. A list has no contact_groups, unlike a card.",
+  "data": {
+    "user": {"phone": "+70000000000"},
+    "search": {
+      "profile": {
+        "search-1": {"meta": {"status": "success", "code": 200}, "data": {"query": "стоматология", "total": 25, "pages": 3}}
+      },
+      "pagination": {
+        "search-1": {"1": {"meta": {"status": "success", "code": 200}, "data": ["70000001018420392", "70000001018420391"]}}
+      }
+    },
+    "entity": {
+      "profile": {
+        "70000001018420391": {
+          "meta": {"status": "success", "code": 200},
+          "data": {"id": "70000001018420391", "type": "branch", "name": "Улыбка, стоматология", "address_name": "Невский проспект, 10", "point": {"lat": 59.935, "lon": 30.325}}
+        },
+        "70000001018420392": {
+          "meta": {"status": "success", "code": 200},
+          "data": {"id": "70000001018420392", "type": "branch", "name": "Дент Про", "address_name": "Садовая улица, 2", "point": {"lat": 59.93, "lon": 30.32}}
+        },
+        "70000001018420393": {
+          "meta": {"status": "success", "code": 200},
+          "data": {"id": "70000001018420393", "type": "branch", "name": "Посмотрели раньше", "address_name": "Литейный проспект, 3"}
+        }
+      }
+    }
+  }
+}

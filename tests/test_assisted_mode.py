@@ -286,7 +286,6 @@ async def test_page_limit_reached_at_the_captcha_stops_without_opening_more() ->
         (PageSnapshot(status=403, final_url=NORMAL_URL, title="Forbidden", html=""), "403"),
         (PageSnapshot(status=429, final_url=NORMAL_URL, title="Too Many", html=""), "429"),
         (replace(OK, json_bodies=[{"meta": {"code": 403}}]), "отказал"),
-        (replace(OK, json_bodies=[{"unexpected": 1}]), "не распознана"),
     ],
 )
 async def test_other_refusals_stop_at_once_without_calling_a_person(page: PageSnapshot, expected: str) -> None:
@@ -590,7 +589,6 @@ def test_nothing_touches_the_captcha_or_hides_automation(module: object) -> None
         ".keyboard",
         ".frame_locator",
         ".locator(",
-        ".evaluate(",
         "add_init_script",
         "automationcontrolled",
         "ignore_default_args",
@@ -604,3 +602,7 @@ def test_nothing_touches_the_captcha_or_hides_automation(module: object) -> None
         "args=",
     ):
         assert marker not in source, marker
+    # The one exception: the browser reads the variables of a page, and the script does nothing else.
+    assert source.count(".evaluate(") == (1 if module is browser_module else 0)
+    for action in ("dispatchevent", "fetch(", "document.", "xmlhttprequest", "localstorage", "cookie", "=>  {"):
+        assert action not in browser_module._READ_STATE_SCRIPT.lower()

@@ -22,6 +22,7 @@ from src.database.repo import (
     record_provider_block,
     record_provider_run,
     record_provider_success,
+    restore_provider_run,
     save_search_progress,
 )
 from src.services.api_client import (
@@ -30,6 +31,7 @@ from src.services.api_client import (
     ProviderBudgetExhausted,
     ProviderError,
     ProviderQuotaError,
+    ProviderStoppedError,
     ProviderUnavailableError,
 )
 from src.services.normalize import normalize_place
@@ -275,6 +277,10 @@ class _Collection:
                 self._add_places(exc.partial, collected)
                 await self._handle_block(provider, exc)
                 return
+            except ProviderStoppedError as exc:
+                self._add_places(exc.partial, collected)
+                self._stop_provider(provider, exc)
+                return
             except ProviderAuthError as exc:
                 if provider.auth_failure_hint is None:
                     self._stop_provider(provider, exc)
@@ -460,6 +466,7 @@ async def collect_leads(
             result.targets_processed = offset + 1
     finally:
         collection.succeeded -= {provider.name for provider in providers if provider.human_check_passed}
+        not_counted = [p.name for p in usable if p.min_hours_between_runs and not p.run_counted]
         await _close_providers(providers)
     result.next_cursor = (start + result.targets_processed) % len(targets) if targets else 0
     for name, count in collection.walked_targets.items():
@@ -467,6 +474,9 @@ async def collect_leads(
             result.skipped[name] = f"все запросы пройдены до конца, повторный обход через {config.recheck_days} дн."
 
     async with session_maker() as session:
+        for name in not_counted:
+            state = states.get(name)
+            await restore_provider_run(session, name, state.last_run_at if state is not None else None)
         for name in collection.succeeded:
             await record_provider_success(session, name)
         stats = await save_collected_places(session, collection.places)

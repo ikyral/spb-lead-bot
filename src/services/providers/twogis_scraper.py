@@ -3,8 +3,10 @@
 
 Polite by design: one page at a time, a random pause of several seconds between pages, a limit
 of pages and results per run, robots.txt, no more than one run a day. At the first sign of a
-refusal (captcha, 401/403/429, an unrecognized page) it stops; there is no code that tries to
-get past any of these. Reacting to a block over time is the job of the collector.
+refusal (captcha, 401/403/429, a page that came empty) it stops; there is no code that tries to
+get past any of these. Reacting to a block over time is the job of the collector. A page that
+loaded normally but is not understood is not a refusal: reading stops, and nothing counts against
+the site or uses up the rest between runs. The same goes for no connection at all.
 
 The assisted mode of the collector on a computer with a screen changes one thing: at a captcha it
 waits for the owner, who passes it by hand in the visible window, and goes on if they do. The code
@@ -23,21 +25,32 @@ from typing import Any, Protocol
 
 from src.config import Settings, resolve_path
 from src.services.api_client import (
+    FORMAT_NOT_RECOGNIZED_TEXT,
+    NO_CONNECTION_TEXT,
     ProviderBlockedError,
     ProviderBudgetExhausted,
+    ProviderError,
+    ProviderFormatError,
+    ProviderNoConnectionError,
+    ProviderStoppedError,
+    ProviderTemporaryError,
     ProviderUnavailableError,
 )
 from src.services.providers.base import BaseMapProvider, RawPlace, SearchArea, SearchPage, SearchQuery
 from src.services.providers.twogis import extract_contacts, parse_catalog_items
 from src.services.scraper import twogis_site
 from src.services.scraper.browser import PageSnapshot, PlaywrightSession
-from src.services.scraper.robots import RobotsRules, RobotsUnavailableError, fetch_robots
+from src.services.scraper.robots import RobotsNoConnectionError, RobotsRules, RobotsUnavailableError, fetch_robots
 from src.services.twogis_links import build_card_url
 
 logger = logging.getLogger(__name__)
 
 # The token for robots.txt: the rules for '*' apply unless the site names this bot.
 ROBOTS_AGENT: str = "spb-lead-bot"
+
+# In a row: the format of the site has changed, and all the other cards would load it for nothing.
+MAX_UNRECOGNIZED_IN_A_ROW: int = 3
+_SERVER_ERROR: int = 500
 
 # How often the window is checked while a person is passing the captcha.
 CAPTCHA_POLL_SECONDS: float = 1.5
@@ -131,23 +144,26 @@ def read_card_contacts(card: dict[str, Any]) -> CardContacts | None:
     phones, websites, socials, emails = extract_contacts(card)
     if groups and not (phones or websites or socials or emails):
         return None
-    return CardContacts(
-        phones=phones,
-        # A social network given as the site is what the card calls a site: the check will say what it is.
-        website=websites[0] if websites else _social_listed_as_site(groups),
-        socials=socials,
-        email=emails[0] if emails else None,
-    )
+    listed_as_site = _contacts_listed_as_site(groups)
+    # A social network given as the site is what the card calls a site: the check will say what it is.
+    website = websites[0] if websites else _social_among(listed_as_site)
+    # A site is listed but its address cannot be read, or links of a page do not show a site: both say nothing.
+    if website is None and (listed_as_site or card.get(twogis_site.FROM_LINKS_KEY)):
+        return None
+    return CardContacts(phones=phones, website=website, socials=socials, email=emails[0] if emails else None)
 
 
-def _social_listed_as_site(groups: list[Any]) -> str | None:
-    listed_as_site = [
+def _contacts_listed_as_site(groups: list[Any]) -> list[dict[str, Any]]:
+    return [
         contact
         for group in groups
         if isinstance(group, dict) and isinstance(group.get("contacts"), list)
         for contact in group["contacts"]
-        if isinstance(contact, dict) and contact.get("type") in ("website", "url")
+        if isinstance(contact, dict) and str(contact.get("type") or "").lower().strip() in ("website", "url")
     ]
+
+
+def _social_among(listed_as_site: list[dict[str, Any]]) -> str | None:
     # Of these only social networks end up among the socials.
     return next(iter(extract_contacts({"contact_groups": [{"contacts": listed_as_site}]})[2]), None)
 
@@ -174,6 +190,7 @@ class _CardResults:
     complete: list[dict[str, Any]] = field(default_factory=list)
     budget_ended: bool = False
     blocked: str | None = None
+    stopped: ProviderStoppedError | None = None
 
 
 class TwoGisScraperProvider(BaseMapProvider):
@@ -208,6 +225,8 @@ class TwoGisScraperProvider(BaseMapProvider):
         self._robots: RobotsRules | None = None
         self._pages = 0
         self._results = 0
+        self._unrecognized_in_a_row = 0
+        self.run_counted = False
 
     async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:
         """Not used for manual search: an admin waiting for a reply and long pauses do not go together."""
@@ -221,9 +240,11 @@ class TwoGisScraperProvider(BaseMapProvider):
             raise ProviderBudgetExhausted("лимит результатов за запуск")
         snapshot = await self._open(self._search_url(query, area, page), twogis_site.is_search_response)
 
-        data = twogis_site.read_search_bodies(snapshot.json_bodies)
+        data = twogis_site.read_search_page(snapshot)
         if data is None:
-            raise ProviderBlockedError("страница не распознана: нет данных в ожидаемом формате")
+            self._refuse_if_not_loaded(snapshot)
+            raise ProviderFormatError(FORMAT_NOT_RECOGNIZED_TEXT)
+        self.run_counted = True
 
         items = await self._with_contacts(data.items)
         places = parse_catalog_items(
@@ -236,6 +257,9 @@ class TwoGisScraperProvider(BaseMapProvider):
         self._results += len(places)
         if items.blocked is not None:
             raise ProviderBlockedError(items.blocked, partial=places)
+        if items.stopped is not None:
+            items.stopped.partial = places
+            raise items.stopped
 
         shown = page * len(data.items)
         has_more = bool(data.items) and not items.budget_ended and (data.total is None or shown < data.total)
@@ -244,7 +268,7 @@ class TwoGisScraperProvider(BaseMapProvider):
     async def read_card(self, card_url: str, firm_id: str) -> dict[str, Any] | None:
         """One organization card, by the rules of any other page. None if it was not recognized."""
         snapshot = await self._open(card_url, twogis_site.is_card_response)
-        return twogis_site.read_card_body(snapshot.json_bodies, firm_id)
+        return self._recognized_card(snapshot, firm_id)
 
     async def inspect_search(self, query: SearchQuery, area: SearchArea) -> PageSnapshot:
         """A search page with everything 2GIS sent to it, for the diagnostics."""
@@ -263,8 +287,9 @@ class TwoGisScraperProvider(BaseMapProvider):
         """End the run: the browser is closed and the limits start over next time."""
         session, self._session = self._session, None
         self._robots = None
-        self._pages = self._results = self._captchas = 0
+        self._pages = self._results = self._captchas = self._unrecognized_in_a_row = 0
         self.human_check_passed = False
+        self.run_counted = False
         if session is not None:
             await session.close()
 
@@ -298,16 +323,42 @@ class TwoGisScraperProvider(BaseMapProvider):
             await self._pause_between_pages()
 
         self._pages += 1
-        snapshot = await self._session.visit(url, wants_body)
-        if self._options.assisted and twogis_site.is_captcha(snapshot.final_url, snapshot.title, snapshot.html):
-            snapshot = await self._after_human_check(self._session, url, wants_body)
-        bodies = snapshot.json_bodies if refusals_from is None else snapshot.bodies_from(refusals_from)
-        reason = twogis_site.detect_block(
-            snapshot.status, snapshot.final_url, snapshot.title, snapshot.html
-        ) or twogis_site.refusal_in_bodies(bodies)
-        if reason:
-            raise ProviderBlockedError(reason)
+        try:
+            snapshot = await self._session.visit(url, wants_body)
+            if self._options.assisted and twogis_site.is_captcha(snapshot.final_url, snapshot.title, snapshot.html):
+                self.run_counted = True
+                snapshot = await self._after_human_check(self._session, url, wants_body)
+            bodies = snapshot.json_bodies if refusals_from is None else snapshot.bodies_from(refusals_from)
+            reason = twogis_site.detect_block(
+                snapshot.status, snapshot.final_url, snapshot.title, snapshot.html
+            ) or twogis_site.refusal_in_bodies(bodies)
+            if reason:
+                raise ProviderBlockedError(reason)
+        except ProviderNoConnectionError:
+            raise
+        except ProviderError:
+            # The site did answer: this was a visit, whatever the answer means.
+            self.run_counted = True
+            raise
         return snapshot
+
+    def _recognized_card(self, snapshot: PageSnapshot, firm_id: str) -> dict[str, Any] | None:
+        """The card if the code understands what it lists. Without it, the page itself may be what is wrong."""
+        card = twogis_site.read_card_page(snapshot, firm_id)
+        if card is None or read_card_contacts(card) is None:
+            self._refuse_if_not_loaded(snapshot)
+            return None
+        self.run_counted = True
+        return card
+
+    def _refuse_if_not_loaded(self, snapshot: PageSnapshot) -> None:
+        """Only a page that loaded normally can have a format that was not understood."""
+        if snapshot.status is not None and snapshot.status >= _SERVER_ERROR:
+            self.run_counted = True
+            raise ProviderTemporaryError(f"сайт ответил кодом {snapshot.status}")
+        if not snapshot.title.strip():
+            self.run_counted = True
+            raise ProviderBlockedError("страница пришла пустой")
 
     async def _pause_between_pages(self) -> None:
         # Not cryptography: only spreads requests out in time.
@@ -361,6 +412,8 @@ class TwoGisScraperProvider(BaseMapProvider):
         if self._robots is None:
             try:
                 self._robots = await self._robots_loader()
+            except RobotsNoConnectionError:
+                raise ProviderNoConnectionError(NO_CONNECTION_TEXT) from None
             except RobotsUnavailableError as exc:
                 raise ProviderUnavailableError(f"не удалось прочитать robots.txt: {exc}") from None
         return self._robots
@@ -381,7 +434,7 @@ class TwoGisScraperProvider(BaseMapProvider):
                 continue
             firm_id = str(item.get("id") or "")
             card_url = build_card_url(self._options.city_slug, firm_id)
-            if card_url is None or result.budget_ended or result.blocked:
+            if card_url is None or result.budget_ended or result.blocked or result.stopped:
                 continue
             try:
                 snapshot = await self._open(card_url, twogis_site.is_card_response)
@@ -391,10 +444,21 @@ class TwoGisScraperProvider(BaseMapProvider):
             except ProviderBlockedError as exc:
                 result.blocked = str(exc)
                 continue
-            card = twogis_site.read_card_body(snapshot.json_bodies, firm_id)
-            if card is None:
-                result.blocked = "карточка организации не распознана: нет данных в ожидаемом формате"
+            except ProviderStoppedError as exc:
+                result.stopped = exc
                 continue
+            try:
+                card = self._recognized_card(snapshot, firm_id)
+            except ProviderBlockedError as exc:
+                result.blocked = str(exc)
+                continue
+            if card is None:
+                # Not returned: without its contacts it would look like a business with no website.
+                self._unrecognized_in_a_row += 1
+                if self._unrecognized_in_a_row >= MAX_UNRECOGNIZED_IN_A_ROW:
+                    result.stopped = ProviderFormatError(FORMAT_NOT_RECOGNIZED_TEXT)
+                continue
+            self._unrecognized_in_a_row = 0
             result.complete.append({**item, **card})
         return result
 

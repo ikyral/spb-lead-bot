@@ -98,6 +98,8 @@ class Settings(BaseSettings):
     SCRAPER_PROFILE_DIR: str = "data/browser_profile"
     SCRAPER_ASSISTED_WAIT_MINUTES: float = Field(default=5.0, gt=0, le=30)
     SCRAPER_ASSISTED_MAX_CAPTCHAS: int = Field(default=2, ge=1, le=5)
+    # How many times collect_cli.py --check may look at the site within 24 hours.
+    SCRAPER_CHECK_MAX_PER_DAY: int = Field(default=3, ge=1, le=10)
 
     # The collector for a separate computer (collect_cli.py). Relative paths are from the project root.
     COLLECTOR_PROVIDERS: str = "2gis"

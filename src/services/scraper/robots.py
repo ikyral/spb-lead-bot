@@ -5,17 +5,25 @@ urllib.robotparser is not used: it does not understand '*' and '$' in paths, and
 rely on them (2gis.ru: 'Disallow: */user*', 'Disallow: /*stat=').
 """
 
+import asyncio
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from urllib.parse import quote
 
 import httpx
 
 ROBOTS_TIMEOUT_SECONDS: float = 15.0
+# Pauses between attempts when the site cannot be reached at all.
+ROBOTS_RETRY_PAUSES_SECONDS: tuple[float, ...] = (5.0, 15.0)
 
 
 class RobotsUnavailableError(Exception):
     """robots.txt cannot be read, so it is unknown what is allowed."""
+
+
+class RobotsNoConnectionError(RobotsUnavailableError):
+    """Not a single answer from the site, whatever the number of attempts."""
 
 
 @dataclass
@@ -76,22 +84,37 @@ def parse_robots(text: str, agent: str) -> RobotsRules:
     return rules
 
 
-async def fetch_robots(base_url: str, agent: str, client: httpx.AsyncClient | None = None) -> RobotsRules:
+async def _get_robots(url: str, client: httpx.AsyncClient | None) -> httpx.Response:
+    if client is not None:
+        return await client.get(url, timeout=ROBOTS_TIMEOUT_SECONDS)
+    async with httpx.AsyncClient(follow_redirects=True) as own_client:
+        return await own_client.get(url, timeout=ROBOTS_TIMEOUT_SECONDS)
+
+
+async def fetch_robots(
+    base_url: str,
+    agent: str,
+    client: httpx.AsyncClient | None = None,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> RobotsRules:
     """
     Load the rules for a site, following RFC 9309.
 
     A missing file (4xx) means no restrictions. If the file cannot be read (5xx, network),
-    everything counts as forbidden: RobotsUnavailableError is raised.
+    everything counts as forbidden: RobotsUnavailableError is raised. Only a network failure is
+    tried again: an answer of the site, whatever it is, is its answer.
     """
     url = f"{base_url}/robots.txt"
-    try:
-        if client is not None:
-            response = await client.get(url, timeout=ROBOTS_TIMEOUT_SECONDS)
-        else:
-            async with httpx.AsyncClient(follow_redirects=True) as own_client:
-                response = await own_client.get(url, timeout=ROBOTS_TIMEOUT_SECONDS)
-    except httpx.HTTPError as exc:
-        raise RobotsUnavailableError(f"сетевая ошибка ({type(exc).__name__})") from None
+    pauses = iter(ROBOTS_RETRY_PAUSES_SECONDS)
+    while True:
+        try:
+            response = await _get_robots(url, client)
+            break
+        except httpx.HTTPError as exc:
+            pause = next(pauses, None)
+            if pause is None:
+                raise RobotsNoConnectionError(f"сетевая ошибка ({type(exc).__name__})") from None
+            await sleep(pause)
     if response.status_code == 200:
         return parse_robots(response.text, agent)
     if 400 <= response.status_code < 500:

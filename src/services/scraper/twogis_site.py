@@ -3,21 +3,27 @@ Everything that depends on how 2gis.ru looks: URLs, signs of a block, the format
 
 When the site changes, this is the file to edit.
 
-STATUS OF THIS FILE (2026-11-05). The block detection is based on a page really received from
-the site (tests/fixtures/twogis_captcha.html). The rest was never checked against the site:
-the very first request was answered with a captcha, so no search page or card was seen.
-- The search and card URLs are the public ones known from the site's links.
-- Which requests the site's own scripts send, and that their format equals the documented
-  Catalog API 3.0, are assumptions. If they are wrong, pages are reported as unrecognized
-  (the provider stops and the admin is told); nothing wrong is saved.
-- DOM parsing does not exist on purpose: there are no real pages to base selectors on.
+STATUS OF THIS FILE (2026-11-06). Checked against one real search page and one card, saved with
+collect_cli.py --assisted --check --save-sample:
+- Pages arrive with their data in the variable initialState, which has the format of Catalog API 3.0:
+  data.entity.profile.<id>.data is an organization, data.search.pagination.<search id>.<page>.data
+  lists the organizations found. The separate responses of a page hold nothing about organizations.
+- A search lists organizations without contact_groups: only a card has them, so absent contacts in
+  a list say nothing. Phones are in the state of a card in full, no click is needed.
+- Five more real cards were read the same way on the same day, four of them with a site, none of the
+  addresses on 2GIS. Other outside links on those pages go through link.2gis.ru, so a site known only
+  by such a link stays unread; whether cards with such a site exist was not seen.
+- Separate responses and the links of a page are read only if there is no state.
 """
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlsplit
 
+from src.services.checker import is_social_domain, url_host
+from src.services.scraper.browser import PageSnapshot
 from src.services.twogis_links import BASE_URL
 
 _CATALOG_HOST_RE = re.compile(r"^catalog\.api\.2gis\.(?:ru|com)$")
@@ -139,3 +145,138 @@ def read_card_body(bodies: list[dict[str, Any]], firm_id: str) -> dict[str, Any]
             if isinstance(item, dict) and str(item.get("id", "")).split("_", 1)[0] == numeric_id:
                 return item
     return None
+
+
+# ---------- the state a page arrives with ----------
+
+
+_STATE_VARIABLE: str = "initialState"
+_INLINE_STATE_START: str = f"var {_STATE_VARIABLE} = JSON.parse('"
+_JS_ESCAPE_RE = re.compile(r"\\(u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)", re.DOTALL)
+_JS_ESCAPES: dict[str, str] = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+_UNESCAPED_QUOTE_RE = re.compile(r"(?<!\\)(?:\\\\)*'")
+_ANCHOR_HREF_RE = re.compile(r"<a\b[^>]*?\bhref=\"([^\"]+)\"", re.IGNORECASE)
+# Marks a card put together from the links of a page: it cannot say that a site is not there.
+FROM_LINKS_KEY: str = "contacts_from_links"
+# Links of the page itself: its footer has them whatever the organization is.
+_SITE_OWN_HOST_RE = re.compile(r"(?:^|\.)(?:2gis\.[a-z]{2,10}|2gis\.onelink\.me|otello\.ru)$", re.ASCII)
+
+
+def _unescape_js(match: re.Match[str]) -> str:
+    code = match.group(1)
+    if code[0] in "ux" and len(code) > 1:
+        return chr(int(code[1:], 16))
+    return _JS_ESCAPES.get(code, code)
+
+
+def inline_state(html: str) -> dict[str, Any] | None:
+    """The state from the text of a page, for when the page did not let it be read directly."""
+    start = html.find(_INLINE_STATE_START)
+    if start < 0:
+        return None
+    start += len(_INLINE_STATE_START)
+    # A quote in the text is escaped, and an escaped backslash before a quote does not count.
+    end = _UNESCAPED_QUOTE_RE.search(html, start)
+    if end is None:
+        return None
+    text = _JS_ESCAPE_RE.sub(_unescape_js, html[start : end.end() - 1])
+    try:
+        state = json.loads(text)
+    except ValueError:
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _page_state(snapshot: PageSnapshot) -> dict[str, Any] | None:
+    state = snapshot.page_state.get(_STATE_VARIABLE)
+    return state if isinstance(state, dict) else inline_state(snapshot.html)
+
+
+def _dig(value: Any, *keys: str) -> Any:
+    """What lies by these keys, None as soon as the structure is different."""
+    for key in keys:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value
+
+
+def _entity(state: dict[str, Any], key: str) -> dict[str, Any] | None:
+    data = _dig(state, "data", "entity", "profile", key, "data")
+    return data if isinstance(data, dict) else None
+
+
+def read_search_state(state: dict[str, Any]) -> SearchData | None:
+    """The organizations a search page shows. None if it says nothing about a search."""
+    profiles = _dig(state, "data", "search", "profile")
+    pagination = _dig(state, "data", "search", "pagination")
+    if not isinstance(profiles, dict) or not profiles or not isinstance(pagination, dict):
+        return None
+    search_id, profile = next(iter(profiles.items()))
+    total = _dig(profile, "data", "total")
+    pages = pagination.get(search_id)
+    if not isinstance(pages, dict):
+        return SearchData(items=[], total=0) if total == 0 else None
+    items: list[dict[str, Any]] = []
+    for page in pages.values():
+        ids = page.get("data") if isinstance(page, dict) else None
+        for firm_id in ids if isinstance(ids, list) else []:
+            entity = _entity(state, str(firm_id))
+            if entity is not None:
+                items.append(entity)
+    if not items and total != 0:
+        return None
+    return SearchData(items=items, total=total if isinstance(total, int) else None)
+
+
+def read_card_state(state: dict[str, Any], firm_id: str) -> dict[str, Any] | None:
+    """This organization in the state of a page. Another one in its place is not its card."""
+    number = firm_id.split("_", 1)[0]
+    profiles = _dig(state, "data", "entity", "profile")
+    for entry in profiles.values() if isinstance(profiles, dict) else []:
+        data = entry.get("data") if isinstance(entry, dict) else None
+        if isinstance(data, dict) and str(data.get("id", "")).split("_", 1)[0] == number:
+            return data
+    return None
+
+
+def read_card_links(snapshot: PageSnapshot, firm_id: str) -> dict[str, Any] | None:
+    """
+    A card from the links of a page: tel:, mailto: and outside links. The last resort, with no state.
+
+    More than one outside address cannot be told apart, so then none is taken for the site.
+    """
+    if f"/firm/{firm_id.split('_', 1)[0]}" not in urlsplit(snapshot.final_url).path:
+        return None
+    contacts: list[dict[str, str]] = []
+    sites: dict[str, str] = {}
+    for href in dict.fromkeys(_ANCHOR_HREF_RE.findall(snapshot.html)):
+        if href.startswith("tel:"):
+            contacts.append({"type": "phone", "value": href.removeprefix("tel:")})
+        elif href.startswith("mailto:"):
+            contacts.append({"type": "email", "value": href.removeprefix("mailto:").split("?", 1)[0]})
+        elif href.startswith(("http://", "https://")):
+            host = (url_host(href) or "").lower()
+            if is_social_domain(host):
+                contacts.append({"type": "social", "value": href})
+            elif host and not _SITE_OWN_HOST_RE.search(host):
+                sites.setdefault(host, href)
+    if len(sites) == 1:
+        contacts.append({"type": "website", "value": next(iter(sites.values()))})
+    if not contacts:
+        return None
+    return {"id": firm_id, "contact_groups": [{"contacts": contacts}], FROM_LINKS_KEY: True}
+
+
+def read_search_page(snapshot: PageSnapshot) -> SearchData | None:
+    """The result of a search, from wherever the page keeps it."""
+    state = _page_state(snapshot)
+    data = read_search_state(state) if state is not None else None
+    return data if data is not None else read_search_bodies(snapshot.bodies_from_or_all(is_search_response))
+
+
+def read_card_page(snapshot: PageSnapshot, firm_id: str) -> dict[str, Any] | None:
+    """The card of an organization, from wherever the page keeps it."""
+    state = _page_state(snapshot)
+    card = read_card_state(state, firm_id) if state is not None else None
+    if card is None:
+        card = read_card_body(snapshot.bodies_from_or_all(is_card_response), firm_id)
+    return card if card is not None else read_card_links(snapshot, firm_id)

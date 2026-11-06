@@ -22,6 +22,12 @@ _MAX_DIGITS_IN_NAME: int = 4
 _PATH_SEGMENT_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.\-]{0,31}|[0-9]+\.[0-9]+", re.ASCII)
 _INLINE_STATE_RE = re.compile(r"(?:\bvar\s+|\bwindow\.)([A-Za-z_$][\w$]{0,40})\s*=\s*(?:JSON\.parse\(|\{)", re.ASCII)
 _MAX_INLINE_NAMES: int = 10
+_OUTLINE_MAX_DEPTH: int = 24
+_OUTLINE_MAX_PATHS: int = 5000
+# Names of keys worth finding in the state of a page: this is what the parser looks for.
+_INTERESTING_KEYS: frozenset[str] = frozenset(
+    {"contact_groups", "contacts", "phones", "phone", "website", "url", "email", "links", "name", "address", "rubrics"}
+)
 
 
 def _key_name(key: str) -> str:
@@ -99,3 +105,44 @@ def inline_state_names(html: str) -> list[str]:
     """Names of variables with data in the text of a page: a page may bring its data without any request."""
     names = dict.fromkeys(match.group(1) for match in _INLINE_STATE_RE.finditer(html))
     return list(names)[:_MAX_INLINE_NAMES]
+
+
+def state_outline(value: Any) -> dict[str, Any]:
+    """
+    A map of a big value: paths of keys, types of values, the longest array on a path. No values, no texts.
+
+    Paths are the same for all items of an array and for keys that are not names of fields, so
+    the map stays small. `key_hits` says where the keys of interest are, and how many there are.
+    """
+    outline: dict[str, dict[str, Any]] = {}
+    hits: dict[str, int] = {}
+    truncated = False
+    # Not recursive: a page is free to nest as deep as it likes.
+    stack: list[tuple[str, Any, int]] = [("$", value, 0)]
+    while stack:
+        path, item, depth = stack.pop()
+        if path not in outline and len(outline) >= _OUTLINE_MAX_PATHS:
+            truncated = True
+            continue
+        entry = outline.setdefault(path, {"types": set(), "count": 0})
+        entry["types"].add(_type_label(item if isinstance(item, (dict, list)) else json_shape(item)))
+        entry["count"] += 1
+        if depth >= _OUTLINE_MAX_DEPTH:
+            truncated = truncated or isinstance(item, (dict, list))
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                name = _key_name(str(key))
+                if name.lower() in _INTERESTING_KEYS:
+                    hits[f"{path}.{name}"] = hits.get(f"{path}.{name}", 0) + 1
+                stack.append((f"{path}.{name}", child, depth + 1))
+        elif isinstance(item, list):
+            entry["max_length"] = max(entry.get("max_length", 0), len(item))
+            stack.extend((f"{path}[]", child, depth + 1) for child in item)
+    return {
+        "paths": [
+            {"path": path, **entry, "types": sorted(entry["types"])} for path, entry in sorted(outline.items())
+        ],
+        "key_hits": [{"path": path, "count": count} for path, count in sorted(hits.items())],
+        "truncated": truncated,
+    }
+
