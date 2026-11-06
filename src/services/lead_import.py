@@ -13,7 +13,16 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.database.repo import add_import_log, count_new_leads
-from src.services.lead_file import LeadFileError, clean_text, parse_lead_file
+from src.services.lead_enrich import EnrichStats, apply_enrichment
+from src.services.lead_file import (
+    KIND_ENRICH_REQUEST,
+    KIND_ENRICH_RESULT,
+    LeadFileError,
+    clean_text,
+    file_kind,
+    parse_enrich_result,
+    parse_lead_file,
+)
 from src.services.pipeline import save_collected_places
 
 logger = logging.getLogger(__name__)
@@ -41,6 +50,8 @@ class ImportResult:
     duplicates: int = 0
     rejected: Counter[str] = field(default_factory=Counter)
     pool_size: int = 0
+    # Set for a file with results of reading cards: it updates known leads instead of adding new ones.
+    enrichment: EnrichStats | None = None
 
     @property
     def rejected_total(self) -> int:
@@ -66,7 +77,7 @@ def _list_ready_files(inbox_dir: Path, min_age_seconds: float) -> list[Path]:
     return sorted(ready)[:_MAX_FILES_PER_SCAN]
 
 
-def _read_limited(path: Path, max_bytes: int) -> bytes:
+def read_limited(path: Path, max_bytes: int) -> bytes:
     """One byte over the limit is enough for the size check to refuse the file."""
     with path.open("rb") as file:
         return file.read(max_bytes + 1)
@@ -124,21 +135,15 @@ class ImportService:
     async def _import(self, data: bytes, name: str, source: str) -> ImportResult:
         result = ImportResult(source=source, file_name=name)
         try:
-            parsed = await asyncio.to_thread(
-                parse_lead_file, data, self.max_bytes, self._max_leads, self._require_contact
-            )
-            result.total = parsed.total
-            result.rejected.update(parsed.rejected)
-            if parsed.places:
-                async with self._session_maker() as session:
-                    stats = await save_collected_places(
-                        session, parsed.places, extra_fields={"imported_at": datetime.now(UTC)}
-                    )
-                result.saved_new = stats["saved_new"]
-                result.duplicates = stats["duplicates_skipped"]
-                not_qualified = stats["total_found"] - stats["saved_new"] - stats["duplicates_skipped"]
-                if not_qualified:
-                    result.rejected[REASON_NOT_QUALIFIED] += not_qualified
+            kind = await asyncio.to_thread(file_kind, data, self.max_bytes)
+            if kind == KIND_ENRICH_RESULT:
+                await self._import_enrichment(data, result)
+            elif kind == KIND_ENRICH_REQUEST:
+                raise LeadFileError("это файл запроса: его читает сборщик, а боту отправляют файл с результатом")
+            elif kind is not None:
+                raise LeadFileError("неизвестный тип файла в поле kind")
+            else:
+                await self._import_leads(data, result)
         except LeadFileError as exc:
             result.ok, result.error = False, str(exc)
         except Exception:
@@ -163,6 +168,28 @@ class ImportService:
             logger.exception("Could not record the import of %s", name)
         return result
 
+    async def _import_leads(self, data: bytes, result: ImportResult) -> None:
+        parsed = await asyncio.to_thread(parse_lead_file, data, self.max_bytes, self._max_leads, self._require_contact)
+        result.total = parsed.total
+        result.rejected.update(parsed.rejected)
+        if parsed.places:
+            async with self._session_maker() as session:
+                stats = await save_collected_places(
+                    session, parsed.places, extra_fields={"imported_at": datetime.now(UTC)}
+                )
+            result.saved_new = stats["saved_new"]
+            result.duplicates = stats["duplicates_skipped"]
+            not_qualified = stats["total_found"] - stats["saved_new"] - stats["duplicates_skipped"]
+            if not_qualified:
+                result.rejected[REASON_NOT_QUALIFIED] += not_qualified
+
+    async def _import_enrichment(self, data: bytes, result: ImportResult) -> None:
+        parsed = await asyncio.to_thread(parse_enrich_result, data, self.max_bytes, self._max_leads)
+        result.total = parsed.total
+        result.enrichment = await apply_enrichment(self._session_maker, parsed)
+        # In the log of imports these are the records that did not change anything.
+        result.rejected.update(result.enrichment.ignored)
+
     async def scan_inbox(self) -> int:
         """Import everything ready in the folder. Returns the number of files handled. Never raises."""
         handled = 0
@@ -181,7 +208,7 @@ class ImportService:
         return handled
 
     async def _handle_inbox_file(self, path: Path) -> None:
-        data = await asyncio.to_thread(_read_limited, path, self.max_bytes)
+        data = await asyncio.to_thread(read_limited, path, self.max_bytes)
         result = await self.import_bytes(data, path.name, SOURCE_INBOX)
         if result.ok:
             await asyncio.to_thread(_move_to, path, self._inbox_dir / "done")

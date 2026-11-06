@@ -5,6 +5,8 @@ No Telegram here and no bot token needed. It runs the same collection as the bot
 pauses, limits and stops: a block is registered in the local database and honoured by later runs.
 
 --assisted is for a person at the computer: at a captcha the browser window waits for them.
+With it, --check looks at one live page to see if the parser understands the site, and --enrich
+reads the cards of leads the bot asked about, for a file to send back to the bot.
 
 Exit codes: 0 done, 1 error, 2 a source refused or is waiting after a refusal, 130 interrupted.
 """
@@ -14,8 +16,9 @@ import asyncio
 import logging
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -23,12 +26,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from src.config import Settings, resolve_path, settings, settings_error
 from src.database.models import ProviderState
 from src.database.repo import enable_provider, get_provider_states, init_db
-from src.services.collector import load_collector_config
+from src.services.assisted_runs import CHECK_MAX_PAGES, ENRICH_MAX_CARDS, CheckReport, EnrichRun, run_check, run_enrich
+from src.services.collector import CollectorConfig, load_collector_config
 from src.services.dgis_key import DGIS_PROVIDER_NAME, DgisKeyPolicy, DgisQuota, key_expiry_notice
 from src.services.lead_export import ExportResult, export_new_leads
+from src.services.lead_file import LeadFileError, parse_enrich_request
+from src.services.lead_import import read_limited
 from src.services.providers.registry import build_providers
 from src.services.providers.twogis import TwoGisOptions
-from src.services.providers.twogis_scraper import ScraperOptions
+from src.services.providers.twogis_scraper import ScraperOptions, TwoGisScraperProvider
 from src.services.scheduler import STATUS_FAILED, TRIGGER_MANUAL, CollectorRunner, RunReport
 
 logger = logging.getLogger(__name__)
@@ -39,6 +45,7 @@ EXIT_BLOCKED = 2
 EXIT_INTERRUPTED = 130
 
 SCRAPER_PROVIDER_NAME = "2gis_scraper"
+CHECK_LOG_PATH = "logs/scraper_check.json"
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -51,6 +58,16 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         metavar="ИСТОЧНИК",
         help="снять автоотключение и паузу источника после блокировок, например 2gis_scraper",
     )
+    mode.add_argument(
+        "--check",
+        action="store_true",
+        help="вместе с --assisted: проверить парсер на одной странице поиска и одной карточке, ничего не сохраняя",
+    )
+    mode.add_argument(
+        "--enrich",
+        metavar="ФАЙЛ",
+        help="вместе с --assisted: прочитать карточки из файла команды /export_unknown и записать файл для бота",
+    )
     parser.add_argument(
         "--assisted",
         action="store_true",
@@ -59,6 +76,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.assisted and (args.export_only or args.enable_provider):
         parser.error("--assisted нужен только для сбора")
+    if (args.check or args.enrich is not None) and not args.assisted:
+        parser.error("--check и --enrich работают только вместе с --assisted: капчу проходит человек")
     return args
 
 
@@ -137,7 +156,7 @@ async def _collect(
     current: Settings, session_maker: async_sessionmaker[AsyncSession], outcome: _Outcome, assisted: bool = False
 ) -> list[str]:
     """Run one pass of the usual collection. Returns the names of the providers configured here."""
-    config = load_collector_config(current.model_copy(update={"COLLECT_PROVIDERS": current.COLLECTOR_PROVIDERS}))
+    config = _collector_config(current)
     twogis_key = current.TWOGIS_API_KEY.get_secret_value() if current.TWOGIS_API_KEY else None
     if assisted and SCRAPER_PROVIDER_NAME not in config.providers:
         # Otherwise the run would quietly go without a browser and without the mode that was asked for.
@@ -169,6 +188,124 @@ async def _collect(
     return config.providers
 
 
+def _collector_config(current: Settings) -> CollectorConfig:
+    return load_collector_config(current.model_copy(update={"COLLECT_PROVIDERS": current.COLLECTOR_PROVIDERS}))
+
+
+def _value_or_reason(value: object, reason: str) -> str:
+    if isinstance(value, list):
+        value = ", ".join(str(item) for item in value)
+    return str(value) if value else reason
+
+
+def _print_check(report: CheckReport) -> None:
+    if report.refused is not None:
+        retry = f" Следующая возможна после {_local_time(report.retry_at)}." if report.retry_at else ""
+        print(f"Проверка не запущена: {report.refused}.{retry}")
+        return
+    if report.search_found is not None:
+        print(f"Поиск: организаций в ответе {report.search_found}.")
+    if report.search_problem:
+        print(f"Поиск: {report.search_problem}.")
+    if report.card_problem:
+        print(f"Карточка: {report.card_problem}.")
+    if report.blocked:
+        print(f"Сайт отказал: {report.blocked}. Это записано как блокировка, повтор после паузы.")
+    if report.failed:
+        print(f"Проверка остановлена: {report.failed}.")
+    found = report.recognized
+    # Without a recognized card, an empty field says only that nothing was understood.
+    absent = "нет в карточке" if found.get("contacts_recognized") else "не распознано"
+    for title, key, reason in (
+        ("Название", "name", "не распознано"),
+        ("Адрес", "address", "не указан или не распознан"),
+        ("Телефоны", "phones", absent),
+        ("Сайт", "website", absent),
+        ("Соцсети", "socials", absent),
+        ("Ссылка", "source_url", "не распознана"),
+    ):
+        print(f"  {title}: {_value_or_reason(found.get(key), reason)}")
+    if report.path is not None:
+        print(f"Файл с найденным и структурой ответов: {report.path}")
+    print(f"Проверок осталось за 24 часа: {report.runs_left}.")
+
+
+async def _check(current: Settings, session_maker: async_sessionmaker[AsyncSession]) -> int:
+    target = _collector_config(current).targets[0]
+    options = replace(
+        ScraperOptions.from_settings(current, assisted=True),
+        max_pages_per_run=CHECK_MAX_PAGES,
+        min_hours_between_runs=0.0,
+    )
+    report = await run_check(
+        session_maker,
+        _scraper_provider(options),
+        target,
+        resolve_path(CHECK_LOG_PATH),
+        current.SCRAPER_BLOCK_BACKOFF_HOURS,
+        options.city_slug,
+    )
+    _print_check(report)
+    if report.refused or report.blocked:
+        return EXIT_BLOCKED
+    return EXIT_ERROR if report.failed else EXIT_OK
+
+
+def _print_enrich(run: EnrichRun) -> None:
+    if run.refused is not None:
+        print(f"Карточки не открывались: {run.refused}. Не запускайте повторно раньше времени.")
+        return
+    print(
+        f"Карточек прочитано {run.read}, не распознано {len(run.records) - run.read}, "
+        f"не открыто {run.not_opened + run.over_limit}."
+    )
+    if run.over_limit:
+        print(f"За запуск открывается не больше {ENRICH_MAX_CARDS} карточек, остальные {run.over_limit} не открыты.")
+    for reason, count in run.rejected.most_common():
+        print(f"Записей пропущено ({reason}): {count}.")
+    if run.blocked:
+        print(f"Сайт отказал: {run.blocked}. Это записано как блокировка, повтор после паузы.")
+    if run.stopped:
+        print(f"Чтение остановлено: {run.stopped}.")
+    if run.failed:
+        print(f"Чтение остановлено: {run.failed}.")
+    print(f"Отправьте боту файл: {run.path}" if run.path else "Файл не создан: прочитать ничего не удалось.")
+
+
+async def _enrich(current: Settings, session_maker: async_sessionmaker[AsyncSession], file_name: str) -> int:
+    _collector_config(current)  # the same check of the settings as before a collection
+    try:
+        data = await asyncio.to_thread(read_limited, Path(file_name), current.IMPORT_MAX_FILE_BYTES)
+        request = parse_enrich_request(data, current.IMPORT_MAX_FILE_BYTES)
+    except OSError as exc:
+        print(f"Файл запроса не прочитан: {exc.strerror or type(exc).__name__}.")
+        return EXIT_ERROR
+    except LeadFileError as exc:
+        print(f"Файл запроса не принят: {exc}.")
+        return EXIT_ERROR
+
+    run = EnrichRun()
+    try:
+        await run_enrich(
+            session_maker,
+            _scraper_provider(ScraperOptions.from_settings(current, assisted=True)),
+            request,
+            resolve_path(current.COLLECTOR_EXPORT_DIR),
+            current.SCRAPER_BLOCK_BACKOFF_HOURS,
+            run,
+        )
+    finally:
+        # Also when interrupted: what was read is in the file, and the person has to know where.
+        _print_enrich(run)
+    if run.refused or run.blocked:
+        return EXIT_BLOCKED
+    return EXIT_ERROR if run.failed else EXIT_OK
+
+
+def _scraper_provider(options: ScraperOptions) -> TwoGisScraperProvider:
+    return TwoGisScraperProvider(options=options)
+
+
 async def _run(args: argparse.Namespace, current: Settings) -> int:
     db_path = resolve_path(current.COLLECTOR_DB_PATH)
     await asyncio.to_thread(db_path.parent.mkdir, parents=True, exist_ok=True)
@@ -184,6 +321,11 @@ async def _run(args: argparse.Namespace, current: Settings) -> int:
                 await enable_provider(session, args.enable_provider)
             print(f"Источник {args.enable_provider} включён, счётчик блокировок сброшен.")
             return EXIT_OK
+
+        if args.check:
+            return await _check(current, session_maker)
+        if args.enrich is not None:
+            return await _enrich(current, session_maker, args.enrich)
 
         names: list[str] = []
         if not args.export_only:
@@ -235,6 +377,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Ошибка настроек: {exc}")
         return EXIT_ERROR
     except KeyboardInterrupt:
-        print("Прервано. Браузер закрыт, найденное до этого момента не сохранено.")
+        if args.enrich is not None:
+            print("Прервано. Браузер закрыт, прочитанные карточки сохранены в файл.")
+        elif args.check:
+            print("Прервано. Браузер закрыт.")
+        else:
+            print("Прервано. Браузер закрыт, найденное до этого момента не сохранено.")
         return EXIT_INTERRUPTED
 

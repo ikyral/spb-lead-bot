@@ -42,7 +42,7 @@ such a place is not saved. No automatic search exists yet, so nothing sets `site
 - `imported_at`: DateTime, Nullable (on the server: when the lead arrived from an export file)
 - `site_url`: String(512), Nullable (the known site or the candidate)
 - `site_confidence`: String(16), Nullable (`high`, `medium`, `low`)
-- `site_source`: String(16), Nullable (`2gis`, `osm`, `search`, `manual`)
+- `site_source`: String(16), Nullable (`2gis`, `osm`, `search`, `manual`, `2gis_card`)
 - `site_checked_at`: DateTime, Nullable (when the status was determined)
 - `is_chain`: Boolean, Nullable (part of a chain: kept for counting branches, not handed out)
 

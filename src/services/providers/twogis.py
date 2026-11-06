@@ -309,7 +309,7 @@ def parse_catalog_items(
             if lat is not None and lon is not None:
                 map_url = f"https://yandex.ru/maps/?pt={lon},{lat}&z=17&l=map"
 
-        phones, websites, socials_list, emails = _extract_contacts(item)
+        phones, websites, socials_list, emails = extract_contacts(item)
         phone_str = ", ".join(phones) if phones else None
         raw_website = websites[0] if websites else None
         socials_str = ", ".join(socials_list) if socials_list else None
@@ -359,7 +359,7 @@ def _primary_rubric(item: dict[str, Any]) -> str | None:
     return str(primary["name"]).strip()[:255]
 
 
-def _extract_contacts(
+def extract_contacts(
     item: dict[str, Any]
 ) -> tuple[list[str], list[str], list[str], list[str]]:
     """Extract phones, websites, socials and emails from contact_groups."""

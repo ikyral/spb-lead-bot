@@ -28,7 +28,7 @@ from src.services.api_client import (
     ProviderUnavailableError,
 )
 from src.services.providers.base import BaseMapProvider, RawPlace, SearchArea, SearchPage, SearchQuery
-from src.services.providers.twogis import parse_catalog_items
+from src.services.providers.twogis import extract_contacts, parse_catalog_items
 from src.services.scraper import twogis_site
 from src.services.scraper.browser import PageSnapshot, PlaywrightSession
 from src.services.scraper.robots import RobotsRules, RobotsUnavailableError, fetch_robots
@@ -108,6 +108,50 @@ class ScraperOptions:
         )
 
 
+@dataclass(frozen=True)
+class CardContacts:
+    """What the card of an organization lists."""
+
+    phones: list[str]
+    website: str | None
+    socials: list[str]
+    email: str | None
+
+
+def read_card_contacts(card: dict[str, Any]) -> CardContacts | None:
+    """
+    The contacts of a card, or None if the card does not say what they are.
+
+    The difference matters: without the field, or with contacts of unknown types, nothing is
+    known, and only a card that really lists its contacts can say that a site is not among them.
+    """
+    groups = card.get("contact_groups")
+    if not isinstance(groups, list):
+        return None
+    phones, websites, socials, emails = extract_contacts(card)
+    if groups and not (phones or websites or socials or emails):
+        return None
+    return CardContacts(
+        phones=phones,
+        # A social network given as the site is what the card calls a site: the check will say what it is.
+        website=websites[0] if websites else _social_listed_as_site(groups),
+        socials=socials,
+        email=emails[0] if emails else None,
+    )
+
+
+def _social_listed_as_site(groups: list[Any]) -> str | None:
+    listed_as_site = [
+        contact
+        for group in groups
+        if isinstance(group, dict) and isinstance(group.get("contacts"), list)
+        for contact in group["contacts"]
+        if isinstance(contact, dict) and contact.get("type") in ("website", "url")
+    ]
+    # Of these only social networks end up among the socials.
+    return next(iter(extract_contacts({"contact_groups": [{"contacts": listed_as_site}]})[2]), None)
+
+
 class BrowserSession(Protocol):
     async def start(self) -> None: ...
 
@@ -175,9 +219,7 @@ class TwoGisScraperProvider(BaseMapProvider):
         """Read one page of search results, opening cards of organizations listed without contacts."""
         if self._results >= self._options.max_results_per_run:
             raise ProviderBudgetExhausted("лимит результатов за запуск")
-        text = f"{query.text} {area.district}" if area.district else query.text
-        url = twogis_site.build_search_url(self._options.city_slug, text, page)
-        snapshot = await self._open(url, twogis_site.is_search_response)
+        snapshot = await self._open(self._search_url(query, area, page), twogis_site.is_search_response)
 
         data = twogis_site.read_search_bodies(snapshot.json_bodies)
         if data is None:
@@ -199,6 +241,24 @@ class TwoGisScraperProvider(BaseMapProvider):
         has_more = bool(data.items) and not items.budget_ended and (data.total is None or shown < data.total)
         return SearchPage(places=places, has_more=has_more)
 
+    async def read_card(self, card_url: str, firm_id: str) -> dict[str, Any] | None:
+        """One organization card, by the rules of any other page. None if it was not recognized."""
+        snapshot = await self._open(card_url, twogis_site.is_card_response)
+        return twogis_site.read_card_body(snapshot.json_bodies, firm_id)
+
+    async def inspect_search(self, query: SearchQuery, area: SearchArea) -> PageSnapshot:
+        """A search page with everything 2GIS sent to it, for the diagnostics."""
+        return await self._open(
+            self._search_url(query, area), twogis_site.is_site_response, twogis_site.is_search_response
+        )
+
+    async def inspect_card(self, firm_id: str) -> PageSnapshot:
+        """A card with everything 2GIS sent to it, for the diagnostics."""
+        card_url = build_card_url(self._options.city_slug, firm_id)
+        if card_url is None:
+            raise ProviderUnavailableError("не удалось составить ссылку на карточку")
+        return await self._open(card_url, twogis_site.is_site_response, twogis_site.is_card_response)
+
     async def close(self) -> None:
         """End the run: the browser is closed and the limits start over next time."""
         session, self._session = self._session, None
@@ -208,8 +268,22 @@ class TwoGisScraperProvider(BaseMapProvider):
         if session is not None:
             await session.close()
 
-    async def _open(self, url: str, wants_body: Callable[[str], bool]) -> PageSnapshot:
-        """Open a page if the rules allow it, stopping at any sign of a refusal."""
+    def _search_url(self, query: SearchQuery, area: SearchArea, page: int = 1) -> str:
+        text = f"{query.text} {area.district}" if area.district else query.text
+        return twogis_site.build_search_url(self._options.city_slug, text, page)
+
+    async def _open(
+        self,
+        url: str,
+        wants_body: Callable[[str], bool],
+        refusals_from: Callable[[str], bool] | None = None,
+    ) -> PageSnapshot:
+        """
+        Open a page if the rules allow it, stopping at any sign of a refusal.
+
+        `refusals_from` narrows down whose refusal counts, when more responses are read than the
+        page depends on: a side service of the site that answers 403 is not a block.
+        """
         if self._pages >= self._options.max_pages_per_run:
             raise ProviderBudgetExhausted("лимит страниц за запуск")
         rules = await self._robots_rules()
@@ -227,9 +301,10 @@ class TwoGisScraperProvider(BaseMapProvider):
         snapshot = await self._session.visit(url, wants_body)
         if self._options.assisted and twogis_site.is_captcha(snapshot.final_url, snapshot.title, snapshot.html):
             snapshot = await self._after_human_check(self._session, url, wants_body)
+        bodies = snapshot.json_bodies if refusals_from is None else snapshot.bodies_from(refusals_from)
         reason = twogis_site.detect_block(
             snapshot.status, snapshot.final_url, snapshot.title, snapshot.html
-        ) or twogis_site.refusal_in_bodies(snapshot.json_bodies)
+        ) or twogis_site.refusal_in_bodies(bodies)
         if reason:
             raise ProviderBlockedError(reason)
         return snapshot

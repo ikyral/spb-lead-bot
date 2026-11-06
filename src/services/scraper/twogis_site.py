@@ -28,6 +28,8 @@ _CAPTCHA_HOST = "captcha.2gis."
 _CAPTCHA_TITLE = "captcha"
 _CAPTCHA_HTML_MARKERS: tuple[str, ...] = ("g-recaptcha", "подозрительную активность", "что вы не робот")
 _REFUSING_STATUSES: frozenset[int] = frozenset({401, 403, 429})
+_SITE_HOST_RE = re.compile(r"^(?:[a-z0-9-]+\.)*2gis\.(?:ru|com)$")
+_FIRM_LINK_RE = re.compile(r"/firm/([0-9]+)")
 
 
 def build_search_url(city_slug: str, text: str, page: int = 1) -> str:
@@ -49,6 +51,21 @@ def is_search_response(url: str) -> bool:
 def is_card_response(url: str) -> bool:
     """Is this response of the page's own scripts an organization card?"""
     return _is_catalog_url(url, _CARD_PATH)
+
+
+def is_site_response(url: str) -> bool:
+    """Does this response come from 2GIS at all? Only the diagnostics look wider than the catalog."""
+    return bool(_SITE_HOST_RE.match(urlsplit(url).netloc))
+
+
+def first_firm_number(html: str) -> str | None:
+    """
+    A link to some organization in the text of a page, only for the diagnostics to have a card to open.
+
+    Nothing is ever read from the page this way, so this is not parsing of the markup.
+    """
+    match = _FIRM_LINK_RE.search(html)
+    return match.group(1) if match else None
 
 
 def detect_block(status: int | None, final_url: str, title: str, html: str) -> str | None:
