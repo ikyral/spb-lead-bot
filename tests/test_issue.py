@@ -84,13 +84,15 @@ async def _add_leads(session_maker, count: int, start: int = 1) -> None:
 async def test_batch_is_the_oldest_leads_in_stable_order_and_marked_issued(session_maker) -> None:
     async with session_maker() as session:
         # Inserted out of date order; two leads with the same time are ordered by id.
-        session.add_all([
-            _lead(3),
-            _lead(1),
-            _lead(2),
-            _lead(4, created_at=datetime(2026, 11, 5, 9, 0, tzinfo=UTC)),
-            _lead(5, created_at=datetime(2026, 11, 5, 9, 0, tzinfo=UTC)),
-        ])
+        session.add_all(
+            [
+                _lead(3),
+                _lead(1),
+                _lead(2),
+                _lead(4, created_at=datetime(2026, 11, 5, 9, 0, tzinfo=UTC)),
+                _lead(5, created_at=datetime(2026, 11, 5, 9, 0, tzinfo=UTC)),
+            ]
+        )
         await session.commit()
 
     before = datetime.now(UTC)
@@ -130,12 +132,14 @@ async def test_concurrent_batches_do_not_hand_out_the_same_lead(session_maker) -
 
 async def test_other_statuses_are_never_handed_out(session_maker) -> None:
     async with session_maker() as session:
-        session.add_all([
-            _lead(1, crm_status="in_work"),
-            _lead(2, crm_status="rejected"),
-            _lead(3, crm_status=STATUS_ISSUED, contact_status=CONTACT_CONTACTED),
-            _lead(4),
-        ])
+        session.add_all(
+            [
+                _lead(1, crm_status="in_work"),
+                _lead(2, crm_status="rejected"),
+                _lead(3, crm_status=STATUS_ISSUED, contact_status=CONTACT_CONTACTED),
+                _lead(4),
+            ]
+        )
         await session.commit()
     async with session_maker() as session:
         assert [lead.external_id for lead in await issue_next_leads(session, 10)] == ["2gis_4"]
@@ -556,8 +560,14 @@ def test_funnel_stats_text() -> None:
     contact_counts = {CONTACT_CONTACTED: 3, CONTACT_REPLIED: 1, CONTACT_REJECTED: 4, CONTACT_NO_ANSWER: 6}
     text_ = format_funnel_stats(counts, contact_counts, issued_total=16)
     for line in (
-        "Всего: <b>21</b>", "в запасе: <b>5</b>", "Выдано всего: <b>16</b>", "ждут действия: <b>2</b>",
-        "Написал: <b>3</b>", "Ответили: <b>1</b>", "Отказ: <b>4</b>", "Нет ответа: <b>6</b>",
+        "Всего: <b>21</b>",
+        "в запасе: <b>5</b>",
+        "Выдано всего: <b>16</b>",
+        "ждут действия: <b>2</b>",
+        "Написал: <b>3</b>",
+        "Ответили: <b>1</b>",
+        "Отказ: <b>4</b>",
+        "Нет ответа: <b>6</b>",
     ):
         assert line in text_
     assert "В работе" not in text_
@@ -606,7 +616,12 @@ async def test_csv_export_gets_new_columns_at_the_end(session_maker, monkeypatch
     header, row = list(csv.reader(io.StringIO(document.data.decode("utf-8-sig")), delimiter=";"))[:2]
     assert header[:2] == ["ID", "Источник"]
     assert header[-10:-4] == [
-        "Email", "Карточка источника", "Дата выдачи (МСК)", "Результат контакта", "Кто отметил", "Когда отмечено (МСК)",
+        "Email",
+        "Карточка источника",
+        "Дата выдачи (МСК)",
+        "Результат контакта",
+        "Кто отметил",
+        "Когда отмечено (МСК)",
     ]
     assert header[-4:] == ["Найденный сайт", "Уверенность", "Откуда статус сайта", "Сайт проверен (МСК)"]
     assert row[-8] != ""
@@ -690,9 +705,12 @@ async def test_notifier_sends_alerts_and_summary_to_all_admins_silently_at_night
 
 async def test_notifier_survives_one_unreachable_admin() -> None:
     bot = MagicMock()
-    bot.send_message = AsyncMock(side_effect=[
-        TelegramNetworkError(method=MagicMock(spec=SendMessage), message="down"), None,
-    ])
+    bot.send_message = AsyncMock(
+        side_effect=[
+            TelegramNetworkError(method=MagicMock(spec=SendMessage), message="down"),
+            None,
+        ]
+    )
     await AdminNotifier(bot, [1, 2]).send("текст")
     assert bot.send_message.await_count == 2
 
@@ -716,11 +734,16 @@ async def test_provider_on_command() -> None:
 def test_status_shows_paused_and_switched_off_providers() -> None:
     now = datetime.now(UTC)
     paused = ProviderState(
-        name="2gis_scraper", consecutive_blocks=1, last_block_reason="сайт показал капчу",
+        name="2gis_scraper",
+        consecutive_blocks=1,
+        last_block_reason="сайт показал капчу",
         blocked_until=now + timedelta(hours=6),
     )
     off = ProviderState(
-        name="other", consecutive_blocks=3, last_block_reason="сайт ответил кодом 429", disabled_at=now,
+        name="other",
+        consecutive_blocks=3,
+        last_block_reason="сайт ответил кодом 429",
+        disabled_at=now,
     )
     status = MagicMock(
         state=CollectorState(id=1, found=0, qualified=0, saved_new=0, duplicates=0, errors=0),
@@ -1048,9 +1071,13 @@ async def test_results_stored_in_crm_status_by_the_earlier_version_move_to_conta
     await init_db(old_database)
 
     async with old_database.connect() as conn:
-        rows = (await conn.execute(text(
-            "SELECT external_id, crm_status, contact_status FROM leads WHERE external_id LIKE 'x_%' ORDER BY id"
-        ))).all()
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT external_id, crm_status, contact_status FROM leads WHERE external_id LIKE 'x_%' ORDER BY id"
+                )
+            )
+        ).all()
     assert [tuple(row) for row in rows] == [
         ("x_10", "issued", "contacted"),
         ("x_11", "issued", "replied"),

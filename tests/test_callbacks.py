@@ -138,8 +138,16 @@ async def test_lead_card_title_matches_status(monkeypatch: pytest.MonkeyPatch, c
     """A stale card of a rejected lead used to be titled '💼 В работе'."""
     from src.database.models import Lead
 
-    lead = Lead(id=1, external_id="osm_1", source="osm", name="Улыбка", category="dentist_clinic",
-                site_status="no_site", score=70, crm_status=crm_status)
+    lead = Lead(
+        id=1,
+        external_id="osm_1",
+        source="osm",
+        name="Улыбка",
+        category="dentist_clinic",
+        site_status="no_site",
+        score=70,
+        crm_status=crm_status,
+    )
 
     async def fake_get_leads(session, crm_status, limit, offset, min_score=30):
         return [lead] if offset == 0 else []

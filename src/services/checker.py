@@ -32,8 +32,7 @@ SOCIAL_DOMAINS: tuple[str, ...] = (
 )
 
 DEFAULT_USER_AGENT: str = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
 DEFAULT_HEADERS: dict[str, str] = {
@@ -46,10 +45,7 @@ def is_social_domain(host: str | None) -> bool:
     if not host:
         return False
     normalized_host = host.lower().rstrip(".")
-    return any(
-        normalized_host == domain or normalized_host.endswith(f".{domain}")
-        for domain in SOCIAL_DOMAINS
-    )
+    return any(normalized_host == domain or normalized_host.endswith(f".{domain}") for domain in SOCIAL_DOMAINS)
 
 
 def create_check_client(
@@ -127,7 +123,7 @@ async def _check_with_http_fallback(
     """Probe the https URL; for schemeless input retry over http when https looks dead."""
     result, retryable = await _probe(client, https_url)
     if retry_http and retryable:
-        http_url = "http://" + https_url[len("https://"):]
+        http_url = "http://" + https_url[len("https://") :]
         result, _ = await _probe(client, http_url)
     return result
 

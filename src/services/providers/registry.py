@@ -39,9 +39,7 @@ def build_providers(
         elif name == "2gis":
             if twogis_api_key and twogis_api_key.strip():
                 result.providers.append(
-                    TwoGisProvider(
-                        twogis_api_key.strip(), options=twogis_options, spend_request=twogis_spend_request
-                    )
+                    TwoGisProvider(twogis_api_key.strip(), options=twogis_options, spend_request=twogis_spend_request)
                 )
             else:
                 result.disabled[name] = "не задан DGIS_API_KEY"

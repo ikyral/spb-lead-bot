@@ -76,10 +76,12 @@ def _place(external_id: str, name: str, address: str | None = None, phone: str |
 
 
 def test_same_name_and_address_is_one_organization_across_sources() -> None:
-    merged = merge_duplicate_places([
-        _place("2gis_1", "ООО «Улыбка»", "Невский проспект, 10"),
-        _place("yandex_1", "ооо улыбка", "НЕВСКИЙ ПРОСПЕКТ 10", phone="+78125550101"),
-    ])
+    merged = merge_duplicate_places(
+        [
+            _place("2gis_1", "ООО «Улыбка»", "Невский проспект, 10"),
+            _place("yandex_1", "ооо улыбка", "НЕВСКИЙ ПРОСПЕКТ 10", phone="+78125550101"),
+        ]
+    )
     assert [p.external_id for p in merged] == ["2gis_1"]
     assert merged[0].phone == "+78125550101"
 

@@ -87,7 +87,8 @@ class Settings(BaseSettings):
     SCRAPER_MAX_DELAY_SECONDS: float = Field(default=8.0, ge=3.0)
     SCRAPER_MAX_PAGES_PER_RUN: int = Field(default=200, ge=1, le=500)
     SCRAPER_MAX_RESULTS_PER_RUN: int = Field(default=300, ge=1, le=500)
-    SCRAPER_MIN_HOURS_BETWEEN_RUNS: float = Field(default=20.0, ge=1.0)
+    # 0 = no interval: how often to visit the site is then up to the owner.
+    SCRAPER_MIN_HOURS_BETWEEN_RUNS: float = Field(default=20.0, ge=0.0)
     SCRAPER_BLOCK_BACKOFF_HOURS: float = Field(default=6.0, ge=2.0)
     SCRAPER_PAGE_TIMEOUT_SECONDS: float = Field(default=45.0, ge=5.0)
 
@@ -184,7 +185,7 @@ class Settings(BaseSettings):
         # Replace the path in the original string: keeps driver and query params, and avoids
         # URL-escaping a Windows drive ('C:' -> 'C%3A') that render_as_string would do.
         start = value.index(database)
-        return value[:start] + resolved + value[start + len(database):]
+        return value[:start] + resolved + value[start + len(database) :]
 
 
 def resolve_path(value: str) -> Path:

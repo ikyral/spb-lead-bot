@@ -296,12 +296,12 @@ def test_the_state_is_preferred_to_separate_responses() -> None:
 
 def test_the_state_is_read_from_the_text_of_a_page_if_the_page_does_not_give_it() -> None:
     state = _state()
-    state["data"]["entity"]["profile"][FIRM]["data"]["name"] = "О'Хара \"Улыбка\" \\ \n ё"
+    state["data"]["entity"]["profile"][FIRM]["data"]["name"] = 'О\'Хара "Улыбка" \\ \n ё'
     page = _no_data_page(html=_as_inline(state))
 
     card = twogis_site.read_card_page(page, FIRM)
 
-    assert card["name"] == "О'Хара \"Улыбка\" \\ \n ё"
+    assert card["name"] == 'О\'Хара "Улыбка" \\ \n ё'
     assert read_card_contacts(card).phones == ["+79210000001"]
 
 

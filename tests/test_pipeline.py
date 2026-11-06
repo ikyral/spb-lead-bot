@@ -52,10 +52,9 @@ async def test_csv_pipeline_full_integration(
     - 1 cafe with active site (ya.ru) -> dropped.
     - Repeated run detects all 3 as duplicates.
     """
+
     # Patch `send`: both `get` and `stream` go through it, so no real network calls are made.
-    async def mock_send(
-        self: httpx.AsyncClient, request: httpx.Request, *args: Any, **kwargs: Any
-    ) -> httpx.Response:
+    async def mock_send(self: httpx.AsyncClient, request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:
         if "broken-domain-dentist-spb-404.ru" in str(request.url):
             raise httpx.ConnectError("Connection failed: DNS resolution error", request=request)
         return httpx.Response(status_code=200, request=request)
@@ -201,12 +200,21 @@ async def test_run_lead_harvest_merges_same_business_from_osm_and_2gis(
 ) -> None:
     """The same business returned by OSM and 2GIS must be saved once, enriched with 2GIS contacts."""
     osm_place = RawPlace(
-        external_id="osm_501", source="osm", name="Стоматология Улыбка", category="dentist_clinic",
-        phone="+7 812 555-01-01", high_margin=True,
+        external_id="osm_501",
+        source="osm",
+        name="Стоматология Улыбка",
+        category="dentist_clinic",
+        phone="+7 812 555-01-01",
+        high_margin=True,
     )
     twogis_place = RawPlace(
-        external_id="2gis_701", source="2gis", name="Улыбка, стоматология", category="dentist_clinic",
-        phone="8 (812) 555-01-01", socials="https://vk.com/ulybka", address="Невский проспект, 22",
+        external_id="2gis_701",
+        source="2gis",
+        name="Улыбка, стоматология",
+        category="dentist_clinic",
+        phone="8 (812) 555-01-01",
+        socials="https://vk.com/ulybka",
+        address="Невский проспект, 22",
         high_margin=True,
     )
 
@@ -229,7 +237,9 @@ async def test_run_lead_harvest_merges_same_business_from_osm_and_2gis(
     assert len(leads) == 1
     lead = leads[0]
     assert (lead.external_id, lead.socials, lead.address) == (
-        "osm_501", "https://vk.com/ulybka", "Невский проспект, 22"
+        "osm_501",
+        "https://vk.com/ulybka",
+        "Невский проспект, 22",
     )
 
 
@@ -238,16 +248,21 @@ async def test_import_skips_business_already_saved_from_another_source(
     session: AsyncSession,
 ) -> None:
     """A CSV row for a business already saved from OSM (same phone) is a duplicate, not a new lead."""
-    session.add(Lead(
-        external_id="osm_900", source="osm", name="Детейлинг Гараж", category="auto_repair",
-        phone="+7 999 111-22-33", site_status="no_site", score=65, crm_status="in_work",
-    ))
+    session.add(
+        Lead(
+            external_id="osm_900",
+            source="osm",
+            name="Детейлинг Гараж",
+            category="auto_repair",
+            phone="+7 999 111-22-33",
+            site_status="no_site",
+            score=65,
+            crm_status="in_work",
+        )
+    )
     await session.commit()
 
-    csv_bytes = (
-        "Название;Рубрика;Телефон\n"
-        "Гараж 78 детейлинг-центр;Автосервис;8 (999) 111 22 33\n"
-    ).encode()
+    csv_bytes = ("Название;Рубрика;Телефон\nГараж 78 детейлинг-центр;Автосервис;8 (999) 111 22 33\n").encode()
 
     res = await import_csv_harvest(session, csv_bytes)
     assert res == {"total_found": 1, "qualified": 1, "saved_new": 0, "duplicates_skipped": 1, "over_limit": 0}
@@ -273,8 +288,13 @@ async def test_website_checks_run_with_higher_concurrency(
 
     monkeypatch.setattr(pipeline, "analyze_website", slow_check)
     places = [
-        RawPlace(external_id=f"csv_{i}", source="csv", name=f"Место {i}", category="horeca",
-                 raw_website=f"https://site{i}.ru")
+        RawPlace(
+            external_id=f"csv_{i}",
+            source="csv",
+            name=f"Место {i}",
+            category="horeca",
+            raw_website=f"https://site{i}.ru",
+        )
         for i in range(60)
     ]
     await pipeline._process_and_save_places(session, places)
@@ -291,8 +311,13 @@ async def test_progress_callback_reports_checked_sites_and_errors_do_not_break_h
 
     monkeypatch.setattr(pipeline, "analyze_website", instant_check)
     places = [
-        RawPlace(external_id=f"csv_{i}", source="csv", name=f"Место {i}", category="dentist_clinic",
-                 phone=f"+7 999 000-00-{i:02d}")
+        RawPlace(
+            external_id=f"csv_{i}",
+            source="csv",
+            name=f"Место {i}",
+            category="dentist_clinic",
+            phone=f"+7 999 000-00-{i:02d}",
+        )
         for i in range(10)
     ]
     reports: list[tuple[int, int]] = []
@@ -318,13 +343,24 @@ async def test_run_lead_harvest_queries_osm_and_2gis_concurrently(
 
     async def osm_waits_for_2gis(self: Any, district: str, category: str) -> list[RawPlace]:
         await asyncio.wait_for(twogis_started.wait(), timeout=2)
-        return [RawPlace(external_id="osm_1", source="osm", name="Улыбка", category="dentist_clinic",
-                         phone="+7 812 555-01-01")]
+        return [
+            RawPlace(
+                external_id="osm_1", source="osm", name="Улыбка", category="dentist_clinic", phone="+7 812 555-01-01"
+            )
+        ]
 
     async def twogis_search(self: Any, district: str, category: str) -> list[RawPlace]:
         twogis_started.set()
-        return [RawPlace(external_id="2gis_1", source="2gis", name="Улыбка, стоматология",
-                         category="dentist_clinic", phone="8 812 555-01-01", socials="https://vk.com/u")]
+        return [
+            RawPlace(
+                external_id="2gis_1",
+                source="2gis",
+                name="Улыбка, стоматология",
+                category="dentist_clinic",
+                phone="8 812 555-01-01",
+                socials="https://vk.com/u",
+            )
+        ]
 
     from src.services.providers.osm import OSMOverpassProvider
     from src.services.providers.twogis import TwoGisProvider
@@ -354,7 +390,6 @@ async def test_csv_import_is_capped(session: AsyncSession, monkeypatch: pytest.M
     assert res == {"total_found": 2, "qualified": 2, "saved_new": 2, "duplicates_skipped": 0, "over_limit": 1}
 
 
-
 @pytest.mark.asyncio
 async def test_harvest_saves_all_leads_in_one_commit(session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
     """A commit per lead took ~1.9 s per 500 leads on SQLite; the whole batch must be one transaction."""
@@ -365,8 +400,13 @@ async def test_harvest_saves_all_leads_in_one_commit(session: AsyncSession, monk
 
     monkeypatch.setattr(pipeline, "analyze_website", instant_check)
     places = [
-        RawPlace(external_id=f"osm_{i}", source="osm", name=f"Lead {i}", category="dentist_clinic",
-                 phone=f"+7 999 100-{i:02d}-00")
+        RawPlace(
+            external_id=f"osm_{i}",
+            source="osm",
+            name=f"Lead {i}",
+            category="dentist_clinic",
+            phone=f"+7 999 100-{i:02d}-00",
+        )
         for i in range(30)
     ]
     commits = 0

@@ -887,8 +887,20 @@ async def test_rejected_key_switches_the_source_off_and_stops_asking(session_mak
 
     # What has been collected can still be handed out.
     async with session_maker() as session:
-        await save_new_leads(session, [{"external_id": "2gis_9", "source": "2gis", "name": "Лид", "category": "beauty",
-                                        "site_status": SITE_UNKNOWN, "score": 45, "crm_status": STATUS_NEW}])
+        await save_new_leads(
+            session,
+            [
+                {
+                    "external_id": "2gis_9",
+                    "source": "2gis",
+                    "name": "Лид",
+                    "category": "beauty",
+                    "site_status": SITE_UNKNOWN,
+                    "score": 45,
+                    "crm_status": STATUS_NEW,
+                }
+            ],
+        )
         assert [lead.external_id for lead in await issue_next_leads(session, 1)] == ["2gis_9"]
 
     async with session_maker() as session:
@@ -899,7 +911,10 @@ async def test_rejected_key_switches_the_source_off_and_stops_asking(session_mak
 
 async def test_status_explains_a_rejected_key_without_mentioning_blocks() -> None:
     state = ProviderState(
-        name="2gis", consecutive_blocks=0, disabled_at=datetime.now(UTC), last_block_reason="2ГИС не принял ключ",
+        name="2gis",
+        consecutive_blocks=0,
+        disabled_at=datetime.now(UTC),
+        last_block_reason="2ГИС не принял ключ",
         requests_total=0,
     )
     line = formatters._provider_line("2gis", state, datetime.now(UTC))
@@ -1105,7 +1120,7 @@ def test_lead_without_a_usable_link_has_no_button_and_no_false_promise(url: str 
 
 def test_card_from_another_source_keeps_its_text_link() -> None:
     lead = _lead(source="osm", source_url="https://www.openstreetmap.org/node/1", site_status="no_site")
-    assert 'Карточка OpenStreetMap</a>' in format_issued_lead(lead)
+    assert "Карточка OpenStreetMap</a>" in format_issued_lead(lead)
     assert OPEN_CARD_BUTTON_TEXT not in [button.text for row in _buttons(lead) for button in row]
 
 
@@ -1386,9 +1401,7 @@ async def test_card_update_failure_keeps_the_saved_phone(issue_env) -> None:
 @pytest.fixture
 def guarded_dispatcher(issue_env, monkeypatch: pytest.MonkeyPatch) -> Iterator[Dispatcher]:
     """The handlers behind the same admin check as in main.py."""
-    monkeypatch.setattr(
-        "src.bot.middlewares.settings", Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=ADMIN)
-    )
+    monkeypatch.setattr("src.bot.middlewares.settings", Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=ADMIN))
     dp = Dispatcher()
     guard = AdminOnlyMiddleware()
     dp.message.middleware(guard)
@@ -1404,11 +1417,18 @@ def _reply_update(user_id: int, text_: str, prompt_id: int, prompt_text: str) ->
     chat = Chat(id=GROUP, type="supergroup")
     when = datetime(2026, 11, 5, tzinfo=UTC)
     prompt = Message(
-        message_id=prompt_id, date=when, chat=chat, text=prompt_text,
+        message_id=prompt_id,
+        date=when,
+        chat=chat,
+        text=prompt_text,
         from_user=User(id=1, is_bot=True, first_name="Бот"),
     )
     message = Message(
-        message_id=prompt_id + 1, date=when, chat=chat, text=text_, reply_to_message=prompt,
+        message_id=prompt_id + 1,
+        date=when,
+        chat=chat,
+        text=text_,
+        reply_to_message=prompt,
         from_user=User(id=user_id, is_bot=False, first_name="Человек"),
     )
     return Update(update_id=prompt_id, message=message)
@@ -1418,7 +1438,10 @@ def _press_update(user_id: int, data: str) -> Update:
     chat = Chat(id=GROUP, type="supergroup")
     card = Message(message_id=500, date=datetime(2026, 11, 5, tzinfo=UTC), chat=chat, text="карточка")
     callback = CallbackQuery(
-        id="1", from_user=User(id=user_id, is_bot=False, first_name="Человек"), chat_instance="c", data=data,
+        id="1",
+        from_user=User(id=user_id, is_bot=False, first_name="Человек"),
+        chat_instance="c",
+        data=data,
         message=card,
     )
     return Update(update_id=1, callback_query=callback)
@@ -1547,9 +1570,7 @@ async def test_from_the_collector_through_a_file_to_the_card(session_maker, tmp_
 
 
 async def test_server_that_requires_contacts_refuses_such_a_file(session_maker, tmp_path: Path) -> None:
-    service = ImportService(
-        session_maker, AsyncMock(), tmp_path / "inbox", 1024 * 1024, 100, require_contact=True
-    )
+    service = ImportService(session_maker, AsyncMock(), tmp_path / "inbox", 1024 * 1024, 100, require_contact=True)
     result = await service.import_bytes(_file(_record()), "leads.json", SOURCE_TELEGRAM)
     assert result.saved_new == 0
     assert result.rejected == {REASON_NO_CONTACTS: 1}

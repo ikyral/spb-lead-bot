@@ -140,7 +140,11 @@ async def test_main_counts_requests_of_the_key_and_warns_about_its_end(
     monkeypatch.setattr(main, "async_session_maker", session_maker)
     monkeypatch.setattr(main, "settings_error", None)
     current = Settings(
-        _env_file=None, BOT_TOKEN="123456:TEST", ADMIN_TG_ID=1, DGIS_API_KEY="KEY", DGIS_KEY_CREATED_AT="2026-11-01",
+        _env_file=None,
+        BOT_TOKEN="123456:TEST",
+        ADMIN_TG_ID=1,
+        DGIS_API_KEY="KEY",
+        DGIS_KEY_CREATED_AT="2026-11-01",
         DGIS_REQUEST_CONTACTS=True,
     )
     monkeypatch.setattr(main, "settings", current)
@@ -204,7 +208,10 @@ def test_importing_providers_does_not_create_the_database_engine() -> None:
     result = subprocess.run(
         [sys.executable, "-c", code],
         cwd=Path(__file__).resolve().parent.parent,
-        capture_output=True, text=True, timeout=60, check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
     )
     assert result.stdout.strip().splitlines()[-1] == "False False"
 

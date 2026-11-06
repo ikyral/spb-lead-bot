@@ -38,21 +38,35 @@ def main() -> None:
         report = Path(tmp) / "report.json"
         subprocess.run(
             [
-                sys.executable, "-m", "pip", "install", "--dry-run", "--ignore-installed", "--quiet",
-                "--report", str(report),
-                "--python-version", PYTHON_VERSION, "--implementation", "cp",
-                "--abi", ABI, "--abi", "abi3", "--abi", "none",
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--dry-run",
+                "--ignore-installed",
+                "--quiet",
+                "--report",
+                str(report),
+                "--python-version",
+                PYTHON_VERSION,
+                "--implementation",
+                "cp",
+                "--abi",
+                ABI,
+                "--abi",
+                "abi3",
+                "--abi",
+                "none",
                 *platforms,
                 "--only-binary=:all:",
-                "-r", str(PROJECT_ROOT / "requirements.txt"),
+                "-r",
+                str(PROJECT_ROOT / "requirements.txt"),
             ],
             check=True,
         )
         installs = json.loads(report.read_text(encoding="utf-8"))["install"]
 
-    pins = sorted(
-        (item["metadata"]["name"], item["metadata"]["version"]) for item in installs
-    )
+    pins = sorted((item["metadata"]["name"], item["metadata"]["version"]) for item in installs)
     body = "".join(f"{name}=={version}\n" for name, version in sorted(pins, key=lambda p: p[0].lower()))
     (PROJECT_ROOT / "requirements.lock").write_text(HEADER + body, encoding="utf-8", newline="\n")
     print(f"requirements.lock: {len(pins)} packages")

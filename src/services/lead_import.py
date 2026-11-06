@@ -124,7 +124,13 @@ class ImportService:
             result = await self._import(data, name, source)
         logger.info(
             "Import of %s from %s: ok=%s total=%d new=%d duplicates=%d rejected=%d",
-            name, source, result.ok, result.total, result.saved_new, result.duplicates, result.rejected_total,
+            name,
+            source,
+            result.ok,
+            result.total,
+            result.saved_new,
+            result.duplicates,
+            result.rejected_total,
         )
         try:
             await self._report(result, exclude_chat)

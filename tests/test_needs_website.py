@@ -338,7 +338,12 @@ async def test_most_certain_first_and_by_score_within_a_group(session_maker) -> 
         {"name": "вердикт", "site_status": SITE_NO_SITE, "site_source": SOURCE_MANUAL, "score": 65},
     )
     assert await _issued_names(session_maker) == [
-        "мёртвый", "вердикт", "соцсеть", "не найден", "возможно есть", "неизвестен, высокий балл",
+        "мёртвый",
+        "вердикт",
+        "соцсеть",
+        "не найден",
+        "возможно есть",
+        "неизвестен, высокий балл",
     ]
 
 
@@ -553,19 +558,25 @@ async def test_branches_with_a_working_site_count_too(session_maker, monkeypatch
         return ("has_site", url) if url else ("no_site", None)
 
     monkeypatch.setattr("src.services.pipeline.analyze_website", analyze)
-    with_site = [RawPlace(
-        external_id=f"2gis_{n}", source="2gis", name="Сеть", category="beauty", address=f"Улица {n}",
-        phone=f"+7 812 555-01-0{n}", raw_website="https://x.example",
-    ) for n in range(2)]
+    with_site = [
+        RawPlace(
+            external_id=f"2gis_{n}",
+            source="2gis",
+            name="Сеть",
+            category="beauty",
+            address=f"Улица {n}",
+            phone=f"+7 812 555-01-0{n}",
+            raw_website="https://x.example",
+        )
+        for n in range(2)
+    ]
     async with session_maker() as session:
         await save_collected_places(session, [*with_site, _place(9, "Сеть", "Улица 9")])
         assert await count_new_leads(session) == 0
 
 
 async def test_lead_already_handed_out_is_not_touched(session_maker) -> None:
-    lead_id = await _save(
-        session_maker, name="Пятёрочка", crm_status=STATUS_ISSUED, issued_at=datetime.now(UTC)
-    )
+    lead_id = await _save(session_maker, name="Пятёрочка", crm_status=STATUS_ISSUED, issued_at=datetime.now(UTC))
     async with session_maker() as session:
         await refresh_chain_flags(session, await load_chain_index(session, _chain_settings()))
         assert (await session.get(Lead, lead_id)).is_chain in (False, None)

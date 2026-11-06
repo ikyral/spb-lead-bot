@@ -247,7 +247,6 @@ async def test_search_handlers_navigation():
     assert "Центральный" in cb.message.edit_text.call_args[0][0]
 
 
-
 class _DummySessionCtx:
     """Async context manager standing in for async_session_maker() in handler tests."""
 

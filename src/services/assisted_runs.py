@@ -34,7 +34,7 @@ from src.services.api_client import (
     ProviderNoConnectionError,
     ProviderTemporaryError,
 )
-from src.services.collector import SearchTarget, unavailable_reason
+from src.services.collector import REST_REASON, SearchTarget, interval_ends_at, unavailable_reason
 from src.services.lead_export import write_enrich_result
 from src.services.lead_file import (
     EnrichRequest,
@@ -266,6 +266,8 @@ class EnrichRun:
     """What one run of reading cards did. Filled as it goes: an interrupted run must still be told about."""
 
     refused: str | None = None
+    # When the interval between runs ends, if that was the reason of the refusal.
+    retry_at: datetime | None = None
     blocked: str | None = None
     # Why reading stopped before the end, if not because of a block.
     stopped: str | None = None
@@ -355,6 +357,8 @@ async def run_enrich(
     async with session_maker() as session:
         state = (await get_provider_states(session)).get(provider.name)
         run.refused = unavailable_reason(provider, state, datetime.now(UTC))
+        if run.refused == REST_REASON:
+            run.retry_at = interval_ends_at(provider, state)
         if run.refused is not None or not items:
             return
         # Taken in advance and given back only by a run that ended normally: a killed run stays counted.
@@ -386,6 +390,6 @@ async def run_enrich(
     if not counted:
         async with session_maker() as session:
             await restore_provider_run(session, provider.name, previous_run)
-    if run.read and not (run.blocked or run.failed or run.stopped or human_passed):
+    if run.read and not (run.blocked or run.failed or run.stopped or human_passed or provider.ignore_interval):
         async with session_maker() as session:
             await record_provider_success(session, provider.name)

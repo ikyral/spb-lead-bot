@@ -90,6 +90,8 @@ class ScraperOptions:
     profile_dir: Path | None = None
     assisted_wait_minutes: float = 5.0
     assisted_max_captchas: int = 2
+    # Only the command line of the collector sets this, for one run: see --ignore-interval.
+    ignore_interval: bool = False
 
     @classmethod
     def from_settings(cls, settings: Settings, assisted: bool = False) -> "ScraperOptions":
@@ -209,6 +211,7 @@ class TwoGisScraperProvider(BaseMapProvider):
     ) -> None:
         self._options = options or ScraperOptions()
         self.min_hours_between_runs = self._options.min_hours_between_runs
+        self.ignore_interval = self._options.ignore_interval
         self._session_factory = session_factory or (
             lambda: PlaywrightSession(
                 page_timeout_seconds=self._options.page_timeout_seconds,
@@ -232,9 +235,7 @@ class TwoGisScraperProvider(BaseMapProvider):
         """Not used for manual search: an admin waiting for a reply and long pauses do not go together."""
         return []
 
-    async def search(
-        self, query: SearchQuery, area: SearchArea, page: int = 1, page_size: int = 50
-    ) -> SearchPage:
+    async def search(self, query: SearchQuery, area: SearchArea, page: int = 1, page_size: int = 50) -> SearchPage:
         """Read one page of search results, opening cards of organizations listed without contacts."""
         if self._results >= self._options.max_results_per_run:
             raise ProviderBudgetExhausted("лимит результатов за запуск")
@@ -461,4 +462,3 @@ class TwoGisScraperProvider(BaseMapProvider):
             self._unrecognized_in_a_row = 0
             result.complete.append({**item, **card})
         return result
-

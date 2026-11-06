@@ -52,13 +52,23 @@ def test_coords_and_distance() -> None:
 
 def test_merge_by_shared_phone_fills_missing_fields() -> None:
     osm = RawPlace(
-        external_id="osm_1", source="osm", name="Улыбка", category="dentist_clinic",
-        phone="+7 812 555-01-01", map_url=_map_url(59.93, 30.31),
+        external_id="osm_1",
+        source="osm",
+        name="Улыбка",
+        category="dentist_clinic",
+        phone="+7 812 555-01-01",
+        map_url=_map_url(59.93, 30.31),
     )
     gis = RawPlace(
-        external_id="2gis_1", source="2gis", name="Улыбка, стоматология", category="dentist_clinic",
-        address="Невский проспект, 22", phone="8 (812) 555-01-01, +7 999 111-22-33",
-        raw_website="https://ulybka.ru", socials="https://vk.com/ulybka", high_margin=True,
+        external_id="2gis_1",
+        source="2gis",
+        name="Улыбка, стоматология",
+        category="dentist_clinic",
+        address="Невский проспект, 22",
+        phone="8 (812) 555-01-01, +7 999 111-22-33",
+        raw_website="https://ulybka.ru",
+        socials="https://vk.com/ulybka",
+        high_margin=True,
     )
     merged = merge_duplicate_places([osm, gis])
 
@@ -67,7 +77,9 @@ def test_merge_by_shared_phone_fills_missing_fields() -> None:
     assert (place.external_id, place.source) == ("osm_1", "osm")
     assert place.phone == "+7 812 555-01-01"
     assert (place.address, place.raw_website, place.socials) == (
-        "Невский проспект, 22", "https://ulybka.ru", "https://vk.com/ulybka"
+        "Невский проспект, 22",
+        "https://ulybka.ru",
+        "https://vk.com/ulybka",
     )
     assert place.high_margin is True
     # Inputs are not mutated
@@ -77,12 +89,20 @@ def test_merge_by_shared_phone_fills_missing_fields() -> None:
 def test_merge_prefers_real_website_over_social_link() -> None:
     """OSM often lists a VK page as 'website'; a real site from 2GIS must win, otherwise it is a false lead."""
     osm = RawPlace(
-        external_id="osm_2", source="osm", name="Гараж 78", category="auto_repair",
-        phone="+7 999 000-00-01", raw_website="https://vk.com/garage78",
+        external_id="osm_2",
+        source="osm",
+        name="Гараж 78",
+        category="auto_repair",
+        phone="+7 999 000-00-01",
+        raw_website="https://vk.com/garage78",
     )
     gis = RawPlace(
-        external_id="2gis_2", source="2gis", name="Гараж 78", category="auto_repair",
-        phone="+79990000001", raw_website="https://garage78.ru",
+        external_id="2gis_2",
+        source="2gis",
+        name="Гараж 78",
+        category="auto_repair",
+        phone="+79990000001",
+        raw_website="https://garage78.ru",
     )
     place = merge_duplicate_places([osm, gis])[0]
     assert place.raw_website == "https://garage78.ru"
@@ -90,18 +110,28 @@ def test_merge_prefers_real_website_over_social_link() -> None:
 
 
 def test_merge_by_name_and_proximity_without_phones() -> None:
-    a = RawPlace(external_id="osm_3", source="osm", name="Кофейня Зерно", category="horeca",
-                 map_url=_map_url(59.9300, 30.3100))
-    near = RawPlace(external_id="2gis_3", source="2gis", name="Зерно", category="horeca",
-                    map_url=_map_url(59.9305, 30.3105))
-    a2 = RawPlace(external_id="osm_4", source="osm", name="Кофейня Зерно", category="horeca",
-                  map_url=_map_url(59.9300, 30.3100))
-    same_name_same_spot = RawPlace(external_id="2gis_4", source="2gis", name="Кофейня Зерно, кофейня",
-                                   category="horeca", map_url=_map_url(59.9301, 30.3101))
-    far = RawPlace(external_id="2gis_5", source="2gis", name="Кофейня Зерно", category="horeca",
-                   map_url=_map_url(59.9400, 30.3100))
-    other_name = RawPlace(external_id="2gis_6", source="2gis", name="Пекарня", category="horeca",
-                          map_url=_map_url(59.9300, 30.3100))
+    a = RawPlace(
+        external_id="osm_3", source="osm", name="Кофейня Зерно", category="horeca", map_url=_map_url(59.9300, 30.3100)
+    )
+    near = RawPlace(
+        external_id="2gis_3", source="2gis", name="Зерно", category="horeca", map_url=_map_url(59.9305, 30.3105)
+    )
+    a2 = RawPlace(
+        external_id="osm_4", source="osm", name="Кофейня Зерно", category="horeca", map_url=_map_url(59.9300, 30.3100)
+    )
+    same_name_same_spot = RawPlace(
+        external_id="2gis_4",
+        source="2gis",
+        name="Кофейня Зерно, кофейня",
+        category="horeca",
+        map_url=_map_url(59.9301, 30.3101),
+    )
+    far = RawPlace(
+        external_id="2gis_5", source="2gis", name="Кофейня Зерно", category="horeca", map_url=_map_url(59.9400, 30.3100)
+    )
+    other_name = RawPlace(
+        external_id="2gis_6", source="2gis", name="Пекарня", category="horeca", map_url=_map_url(59.9300, 30.3100)
+    )
 
     # Different normalized names ("кофейня зерно" vs "зерно") are not merged
     assert len(merge_duplicate_places([a, near])) == 2

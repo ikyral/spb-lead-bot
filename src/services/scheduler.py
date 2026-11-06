@@ -457,17 +457,22 @@ class CollectorRunner:
             logger.exception("Collection failed: trigger=%s", trigger)
             text = "внутренняя ошибка сбора, подробности в логе бота"
             status = STATUS_FAILED
-            result = CollectResult(
-                next_cursor=cursor, errors=1, last_error=text, alerts=[f"Сбор не выполнен: {text}"]
-            )
+            result = CollectResult(next_cursor=cursor, errors=1, last_error=text, alerts=[f"Сбор не выполнен: {text}"])
 
         new_alerts = await self._save_outcome(status, result, previous_alert)
         duration = time.monotonic() - started
         logger.info(
             "Collection finished: trigger=%s status=%s duration=%.1fs found=%d qualified=%d new=%d "
             "duplicates=%d errors=%d requests=%d",
-            trigger, status, duration, result.found, result.qualified, result.saved_new,
-            result.duplicates, result.errors, result.requests,
+            trigger,
+            status,
+            duration,
+            result.found,
+            result.qualified,
+            result.saved_new,
+            result.duplicates,
+            result.errors,
+            result.requests,
         )
 
         async with self._session_maker() as session:
@@ -489,9 +494,7 @@ class CollectorRunner:
     async def _search_and_save(self, cursor: int, budget: int) -> tuple[str, CollectResult]:
         """Do the collection. Returns the run status and its result."""
         if budget <= 0:
-            logger.warning(
-                "Collection skipped: daily request limit reached (%d)", self._config.max_requests_per_day
-            )
+            logger.warning("Collection skipped: daily request limit reached (%d)", self._config.max_requests_per_day)
             return STATUS_DAILY_LIMIT, CollectResult(next_cursor=cursor)
         if not self._provider_set.providers:
             reasons = "; ".join(f"{name}: {why}" for name, why in self._provider_set.disabled.items())

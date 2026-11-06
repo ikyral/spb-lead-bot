@@ -785,4 +785,3 @@ async def test_flood_wait_on_the_batch_notice_does_not_stop_the_batch(batch_env)
     assert len(_cards(message)) == 2
     async with batch_env() as session:
         assert await count_issued_leads(session) == 2
-

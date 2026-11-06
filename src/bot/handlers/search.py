@@ -135,8 +135,7 @@ async def handle_district_chosen(callback: CallbackQuery) -> None:
     await callback.answer()
     await _edit_or_send(
         callback,
-        f"📍 Район: <b>{district_name}</b>\n\n"
-        "Выберите категорию бизнеса для сбора лидов:",
+        f"📍 Район: <b>{district_name}</b>\n\nВыберите категорию бизнеса для сбора лидов:",
         reply_markup=get_categories_keyboard(district_name),
     )
 
@@ -145,11 +144,7 @@ async def handle_district_chosen(callback: CallbackQuery) -> None:
 async def handle_category_chosen(callback: CallbackQuery) -> None:
     """Trigger lead harvest for the selected district and category."""
     parts = (callback.data or "").split(":")
-    if (
-        len(parts) != 3
-        or parts[1] not in SPB_DISTRICTS
-        or parts[2] not in TARGET_CATEGORIES
-    ):
+    if len(parts) != 3 or parts[1] not in SPB_DISTRICTS or parts[2] not in TARGET_CATEGORIES:
         await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
         return
     _, district_name, category_key = parts
@@ -169,9 +164,7 @@ async def handle_category_chosen(callback: CallbackQuery) -> None:
                 session=session,
                 district_name=district_name,
                 category_key=category_key,
-                twogis_api_key=(
-                    settings.TWOGIS_API_KEY.get_secret_value() if settings.TWOGIS_API_KEY else None
-                ),
+                twogis_api_key=(settings.TWOGIS_API_KEY.get_secret_value() if settings.TWOGIS_API_KEY else None),
                 progress=progress,
             )
         report = (

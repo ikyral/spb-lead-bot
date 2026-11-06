@@ -52,16 +52,18 @@ HIGH_MARGIN_KEYWORDS: tuple[str, ...] = (
     "ремонт",
 )
 
-HIGH_MARGIN_CATEGORY_KEYS: frozenset[str] = frozenset({
-    "dentist_clinic",
-    "auto_repair",
-    "beauty",
-    "legal_b2b",
-    "massage",
-    "detailing",
-    "cleaning",
-    "renovation",
-})
+HIGH_MARGIN_CATEGORY_KEYS: frozenset[str] = frozenset(
+    {
+        "dentist_clinic",
+        "auto_repair",
+        "beauty",
+        "legal_b2b",
+        "massage",
+        "detailing",
+        "cleaning",
+        "renovation",
+    }
+)
 
 # 'ремонт' targets renovation and car repair; small repair shops (shoes, clothes, phones,
 # watches, appliances) are low-margin. Such phrases are removed before keyword matching,
@@ -121,11 +123,7 @@ def calculate_lead_score(
     if not has_phone and not has_socials and site_status not in UNVERIFIED_STATUSES:
         score += NO_CONTACTS_POINTS
 
-    is_high = (
-        high_margin
-        or category_key in HIGH_MARGIN_CATEGORY_KEYS
-        or is_high_margin_category(category_key)
-    )
+    is_high = high_margin or category_key in HIGH_MARGIN_CATEGORY_KEYS or is_high_margin_category(category_key)
     if is_high:
         score += HIGH_MARGIN_POINTS
     if category_key in LOW_PRIORITY_CATEGORY_KEYS:

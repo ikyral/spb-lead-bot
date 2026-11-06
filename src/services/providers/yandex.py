@@ -28,7 +28,5 @@ class YandexProvider(BaseMapProvider):
     async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:
         return []
 
-    async def search(
-        self, query: SearchQuery, area: SearchArea, page: int = 1, page_size: int = 50
-    ) -> SearchPage:
+    async def search(self, query: SearchQuery, area: SearchArea, page: int = 1, page_size: int = 50) -> SearchPage:
         raise ProviderResponseError(f"Яндекс: провайдер не реализован ({YANDEX_DISABLED_REASON})")

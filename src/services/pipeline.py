@@ -85,9 +85,7 @@ async def _process_and_save_places(
         nonlocal checks_done
         async with semaphore:
             try:
-                site_status, details = await analyze_website(
-                    place.raw_website, client=client
-                )
+                site_status, details = await analyze_website(place.raw_website, client=client)
             except Exception:
                 logger.exception("Website check crashed for %r", place.raw_website)
                 site_status, details = "dead_site", "Website check error"
@@ -100,9 +98,7 @@ async def _process_and_save_places(
         return place, site_status, details
 
     async with create_check_client() as client:
-        results = await asyncio.gather(
-            *(_check_place(client, place) for place in places)
-        )
+        results = await asyncio.gather(*(_check_place(client, place) for place in places))
 
     qualified = 0
     duplicates_skipped = 0
@@ -142,30 +138,32 @@ async def _process_and_save_places(
             continue
 
         is_chain = chains.is_chain(place.name)
-        (chains_to_save if is_chain else leads_to_save).append({
-            "external_id": place.external_id,
-            "source": place.source,
-            "name": place.name,
-            "category": place.category,
-            "district": place.district,
-            "address": place.address,
-            "phone": place.phone,
-            "socials": socials,
-            "raw_website": place.raw_website,
-            "site_status": site_status,
-            "score": score,
-            "crm_status": "new",
-            "map_url": place.map_url,
-            "email": place.email,
-            "source_url": place.source_url,
-            "rubric": place.rubric,
-            "site_url": place.raw_website if site_status == SITE_DEAD else None,
-            "site_confidence": confidence_of_check(site_status, place.source),
-            "site_source": source_of_status(place.source) if site_status != SITE_UNKNOWN else None,
-            "site_checked_at": None if site_status == SITE_UNKNOWN else datetime.now(UTC),
-            "is_chain": is_chain,
-            **(extra_fields or {}),
-        })
+        (chains_to_save if is_chain else leads_to_save).append(
+            {
+                "external_id": place.external_id,
+                "source": place.source,
+                "name": place.name,
+                "category": place.category,
+                "district": place.district,
+                "address": place.address,
+                "phone": place.phone,
+                "socials": socials,
+                "raw_website": place.raw_website,
+                "site_status": site_status,
+                "score": score,
+                "crm_status": "new",
+                "map_url": place.map_url,
+                "email": place.email,
+                "source_url": place.source_url,
+                "rubric": place.rubric,
+                "site_url": place.raw_website if site_status == SITE_DEAD else None,
+                "site_confidence": confidence_of_check(site_status, place.source),
+                "site_source": source_of_status(place.source) if site_status != SITE_UNKNOWN else None,
+                "site_checked_at": None if site_status == SITE_UNKNOWN else datetime.now(UTC),
+                "is_chain": is_chain,
+                **(extra_fields or {}),
+            }
+        )
 
     # One transaction for the whole harvest instead of a commit per lead (~30x faster on SQLite).
     saved_new, already_saved = await save_new_leads(session, leads_to_save)
@@ -262,8 +260,6 @@ async def import_csv_harvest(
     """
     places = parse_csv_leads(file_bytes)
     over_limit = max(0, len(places) - MAX_CSV_PLACES)
-    stats: dict[str, int] = await _process_and_save_places(
-        session, places[:MAX_CSV_PLACES], progress=progress
-    )
+    stats: dict[str, int] = await _process_and_save_places(session, places[:MAX_CSV_PLACES], progress=progress)
     stats["over_limit"] = over_limit
     return stats

@@ -82,7 +82,8 @@ class AdminNotifier:
         """
         logger.warning(
             "Chat %s has become supergroup %s: replace the ID in NOTIFY_CHAT_IDS, using the new one until restart",
-            old_id, new_id,
+            old_id,
+            new_id,
         )
         already_known = new_id in self._targets()
         self._chat_ids = [chat_id for chat_id in self._chat_ids if chat_id != old_id]

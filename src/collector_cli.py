@@ -19,7 +19,7 @@ import sys
 import traceback
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy.engine import URL
@@ -29,7 +29,7 @@ from src.config import Settings, SettingsError, resolve_path, settings, settings
 from src.database.models import ProviderState
 from src.database.repo import enable_provider, get_provider_states, init_db
 from src.services.assisted_runs import CHECK_MAX_PAGES, ENRICH_MAX_CARDS, CheckReport, EnrichRun, run_check, run_enrich
-from src.services.collector import CollectorConfig, load_collector_config
+from src.services.collector import REST_REASON, CollectorConfig, load_collector_config
 from src.services.dgis_key import DGIS_PROVIDER_NAME, DgisKeyPolicy, DgisQuota, key_expiry_notice
 from src.services.lead_export import ExportResult, export_new_leads
 from src.services.lead_file import LeadFileError, parse_enrich_request
@@ -83,6 +83,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="вместе с --check: сохранить страницы и их состояние в data/samples, чтобы разбирать формат без сайта",
     )
     parser.add_argument(
+        "--ignore-interval",
+        action="store_true",
+        help="вместе с --assisted: запустить сейчас, не дожидаясь интервала. Паузу после блокировки не снимает",
+    )
+    parser.add_argument(
         "--assisted",
         action="store_true",
         help="парсер 2ГИС с видимым окном браузера: капчу проходит человек за компьютером, сборщик ждёт",
@@ -90,6 +95,10 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.assisted and (args.export_only or args.enable_provider):
         parser.error("--assisted нужен только для сбора")
+    if args.ignore_interval and not args.assisted:
+        parser.error("--ignore-interval работает только вместе с --assisted")
+    if args.ignore_interval and args.check:
+        parser.error("--check не зависит от интервала, у него свой лимит: --ignore-interval здесь не нужен")
     if args.save_sample and not args.check:
         parser.error("--save-sample работает только вместе с --check")
     if (args.check or args.enrich is not None) and not args.assisted:
@@ -103,6 +112,14 @@ def _local_time(value: datetime | None) -> str:
     return value.astimezone().strftime("%d.%m.%Y %H:%M")
 
 
+def _rest_hint(retry_at: datetime | None, command: str) -> str:
+    """Whether to run now is for the owner to decide: say when the interval ends and how not to wait for it."""
+    return (
+        f"По интервалу можно запустить после {_local_time(retry_at)}. "
+        f"Запустить сейчас: python collect_cli.py {command} --ignore-interval"
+    )
+
+
 @dataclass
 class _Outcome:
     """What one launch did, for the console and the exit code."""
@@ -111,6 +128,8 @@ class _Outcome:
     export: ExportResult | None = None
     refused: dict[str, ProviderState] = field(default_factory=dict)
     key_lines: list[str] = field(default_factory=list)
+    # When the interval ends, for the providers skipped because of it.
+    rest_until: dict[str, datetime] = field(default_factory=dict)
 
 
 def _print_outcome(outcome: _Outcome) -> None:
@@ -123,6 +142,8 @@ def _print_outcome(outcome: _Outcome) -> None:
         )
         for name, reason in result.skipped.items():
             print(f"Пропущен {name}: {reason}")
+            if reason == REST_REASON:
+                print(_rest_hint(outcome.rest_until.get(name), "--assisted"))
         # Bot commands do not exist here, so the alert points to the option doing the same.
         for alert in result.alerts:
             print(alert.replace("/provider_on", "python collect_cli.py --enable-provider"))
@@ -169,7 +190,11 @@ def _key_lines(state: ProviderState | None, policy: DgisKeyPolicy) -> list[str]:
 
 
 async def _collect(
-    current: Settings, session_maker: async_sessionmaker[AsyncSession], outcome: _Outcome, assisted: bool = False
+    current: Settings,
+    session_maker: async_sessionmaker[AsyncSession],
+    outcome: _Outcome,
+    assisted: bool = False,
+    ignore_interval: bool = False,
 ) -> list[str]:
     """Run one pass of the usual collection. Returns the names of the providers configured here."""
     config = _collector_config(current)
@@ -191,7 +216,7 @@ async def _collect(
     provider_set = build_providers(
         config.providers,
         twogis_key,
-        ScraperOptions.from_settings(current, assisted=assisted),
+        replace(ScraperOptions.from_settings(current, assisted=assisted), ignore_interval=ignore_interval),
         TwoGisOptions.from_settings(current),
         dgis_quota.spend if dgis_quota else None,
     )
@@ -272,6 +297,9 @@ async def _check(current: Settings, session_maker: async_sessionmaker[AsyncSessi
 
 
 def _print_enrich(run: EnrichRun) -> None:
+    if run.refused == REST_REASON:
+        print(f"Карточки не открывались: {run.refused}. {_rest_hint(run.retry_at, '--assisted --enrich ФАЙЛ')}")
+        return
     if run.refused is not None:
         print(f"Карточки не открывались: {run.refused}. Не запускайте повторно раньше времени.")
         return
@@ -292,7 +320,9 @@ def _print_enrich(run: EnrichRun) -> None:
     print(f"Отправьте боту файл: {run.path}" if run.path else "Файл не создан: прочитать ничего не удалось.")
 
 
-async def _enrich(current: Settings, session_maker: async_sessionmaker[AsyncSession], file_name: str) -> int:
+async def _enrich(
+    current: Settings, session_maker: async_sessionmaker[AsyncSession], file_name: str, ignore_interval: bool = False
+) -> int:
     _collector_config(current)  # the same check of the settings as before a collection
     try:
         data = await asyncio.to_thread(read_limited, Path(file_name), current.IMPORT_MAX_FILE_BYTES)
@@ -305,10 +335,11 @@ async def _enrich(current: Settings, session_maker: async_sessionmaker[AsyncSess
         return EXIT_ERROR
 
     run = EnrichRun()
+    options = replace(ScraperOptions.from_settings(current, assisted=True), ignore_interval=ignore_interval)
     try:
         await run_enrich(
             session_maker,
-            _scraper_provider(ScraperOptions.from_settings(current, assisted=True)),
+            _scraper_provider(options),
             request,
             resolve_path(current.COLLECTOR_EXPORT_DIR),
             current.SCRAPER_BLOCK_BACKOFF_HOURS,
@@ -342,14 +373,18 @@ async def _run(args: argparse.Namespace, current: Settings) -> int:
             print(f"Источник {args.enable_provider} включён, счётчик блокировок сброшен.")
             return EXIT_OK
 
+        if args.ignore_interval:
+            logger.warning("The interval between runs is skipped by the decision of the owner (--ignore-interval)")
         if args.check:
             return await _check(current, session_maker, args.save_sample)
         if args.enrich is not None:
-            return await _enrich(current, session_maker, args.enrich)
+            return await _enrich(current, session_maker, args.enrich, args.ignore_interval)
 
         names: list[str] = []
         if not args.export_only:
-            names = await _collect(current, session_maker, outcome, args.assisted or current.SCRAPER_ASSISTED)
+            names = await _collect(
+                current, session_maker, outcome, args.assisted or current.SCRAPER_ASSISTED, args.ignore_interval
+            )
         if not args.no_export:
             outcome.export = await export_new_leads(
                 session_maker,
@@ -360,6 +395,12 @@ async def _run(args: argparse.Namespace, current: Settings) -> int:
         async with session_maker() as session:
             states = await get_provider_states(session)
         outcome.refused = _refused_providers(states, names)
+        if outcome.report is not None:
+            hours = timedelta(hours=current.SCRAPER_MIN_HOURS_BETWEEN_RUNS)
+            for name, reason in outcome.report.result.skipped.items():
+                last_run = states[name].last_run_at if name in states else None
+                if reason == REST_REASON and last_run is not None:
+                    outcome.rest_until[name] = last_run + hours
         if DGIS_PROVIDER_NAME in names and current.TWOGIS_API_KEY:
             outcome.key_lines = _key_lines(states.get(DGIS_PROVIDER_NAME), DgisKeyPolicy.from_settings(current))
     finally:
@@ -432,4 +473,3 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 - the last line of defense: reported and saved, with the traceback
         _report_unexpected(exc, settings)
         return EXIT_ERROR
-

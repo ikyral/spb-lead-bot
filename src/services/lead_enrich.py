@@ -132,9 +132,7 @@ async def _check_sites(records: list[EnrichRecord]) -> dict[str, tuple[str, str 
         return dict(await asyncio.gather(*(check(client, record) for record in records)))
 
 
-def _update_values(
-    lead: Lead, record: EnrichRecord, check: tuple[str, str | None], branches: int
-) -> dict[str, Any]:
+def _update_values(lead: Lead, record: EnrichRecord, check: tuple[str, str | None], branches: int) -> dict[str, Any]:
     """The new values of a lead, by the rules of the pipeline for a lead with this site."""
     website = normalize_website(record.website)
     site_status, details = check

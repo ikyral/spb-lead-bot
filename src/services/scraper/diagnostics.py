@@ -139,10 +139,7 @@ def state_outline(value: Any) -> dict[str, Any]:
             entry["max_length"] = max(entry.get("max_length", 0), len(item))
             stack.extend((f"{path}[]", child, depth + 1) for child in item)
     return {
-        "paths": [
-            {"path": path, **entry, "types": sorted(entry["types"])} for path, entry in sorted(outline.items())
-        ],
+        "paths": [{"path": path, **entry, "types": sorted(entry["types"])} for path, entry in sorted(outline.items())],
         "key_hits": [{"path": path, "count": count} for path, count in sorted(hits.items())],
         "truncated": truncated,
     }
-

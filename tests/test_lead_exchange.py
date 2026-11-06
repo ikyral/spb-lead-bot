@@ -318,9 +318,7 @@ def test_control_characters_are_removed() -> None:
 
 
 def test_links_in_other_schemes_are_dropped() -> None:
-    record = _record(
-        1, website="javascript:alert(1)", source_url="data:text/html,<script>alert(1)</script>"
-    )
+    record = _record(1, website="javascript:alert(1)", source_url="data:text/html,<script>alert(1)</script>")
     place = _parse(_file([record])).places[0]
     assert place.raw_website is None
     assert place.source_url is None
@@ -549,7 +547,12 @@ async def test_overlapping_files_with_different_ids_do_not_duplicate_in_parallel
 async def test_export_then_import_end_to_end(session_maker, tmp_path: Path) -> None:
     """What a collector writes, the server reads, even with its own database."""
     collector_leads = [
-        _lead(1, address="Невский, 1", map_url="https://yandex.ru/maps/?pt=30.3,59.9&z=17&l=map", socials="https://vk.com/a"),
+        _lead(
+            1,
+            address="Невский, 1",
+            map_url="https://yandex.ru/maps/?pt=30.3,59.9&z=17&l=map",
+            socials="https://vk.com/a",
+        ),
         _lead(2, phone=None, raw_website="https://dead.example", site_status="dead_site"),
     ]
     await _add(session_maker, *collector_leads)
@@ -697,9 +700,7 @@ def _document_update(user_id: int, chat_id: int, file_name: str | None, file_siz
 
 @pytest.fixture
 def telegram(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        "src.bot.middlewares.settings", Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=ADMIN)
-    )
+    monkeypatch.setattr("src.bot.middlewares.settings", Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=ADMIN))
     status = MagicMock()
     status.edit_text = AsyncMock()
     calls = MagicMock()
