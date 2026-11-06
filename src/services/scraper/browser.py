@@ -109,12 +109,19 @@ class PlaywrightSession:
                 reads.append(asyncio.ensure_future(_read_json(response)))
 
         page.on("response", on_response)
+        listening = True
         try:
             response = await page.goto(url, wait_until="domcontentloaded", timeout=self._timeout_ms)
             with suppress(PlaywrightTimeoutError):
                 await page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_TIMEOUT_SECONDS * 1000)
-            bodies = await asyncio.gather(*reads)
-            read_bodies = [(body_url, body) for body_url, body in zip(urls, bodies, strict=True) if body is not None]
+            # A page goes on receiving responses during the wait: only those that came by now are waited for.
+            pending = list(zip(urls, reads, strict=True))
+            bodies = await asyncio.gather(*(read for _, read in pending))
+            page.remove_listener("response", on_response)
+            listening = False
+            read_bodies = [
+                (body_url, body) for (body_url, _), body in zip(pending, bodies, strict=True) if body is not None
+            ]
             return PageSnapshot(
                 status=response.status if response is not None else None,
                 final_url=page.url,
@@ -129,7 +136,8 @@ class PlaywrightSession:
             # The class only: Playwright's messages contain the URL.
             raise ProviderTemporaryError(f"ошибка браузера ({type(exc).__name__})") from None
         finally:
-            page.remove_listener("response", on_response)
+            if listening:
+                page.remove_listener("response", on_response)
             for read in reads:
                 read.cancel()
 

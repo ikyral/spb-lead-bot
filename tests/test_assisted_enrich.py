@@ -1004,6 +1004,84 @@ async def test_visit_keeps_the_address_of_every_response() -> None:
     assert snapshot.bodies_from(lambda url: "other" in url) == []
 
 
+def _page_with_listeners() -> tuple[MagicMock, dict]:
+    """Removing a listener twice is an error, as in the real page."""
+    page = MagicMock()
+    handlers: dict = {}
+    page.on = lambda event, handler: handlers.setdefault(event, handler)
+    page.remove_listener = lambda event, handler: handlers.pop(event)
+    page.url = "https://2gis.ru/spb/firm/1"
+    page.title = AsyncMock(return_value="t")
+    page.content = AsyncMock(return_value="<html></html>")
+    page.wait_for_load_state = AsyncMock()
+    return page, handlers
+
+
+async def test_a_response_during_the_wait_for_bodies_is_ignored_without_an_error() -> None:
+    page, handlers = _page_with_listeners()
+    late = MagicMock()
+    late.url = "https://a.2gis.ru/late"
+    late.body = AsyncMock(return_value=b'{"late": 1}')
+
+    async def body_of_the_first() -> bytes:
+        # Nothing before this waits for anything, so here the wait for bodies has already begun.
+        handlers["response"](late)
+        await asyncio.sleep(0)
+        return b'{"first": 1}'
+
+    first = MagicMock()
+    first.url = "https://a.2gis.ru/first"
+    first.body = body_of_the_first
+
+    async def goto(url, **kwargs):
+        handlers["response"](first)
+        return MagicMock(status=200)
+
+    page.goto = goto
+    session = PlaywrightSession()
+    session._page = page
+
+    snapshot = await session.visit("https://2gis.ru/spb/firm/1", lambda _url: True)
+
+    assert snapshot.json_urls == ["https://a.2gis.ru/first"]
+    assert snapshot.json_bodies == [{"first": 1}]
+    assert handlers == {}  # stopped listening, and only once
+
+
+async def test_a_failed_page_stops_listening_and_cancels_the_reads() -> None:
+    page, handlers = _page_with_listeners()
+    started = asyncio.Event()
+
+    async def endless_body() -> bytes:
+        started.set()
+        await asyncio.Event().wait()
+        return b"{}"
+
+    response = MagicMock()
+    response.url = "https://a.2gis.ru/first"
+    response.body = endless_body
+
+    async def goto(url, **kwargs):
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        handlers["response"](response)
+        await started.wait()
+        raise PlaywrightTimeoutError("timeout")
+
+    page.goto = goto
+    session = PlaywrightSession()
+    session._page = page
+
+    with pytest.raises(ProviderTemporaryError):
+        await session.visit("https://2gis.ru/spb/firm/1", lambda _url: True)
+
+    assert handlers == {}
+    leftovers = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+    await asyncio.gather(*leftovers, return_exceptions=True)
+    assert all(task.cancelled() for task in leftovers)
+    assert leftovers
+
+
 def test_new_code_has_nothing_that_touches_or_hides_from_a_captcha() -> None:
     sources = "\n".join(
         inspect.getsource(module).lower()
