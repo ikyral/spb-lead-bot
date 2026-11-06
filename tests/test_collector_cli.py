@@ -652,3 +652,78 @@ def test_export_is_valid_json_on_disk(tmp_path: Path) -> None:
     assert path.name == "leads_20261105_010203.json"
     assert json.loads(path.read_text(encoding="utf-8")) == {"кириллица": "да"}
     assert "кириллица" in path.read_text(encoding="utf-8")  # readable, not \\u escapes
+
+
+# ---------- errors nobody foresaw ----------
+
+
+def _failing_run(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    async def fail(args, current):
+        raise error
+
+    monkeypatch.setattr(collector_cli, "_run", fail)
+
+
+def test_an_unexpected_value_error_is_not_called_an_error_of_settings(
+    cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    log = tmp_path / "logs" / "errors.log"
+    monkeypatch.setattr(collector_cli, "ERROR_LOG_PATH", str(log))
+    _failing_run(monkeypatch, ValueError("zip() argument 2 is shorter than argument 1"))
+
+    assert collector_cli.main([]) == collector_cli.EXIT_ERROR
+
+    out = capsys.readouterr().out
+    assert "Ошибка настроек" not in out
+    assert "Непредвиденная ошибка: ValueError: zip() argument 2 is shorter than argument 1" in out
+    assert str(log) in out
+    saved = log.read_text(encoding="utf-8")
+    assert "Traceback (most recent call last)" in saved
+    assert "in fail" in saved
+
+
+def test_an_error_of_settings_is_still_called_that(cli, tmp_path: Path, monkeypatch, capsys) -> None:
+    log = tmp_path / "logs" / "errors.log"
+    monkeypatch.setattr(collector_cli, "ERROR_LOG_PATH", str(log))
+    cli.settings.COLLECT_CRON = "неверно"
+
+    assert collector_cli.main([]) == collector_cli.EXIT_ERROR
+
+    out = capsys.readouterr().out
+    assert "Ошибка настроек: COLLECT_CRON" in out
+    assert "Непредвиденная" not in out
+    assert not log.exists()
+
+
+def test_secrets_stay_out_of_the_console_and_the_file(cli, tmp_path: Path, monkeypatch, capsys) -> None:
+    log = tmp_path / "logs" / "errors.log"
+    monkeypatch.setattr(collector_cli, "ERROR_LOG_PATH", str(log))
+    cli.settings.BOT_TOKEN = SecretStr("123456:BOTSECRET")
+    cli.settings.DGIS_API_KEY = SecretStr("DGISSECRET")
+    message = (
+        "bad 123456:BOTSECRET and DGISSECRET at https://catalog.api.2gis.ru/3.0/items?key=OTHERSECRET&q=Иванов "
+        "with postgresql://user:DBSECRET@host/db"
+    )
+    _failing_run(monkeypatch, RuntimeError(message))
+
+    collector_cli.main([])
+
+    out = capsys.readouterr().out
+    saved = log.read_text(encoding="utf-8")
+    for text in (out, saved):
+        for secret in ("BOTSECRET", "DGISSECRET", "OTHERSECRET", "DBSECRET", "Иванов"):
+            assert secret not in text
+        assert "https://catalog.api.2gis.ru/3.0/items?" in text
+
+
+def test_a_log_that_cannot_be_written_does_not_hide_the_error(cli, tmp_path: Path, monkeypatch, capsys) -> None:
+    (tmp_path / "file").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(collector_cli, "ERROR_LOG_PATH", str(tmp_path / "file" / "errors.log"))
+    _failing_run(monkeypatch, KeyError("x"))
+
+    assert collector_cli.main([]) == collector_cli.EXIT_ERROR
+
+    out = capsys.readouterr().out
+    assert "Непредвиденная ошибка: KeyError" in out
+    assert "не записаны" in out
+

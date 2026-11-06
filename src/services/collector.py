@@ -12,7 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.config import Settings
+from src.config import Settings, SettingsError
 from src.database.models import ProviderState, SearchProgress
 from src.database.repo import (
     MAX_CONSECUTIVE_BLOCKS,
@@ -88,12 +88,12 @@ def _parse_cron(expression: str, timezone: ZoneInfo) -> CronTrigger:
     """Parse a standard 5-field crontab, whose weekday numbers APScheduler would misread."""
     fields = expression.split()
     if len(fields) != 5:
-        raise ValueError(f"COLLECT_CRON: нужно 5 полей (мин час день месяц день_недели), получено {expression!r}")
+        raise SettingsError(f"COLLECT_CRON: нужно 5 полей (мин час день месяц день_недели), получено {expression!r}")
     fields[4] = _WEEKDAY_NUMBER_RE.sub(lambda match: _CRON_WEEKDAYS[int(match.group())], fields[4])
     try:
         return CronTrigger.from_crontab(" ".join(fields), timezone=timezone)
     except (ValueError, TypeError) as exc:
-        raise ValueError(f"COLLECT_CRON: неверное выражение {expression!r}: {exc}") from exc
+        raise SettingsError(f"COLLECT_CRON: неверное выражение {expression!r}: {exc}") from exc
 
 
 def _parse_queries(value: str) -> list[SearchQuery]:
@@ -119,24 +119,24 @@ def _parse_areas(districts: str, bbox: str) -> list[SearchArea]:
         try:
             south, west, north, east = (float(part) for part in bbox.split(","))
         except ValueError as exc:
-            raise ValueError(f"COLLECT_BBOX: нужно 'юг,запад,север,восток', получено {bbox!r}") from exc
+            raise SettingsError(f"COLLECT_BBOX: нужно 'юг,запад,север,восток', получено {bbox!r}") from exc
         if not (-90 <= south < north <= 90 and -180 <= west < east <= 180):
-            raise ValueError(f"COLLECT_BBOX: неверные координаты {bbox!r}")
+            raise SettingsError(f"COLLECT_BBOX: неверные координаты {bbox!r}")
         return [SearchArea(bbox=(south, west, north, east))]
 
     names = _split(districts) or list(SPB_DISTRICTS)
     unknown = [name for name in names if name not in SPB_DISTRICTS]
     if unknown:
-        raise ValueError(f"COLLECT_DISTRICTS: неизвестные районы {unknown}; доступны: {list(SPB_DISTRICTS)}")
+        raise SettingsError(f"COLLECT_DISTRICTS: неизвестные районы {unknown}; доступны: {list(SPB_DISTRICTS)}")
     return [SearchArea(bbox=SPB_DISTRICTS[name], district=name) for name in names]
 
 
 def load_collector_config(settings: Settings) -> CollectorConfig:
-    """Validate collection settings. Raises ValueError with a message for the bot owner."""
+    """Validate collection settings. Raises SettingsError with a message for the bot owner."""
     try:
         timezone = ZoneInfo(settings.COLLECT_TIMEZONE)
     except (ZoneInfoNotFoundError, ValueError, OSError) as exc:
-        raise ValueError(f"COLLECT_TIMEZONE: неизвестный часовой пояс {settings.COLLECT_TIMEZONE!r}") from exc
+        raise SettingsError(f"COLLECT_TIMEZONE: неизвестный часовой пояс {settings.COLLECT_TIMEZONE!r}") from exc
 
     trigger: BaseTrigger
     if settings.COLLECT_INTERVAL_MINUTES is not None:
@@ -149,10 +149,10 @@ def load_collector_config(settings: Settings) -> CollectorConfig:
     providers = [name.lower() for name in _split(settings.COLLECT_PROVIDERS)]
     unknown = sorted(set(providers) - KNOWN_PROVIDERS)
     if unknown:
-        raise ValueError(f"COLLECT_PROVIDERS: неизвестные провайдеры {unknown}; доступны: {sorted(KNOWN_PROVIDERS)}")
+        raise SettingsError(f"COLLECT_PROVIDERS: неизвестные провайдеры {unknown}; доступны: {sorted(KNOWN_PROVIDERS)}")
 
     if settings.SCRAPER_MIN_DELAY_SECONDS > settings.SCRAPER_MAX_DELAY_SECONDS:
-        raise ValueError("SCRAPER_MIN_DELAY_SECONDS не может быть больше SCRAPER_MAX_DELAY_SECONDS")
+        raise SettingsError("SCRAPER_MIN_DELAY_SECONDS не может быть больше SCRAPER_MAX_DELAY_SECONDS")
 
     areas = _parse_areas(settings.COLLECT_DISTRICTS, settings.COLLECT_BBOX)
     return CollectorConfig(
