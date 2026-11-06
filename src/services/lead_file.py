@@ -500,6 +500,15 @@ def _parse_result_record(record: Any) -> EnrichRecord:
     )
 
 
+def fit_result_lists(phones: list[str], socials: list[str]) -> tuple[list[str], list[str]]:
+    """As much as the bot accepts: a card with many networks is a card that was read, not a bad record."""
+    kept: list[str] = []
+    for social in socials:
+        if len(social) <= _SOCIAL_MAX and len(", ".join([*kept, social])) <= _SOCIALS_TOTAL_MAX:
+            kept.append(social)
+    return [phone for phone in phones if len(phone) <= _PHONE_MAX][:_PHONES_MAX_ITEMS], kept[:_SOCIALS_MAX_ITEMS]
+
+
 def is_valid_result_record(record: dict[str, Any]) -> bool:
     """Would the bot accept this record? A collector asks before saying that a card was read."""
     try:

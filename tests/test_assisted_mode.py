@@ -286,7 +286,6 @@ async def test_page_limit_reached_at_the_captcha_stops_without_opening_more() ->
         (PageSnapshot(status=403, final_url=NORMAL_URL, title="Forbidden", html=""), "403"),
         (PageSnapshot(status=429, final_url=NORMAL_URL, title="Too Many", html=""), "429"),
         (replace(OK, json_bodies=[{"meta": {"code": 403}}]), "отказал"),
-        (replace(OK, json_bodies=[{"unexpected": 1}]), "не распознана"),
     ],
 )
 async def test_other_refusals_stop_at_once_without_calling_a_person(page: PageSnapshot, expected: str) -> None:

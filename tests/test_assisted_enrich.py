@@ -849,17 +849,21 @@ async def test_a_run_without_a_captcha_resets_the_counter(session_maker, tmp_pat
         assert (await get_provider_states(session_db))["2gis_scraper"].consecutive_blocks == 0
 
 
-async def test_unrecognized_cards_in_a_row_stop_the_run(session_maker, tmp_path: Path) -> None:
+async def test_unrecognized_cards_in_a_row_stop_the_run_without_a_block(session_maker, tmp_path: Path) -> None:
     count = ENRICH_MAX_UNRECOGNIZED + 3
     session = Session([_page() for _ in range(count)])
 
     run = await _enrich(session_maker, session, [_item(number) for number in range(count)], tmp_path)
 
     assert len(session.visited) == ENRICH_MAX_UNRECOGNIZED
-    assert "не распознаны" in run.blocked
+    assert run.blocked is None
+    assert run.failed == "Формат страницы не распознан: нужна правка парсера, это не блокировка"
     assert all(record["parsed"] is False for record in _document(run)["records"])
     async with session_maker() as session_db:
-        assert (await get_provider_states(session_db))["2gis_scraper"].consecutive_blocks == 1
+        state = (await get_provider_states(session_db))["2gis_scraper"]
+    assert state.consecutive_blocks == 0
+    assert state.blocked_until is None
+    assert state.last_run_at is None  # the interval between runs stays free
 
 
 async def test_a_page_that_did_not_open_is_not_a_card_without_a_site(session_maker, tmp_path: Path) -> None:

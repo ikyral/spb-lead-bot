@@ -1,0 +1,47 @@
+{
+  "_comment": "Made up: the structure of a real page, none of its data. See src/services/scraper/twogis_site.py.",
+  "bss": {},
+  "session": {},
+  "data": {
+    "user": {"phone": "+70000000000", "name": "Владелец браузера"},
+    "entity": {
+      "profile": {
+        "70000001018420391": {
+          "meta": {"status": "success", "code": 200},
+          "data": {
+            "id": "70000001018420391",
+            "type": "branch",
+            "name": "Улыбка, стоматология",
+            "name_ex": {"primary": "Улыбка", "extension": "стоматология"},
+            "address": {"building_id": "1", "components": [], "postcode": "190000"},
+            "address_name": "Невский проспект, 10",
+            "point": {"lat": 59.935, "lon": 30.325},
+            "rubrics": [{"id": "1", "kind": "primary", "name": "Стоматологии"}],
+            "links": {"nearest_stations": [{"name": "Невский проспект"}]},
+            "contact_groups": [
+              {
+                "contacts": [
+                  {"type": "phone", "text": "+7‒921‒000‒00‒01", "print_text": "+7‒921‒000‒00‒01", "value": "+79210000001"},
+                  {"type": "email", "text": "info@smile.example", "value": "info@smile.example"},
+                  {
+                    "type": "website",
+                    "text": "smile.example",
+                    "url": "http://link.2gis.ru/1.2/AAAA/online/1/smile",
+                    "value": "http://link.2gis.ru/1.2/AAAA/online/1/smile"
+                  },
+                  {"type": "vkontakte", "text": "https://vk.com/smile", "url": "https://vk.com/smile", "value": "https://vk.com/smile"},
+                  {
+                    "type": "whatsapp",
+                    "text": "https://wa.me/79210000001?text=%D0%97%D0%B4%D1%80",
+                    "url": "https://wa.me/79210000001?text=%D0%97%D0%B4%D1%80",
+                    "value": "https://wa.me/79210000001?text=%D0%97%D0%B4%D1%80"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

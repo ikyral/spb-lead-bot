@@ -1,6 +1,7 @@
 """2GIS Places Catalog API 3.0 provider for Saint Petersburg places."""
 
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -359,6 +360,35 @@ def _primary_rubric(item: dict[str, Any]) -> str | None:
     return str(primary["name"]).strip()[:255]
 
 
+# A site of an organization in a card of 2GIS may be a link through 2GIS, with the address itself in its text.
+_REDIRECT_HOST_RE = re.compile(r"(?:^|\.)2gis\.[a-z]{2,10}$", re.ASCII)
+_SOCIAL_CONTACT_TYPES: frozenset[str] = frozenset(
+    {
+        "vkontakte",
+        "vk",
+        "telegram",
+        "instagram",
+        "whatsapp",
+        "viber",
+        "odnoklassniki",
+        "youtube",
+        "facebook",
+        "twitter",
+        "social",
+    }
+)
+
+
+def _site_address(contact: dict[str, Any]) -> str | None:
+    """The address of the site itself, or None if only a link through 2GIS is known."""
+    for key in ("value", "url", "text"):
+        candidate = str(contact.get(key) or "").strip()
+        host = url_host(candidate) if candidate and " " not in candidate else None
+        if host and "." in host and not _REDIRECT_HOST_RE.search(host.lower()):
+            return candidate
+    return None
+
+
 def extract_contacts(
     item: dict[str, Any]
 ) -> tuple[list[str], list[str], list[str], list[str]]:
@@ -387,13 +417,13 @@ def extract_contacts(
                 if val_str not in emails:
                     emails.append(val_str)
             elif c_type in ("website", "url"):
-                target = socials if is_social_domain(url_host(val_str)) else websites
-                if val_str not in target:
-                    target.append(val_str)
-            elif (
-                c_type in ("vkontakte", "vk", "telegram", "instagram", "whatsapp", "social")
-                and val_str not in socials
-            ):
+                address = _site_address(contact)
+                if address is None:
+                    continue
+                target = socials if is_social_domain(url_host(address)) else websites
+                if address not in target:
+                    target.append(address)
+            elif c_type in _SOCIAL_CONTACT_TYPES and val_str not in socials:
                 socials.append(val_str)
 
     return phones, websites, socials, emails

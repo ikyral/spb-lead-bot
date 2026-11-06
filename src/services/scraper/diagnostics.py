@@ -125,7 +125,7 @@ def state_outline(value: Any) -> dict[str, Any]:
             truncated = True
             continue
         entry = outline.setdefault(path, {"types": set(), "count": 0})
-        entry["types"].add(_type_label(json_shape(item, _MAX_DEPTH)))
+        entry["types"].add(_type_label(item if isinstance(item, (dict, list)) else json_shape(item)))
         entry["count"] += 1
         if depth >= _OUTLINE_MAX_DEPTH:
             truncated = truncated or isinstance(item, (dict, list))
