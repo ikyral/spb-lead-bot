@@ -10,8 +10,9 @@ collect_cli.py --assisted --check --save-sample:
   lists the organizations found. The separate responses of a page hold nothing about organizations.
 - A search lists organizations without contact_groups: only a card has them, so absent contacts in
   a list say nothing. Phones are in the state of a card in full, no click is needed.
-- NOT SEEN: a card with a site. Other outside links on those pages go through link.2gis.ru with the
-  text next to them, and a site is expected to be the same; a site with only such a link stays unread.
+- Five more real cards were read the same way on the same day, four of them with a site, none of the
+  addresses on 2GIS. Other outside links on those pages go through link.2gis.ru, so a site known only
+  by such a link stays unread; whether cards with such a site exist was not seen.
 - Separate responses and the links of a page are read only if there is no state.
 """
 
