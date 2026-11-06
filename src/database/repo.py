@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import ColumnElement, Connection, CursorResult, case, func, inspect, or_, select, text, update
+from sqlalchemy import ColumnElement, Connection, CursorResult, and_, case, func, inspect, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -25,6 +25,8 @@ from src.database.models import (
     ProviderState,
     SearchProgress,
 )
+from src.services.scorer import calculate_lead_score
+from src.services.site_status import CONFIDENCE_HIGH, SITE_FOUND, SITE_NO_SITE, SOURCE_MANUAL
 
 engine: AsyncEngine = create_async_engine(settings.DB_URL, echo=False)
 async_session_maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
@@ -224,15 +226,25 @@ async def get_leads(
     offset: int = 0,
 ) -> list[Lead]:
     """Retrieve leads filtered by CRM status and minimum score with pagination."""
+    in_list = _in_pool_clause() if crm_status == STATUS_NEW else Lead.crm_status == crm_status
     stmt = (
         select(Lead)
-        .where(Lead.crm_status == crm_status, Lead.score >= min_score)
+        .where(in_list, Lead.score >= min_score)
         .order_by(Lead.score.desc(), Lead.id.desc())
         .limit(limit)
         .offset(offset)
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+def _in_pool_clause() -> ColumnElement[bool]:
+    """Leads that may still be handed out: new, without a known site, not part of a chain."""
+    return and_(
+        Lead.crm_status == STATUS_NEW,
+        Lead.site_status != SITE_FOUND,
+        func.coalesce(Lead.is_chain, False).is_(False),
+    )
 
 
 def _has_contacts_clause() -> ColumnElement[bool]:
@@ -251,7 +263,7 @@ async def issue_next_leads(session: AsyncSession, limit: int) -> list[Lead]:
     """
     next_new = (
         select(Lead.id)
-        .where(Lead.crm_status == STATUS_NEW)
+        .where(_in_pool_clause())
         .order_by(case((_has_contacts_clause(), 0), else_=1), Lead.created_at, Lead.id)
         .limit(limit)
     )
@@ -282,14 +294,14 @@ async def return_undelivered_leads(session: AsyncSession, lead_ids: list[int]) -
 
 async def count_new_leads(session: AsyncSession) -> int:
     """Number of leads not handed out yet."""
-    result = await session.execute(select(func.count(Lead.id)).where(Lead.crm_status == STATUS_NEW))
+    result = await session.execute(select(func.count(Lead.id)).where(_in_pool_clause()))
     return int(result.scalar_one())
 
 
 async def count_new_leads_with_contacts(session: AsyncSession) -> int:
     """How many of the leads not handed out yet can be contacted without opening their card."""
     result = await session.execute(
-        select(func.count(Lead.id)).where(Lead.crm_status == STATUS_NEW, _has_contacts_clause())
+        select(func.count(Lead.id)).where(_in_pool_clause(), _has_contacts_clause())
     )
     return int(result.scalar_one())
 
@@ -302,6 +314,29 @@ async def set_lead_phone(session: AsyncSession, lead_id: int, phone: str) -> Lea
     lead.phone = phone
     await session.commit()
     return lead
+
+
+async def set_site_verdict(session: AsyncSession, lead_id: int, has_site: bool) -> tuple[Lead | None, bool]:
+    """
+    Save what a person found out about the site. Returns the lead and whether anything changed.
+
+    Repeating a verdict changes nothing, not even its time. The result of contacting the
+    lead (contact_status) is a different matter and stays as it is.
+    """
+    lead = await session.get(Lead, lead_id)
+    if lead is None:
+        return None, False
+    status = SITE_FOUND if has_site else SITE_NO_SITE
+    if lead.site_status == status and lead.site_source == SOURCE_MANUAL:
+        return lead, False
+    lead.site_status = status
+    lead.site_source = SOURCE_MANUAL
+    lead.site_confidence = CONFIDENCE_HIGH
+    lead.site_checked_at = datetime.now(UTC)
+    lead.site_url = (lead.site_url or lead.raw_website) if has_site else None
+    lead.score = calculate_lead_score(lead.category, status, lead.phone, lead.socials)
+    await session.commit()
+    return lead, True
 
 
 async def get_status_counts(session: AsyncSession) -> dict[str, int]:

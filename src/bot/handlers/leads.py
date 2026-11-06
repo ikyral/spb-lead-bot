@@ -11,22 +11,24 @@ from aiogram import F, Router
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.bot.formatters import format_lead_card, generate_pitch_text
-from src.bot.keyboards import STALE_BUTTON_TEXT, get_export_keyboard, get_lead_card_keyboard
+from src.bot.formatters import format_lead_card, generate_pitch_text, site_verdict_text
+from src.bot.keyboards import STALE_BUTTON_TEXT, get_export_keyboard, get_lead_card_keyboard, manual_site_verdict
 from src.database.models import Lead
 from src.database.repo import (
     async_session_maker,
     export_leads_by_status,
     get_leads,
     get_status_counts,
+    set_site_verdict,
     update_crm_status,
 )
+from src.services.site_status import yandex_search_url
 from src.services.twogis_links import twogis_card_url
 
 logger = logging.getLogger(__name__)
 router = Router(name="leads")
 
-LEAD_ACTIONS: frozenset[str] = frozenset({"work", "reject", "pitch", "prev", "next"})
+LEAD_ACTIONS: frozenset[str] = frozenset({"work", "reject", "pitch", "site_yes", "site_no", "prev", "next"})
 # Statuses accepted by export_leads_by_status ('all' exports everything).
 EXPORT_STATUSES: frozenset[str] = frozenset({"new", "in_work", "rejected", "all"})
 
@@ -99,6 +101,8 @@ async def render_lead_page(
         has_prev=offset > 0,
         has_next=len(next_leads) > 0,
         card_url=twogis_card_url(lead.source_url),
+        search_url=yandex_search_url(lead.name, lead.address),
+        site_verdict=manual_site_verdict(lead),
     )
     await _reply(target, card_text, kb=kb, edit=edit)
 
@@ -119,7 +123,7 @@ async def handle_in_work_leads(message: Message) -> None:
 
 @router.callback_query(F.data.startswith("lead:"))
 async def handle_lead_action(callback: CallbackQuery) -> None:
-    """Handle card actions: work, reject, pitch, prev, next."""
+    """Handle card actions: work, reject, pitch, a verdict about the site, prev, next."""
     parts = (callback.data or "").split(":")
     if (
         len(parts) != 4
@@ -163,6 +167,14 @@ async def handle_lead_action(callback: CallbackQuery) -> None:
             # Stay in the list the card was opened from ("В работе" cards keep their position).
             list_status = "in_work" if current_status == "in_work" else "new"
             await render_lead_page(callback, session, crm_status=list_status, offset=offset, edit=True)
+            return
+
+        if action in ("site_yes", "site_no"):
+            has_site = action == "site_yes"
+            _, changed = await set_site_verdict(session, lead_id, has_site)
+            await callback.answer(site_verdict_text(has_site) if changed else "Эта отметка уже стоит")
+            if changed:
+                await render_lead_page(callback, session, crm_status=current_status, offset=offset, edit=True)
             return
 
         if action == "reject":

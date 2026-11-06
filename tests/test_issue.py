@@ -493,7 +493,8 @@ async def test_status_button_saves_the_status_and_updates_the_card(batch_env, st
     callback.answer.assert_awaited_once_with(f"Статус: {LEAD_OUTCOMES[status]}")
     edit = callback.message.edit_text.await_args
     assert "Организация 1" in edit.args[0]
-    marked = [b.text for row in edit.kwargs["reply_markup"].inline_keyboard for b in row if b.text.startswith("✅")]
+    buttons = [b for row in edit.kwargs["reply_markup"].inline_keyboard for b in row]
+    marked = [b.text for b in buttons if b.text.startswith("✅") and (b.callback_data or "").startswith("ls:")]
     assert marked == [f"✅ {LEAD_OUTCOMES[status]}"]
 
 

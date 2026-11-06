@@ -2,7 +2,7 @@
 
 import re
 
-from src.services.site_status import SITE_UNKNOWN
+from src.services.site_status import SITE_FOUND, SITE_UNKNOWN
 
 STATUS_POINTS: dict[str, int] = {
     "dead_site": 45,
@@ -61,14 +61,14 @@ def calculate_lead_score(
     """
     Calculate lead score (0..100) based on website status, contacts, and category.
 
-    - Returns 0 if site_status == 'has_site'.
+    - Returns 0 if a working site is known ('has_site', 'site_found').
     - Base points: dead_site (+45), social_only (+35), unknown (+30), no_site (+25).
     - Contacts: phone (+25), socials (+15), neither phone nor socials (-30, except 'unknown':
       the source did not report contacts, which says nothing about the organization).
     - Margin bonus: high_margin is True or matches high margin keywords (+15).
     - Final result clamped to [0, 100].
     """
-    if site_status == "has_site":
+    if site_status in ("has_site", SITE_FOUND):
         return 0
 
     score = STATUS_POINTS.get(site_status, 0)

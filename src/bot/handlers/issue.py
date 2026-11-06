@@ -17,7 +17,13 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardMarkup, LinkPreviewOptions, Message
 
 from src.bot.chats import is_group_chat
-from src.bot.formatters import format_funnel_stats, format_issued_lead, format_msk_time, format_user_label
+from src.bot.formatters import (
+    format_funnel_stats,
+    format_issued_lead,
+    format_msk_time,
+    format_user_label,
+    site_verdict_text,
+)
 from src.bot.keyboards import (
     LEAD_OUTCOMES,
     STALE_BUTTON_TEXT,
@@ -37,6 +43,7 @@ from src.database.repo import (
     return_undelivered_leads,
     set_contact_status,
     set_lead_phone,
+    set_site_verdict,
 )
 from src.services.normalize import parse_manual_phone
 from src.services.scheduler import TRIGGER_BATCH, CollectorRunner, TopupDecision, TopupOutcome
@@ -242,6 +249,38 @@ async def handle_lead_status(callback: CallbackQuery) -> None:
             )
         except TelegramAPIError as exc:
             # The status is saved; only the card on the screen is out of date.
+            logger.warning("Could not update the card of lead %s: %s", lead_id, exc)
+
+
+@router.callback_query(F.data.startswith("sv:"))
+async def handle_site_verdict(callback: CallbackQuery) -> None:
+    """Save what a person found out about the site of a handed-out lead and show it on the card."""
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3 or not parts[1].isdigit() or parts[2] not in ("yes", "no"):
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    lead_id, has_site = int(parts[1]), parts[2] == "yes"
+
+    async with async_session_maker() as session:
+        lead, changed = await set_site_verdict(session, lead_id, has_site)
+    if lead is None:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    if not changed:
+        await callback.answer("Эта отметка уже стоит")
+        return
+
+    await callback.answer(site_verdict_text(has_site))
+    if isinstance(callback.message, Message):
+        try:
+            await callback.message.edit_text(
+                format_issued_lead(lead),
+                reply_markup=get_issued_lead_keyboard(lead),
+                parse_mode="HTML",
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+        except TelegramAPIError as exc:
+            # The verdict is saved; only the card on the screen is out of date.
             logger.warning("Could not update the card of lead %s: %s", lead_id, exc)
 
 

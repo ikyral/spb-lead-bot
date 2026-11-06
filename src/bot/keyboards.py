@@ -11,6 +11,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from src.config import settings
 from src.database.models import CONTACT_CONTACTED, CONTACT_NO_ANSWER, CONTACT_REJECTED, CONTACT_REPLIED, Lead
 from src.services.providers.base import SPB_DISTRICTS, TARGET_CATEGORIES
+from src.services.site_status import SITE_FOUND, SITE_NO_SITE, SOURCE_MANUAL, yandex_search_url
 from src.services.twogis_links import twogis_card_url
 
 DISTRICT_NAMES: list[str] = list(SPB_DISTRICTS.keys())
@@ -20,6 +21,9 @@ CATEGORY_KEYS: list[str] = list(TARGET_CATEGORIES.keys())
 STALE_BUTTON_TEXT: str = "Кнопка устарела. Откройте меню заново."
 OPEN_CARD_BUTTON_TEXT: str = "🔎 Открыть в 2ГИС"
 ADD_PHONE_BUTTON_TEXT: str = "✏️ Добавить телефон"
+SITE_YES_BUTTON_TEXT: str = "🌐 Сайт есть"
+SITE_NO_BUTTON_TEXT: str = "✅ Сайта нет"
+SEARCH_BUTTON_TEXT: str = "🔎 Проверить в Яндексе"
 
 # Statuses an admin can put on a handed-out lead, in the order of the buttons.
 LEAD_OUTCOMES: dict[str, str] = {
@@ -76,6 +80,8 @@ def get_lead_card_keyboard(
     has_prev: bool = False,
     has_next: bool = False,
     card_url: str | None = None,
+    search_url: str | None = None,
+    site_verdict: bool | None = None,
 ) -> InlineKeyboardMarkup:
     """Generate inline control buttons for lead card with pagination."""
     builder = InlineKeyboardBuilder()
@@ -114,14 +120,38 @@ def get_lead_card_keyboard(
     if card_url:
         builder.row(InlineKeyboardButton(text=OPEN_CARD_BUTTON_TEXT, url=card_url))
 
-    # Adjust rows: 2 for actions, 1 for pitch, 2 (or 1) for nav
-    nav_count = len(nav_buttons)
-    if nav_count > 0:
-        builder.adjust(2, 1, nav_count)
-    else:
-        builder.adjust(2, 1)
+    if search_url:
+        yes_text, no_text = _site_verdict_titles(site_verdict)
+        builder.button(text=yes_text, callback_data=f"lead:{lead_id}:site_yes:{offset}")
+        builder.button(text=no_text, callback_data=f"lead:{lead_id}:site_no:{offset}")
+        builder.button(text=SEARCH_BUTTON_TEXT, url=search_url)
+
+    # Rows: 2 for actions, 1 for pitch, then nav, the links and the verdict about the site.
+    rows = [2, 1]
+    if nav_buttons:
+        rows.append(len(nav_buttons))
+    has_map = bool(map_url and map_url.startswith(("http://", "https://")))
+    rows += [1] * (int(has_map) + int(bool(card_url)))
+    if search_url:
+        rows += [2, 1]
+    builder.adjust(*rows)
 
     return builder.as_markup()
+
+
+def _site_verdict_titles(site_verdict: bool | None) -> tuple[str, str]:
+    """The buttons of a verdict, the one already given marked."""
+    return (
+        f"☑️ {SITE_YES_BUTTON_TEXT}" if site_verdict is True else SITE_YES_BUTTON_TEXT,
+        f"☑️ {SITE_NO_BUTTON_TEXT}" if site_verdict is False else SITE_NO_BUTTON_TEXT,
+    )
+
+
+def manual_site_verdict(lead: Lead) -> bool | None:
+    """What a person has said about the site of this lead: True for a site, False for none, None if nothing."""
+    if lead.site_source != SOURCE_MANUAL:
+        return None
+    return {SITE_FOUND: True, SITE_NO_SITE: False}.get(lead.site_status)
 
 
 def get_lead_status_keyboard(
@@ -129,8 +159,10 @@ def get_lead_status_keyboard(
     current_status: str | None,
     card_url: str | None = None,
     can_add_phone: bool = False,
+    search_url: str | None = None,
+    site_verdict: bool | None = None,
 ) -> InlineKeyboardMarkup:
-    """Buttons of a handed-out lead: its card, statuses with the current one marked, adding a phone."""
+    """Buttons of a handed-out lead: its card, statuses with the current one marked, its site, adding a phone."""
     builder = InlineKeyboardBuilder()
     rows: list[int] = []
     if card_url:
@@ -140,6 +172,12 @@ def get_lead_status_keyboard(
         text = f"✅ {title}" if status == current_status else title
         builder.button(text=text, callback_data=f"ls:{lead_id}:{status}")
     rows += [2, 2]
+    if search_url:
+        yes_text, no_text = _site_verdict_titles(site_verdict)
+        builder.button(text=yes_text, callback_data=f"sv:{lead_id}:yes")
+        builder.button(text=no_text, callback_data=f"sv:{lead_id}:no")
+        builder.button(text=SEARCH_BUTTON_TEXT, url=search_url)
+        rows += [2, 1]
     if can_add_phone:
         builder.button(text=ADD_PHONE_BUTTON_TEXT, callback_data=f"lp:{lead_id}")
         rows.append(1)
@@ -150,7 +188,12 @@ def get_lead_status_keyboard(
 def get_issued_lead_keyboard(lead: Lead) -> InlineKeyboardMarkup:
     """The buttons of a card of this lead: the same when it is sent and whenever it is updated."""
     return get_lead_status_keyboard(
-        lead.id, lead.contact_status, card_url=twogis_card_url(lead.source_url), can_add_phone=not lead.phone
+        lead.id,
+        lead.contact_status,
+        card_url=twogis_card_url(lead.source_url),
+        can_add_phone=not lead.phone,
+        search_url=yandex_search_url(lead.name, lead.address),
+        site_verdict=manual_site_verdict(lead),
     )
 
 

@@ -99,6 +99,11 @@ def _site_verdict_line(lead: Lead, field_limit: int) -> str | None:
     return None
 
 
+def site_verdict_text(has_site: bool) -> str:
+    """What a person sees after giving a verdict about the site."""
+    return "Сайт есть: лид больше не будет выдаваться" if has_site else "Сайта нет: отмечено"
+
+
 def format_lead_card(lead: Lead) -> str:
     """Format business lead details as an HTML message for Telegram."""
     category_title = TARGET_CATEGORIES.get(lead.category, {}).get("title", lead.category)
