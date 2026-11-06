@@ -7,8 +7,9 @@ from collections.abc import Iterable
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramMigrateToChat, TelegramRetryAfter
+from aiogram.types import LinkPreviewOptions
 
-from src.bot.formatters import format_collection_report, format_import_report
+from src.bot.formatters import format_collection_report, format_import_messages
 from src.services.lead_import import ImportResult
 from src.services.scheduler import TRIGGER_LOW_POOL, TRIGGER_SCHEDULE, RunReport
 
@@ -42,16 +43,24 @@ class AdminNotifier:
         admins = self._admin_ids if self._notify_admins or not self._chat_ids else []
         return list(dict.fromkeys([*self._chat_ids, *admins]))
 
-    async def send(self, text: str, silent: bool = False, exclude_chat: int | None = None) -> None:
+    async def send(
+        self, text: str, silent: bool = False, exclude_chat: int | None = None, link_preview: bool = True
+    ) -> None:
         targets = [target for target in self._targets() if target != exclude_chat]
-        await asyncio.gather(*(self._send_to(target, text, silent) for target in targets))
+        await asyncio.gather(*(self._send_to(target, text, silent, link_preview) for target in targets))
 
-    async def _send_to(self, target: int, text: str, silent: bool) -> None:
+    async def _send_to(self, target: int, text: str, silent: bool, link_preview: bool = True) -> None:
         """Never raises: a problem with one chat must not reach other chats or the collection."""
         migrated = False
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
-                await self._bot.send_message(target, text, parse_mode="HTML", disable_notification=silent)
+                await self._bot.send_message(
+                    target,
+                    text,
+                    parse_mode="HTML",
+                    disable_notification=silent,
+                    link_preview_options=None if link_preview else LinkPreviewOptions(is_disabled=True),
+                )
             except TelegramMigrateToChat as exc:
                 new_target = exc.migrate_to_chat_id
                 if not self._remember_migration(target, new_target):
@@ -103,7 +112,9 @@ class AdminNotifier:
 
     async def report_import(self, result: ImportResult, exclude_chat: int | None = None) -> None:
         """The outcome of an imported file. The chat it was sent from sees the result there."""
-        await self.send(format_import_report(result), exclude_chat=exclude_chat)
+        # One after another, or a long list would arrive out of order.
+        for text in format_import_messages(result):
+            await self.send(text, exclude_chat=exclude_chat, link_preview=False)
 
     async def remind_pool_low(self, pool_size: int) -> None:
         """Ask for a new file from the external collector."""
