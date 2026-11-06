@@ -1,3 +1,5 @@
+from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -26,7 +28,15 @@ from src.database.models import (
     SearchProgress,
 )
 from src.services.scorer import calculate_lead_score
-from src.services.site_status import CONFIDENCE_HIGH, SITE_FOUND, SITE_NO_SITE, SOURCE_MANUAL
+from src.services.site_status import (
+    CONFIDENCE_HIGH,
+    ISSUE_GROUPS,
+    SITE_FOUND,
+    SITE_NO_SITE,
+    SITE_UNKNOWN,
+    SOURCE_MANUAL,
+    issue_group,
+)
 
 engine: AsyncEngine = create_async_engine(settings.DB_URL, echo=False)
 async_session_maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
@@ -253,31 +263,80 @@ def _has_contacts_clause() -> ColumnElement[bool]:
     return or_(*(func.trim(func.coalesce(column, "")) != "" for column in columns))
 
 
-async def issue_next_leads(session: AsyncSession, limit: int) -> list[Lead]:
-    """
-    Hand out `limit` new leads, those with contacts first and the oldest first within that.
+@dataclass(frozen=True)
+class IssueRules:
+    """What may go into a batch. By default: everything in the pool, whatever its niche."""
 
-    They become 'issued' in a single atomic statement, so concurrent calls can never return the same
-    lead. The repeated status check in the outer WHERE matters on databases where the subquery can
-    see a stale snapshot.
-    """
-    next_new = (
-        select(Lead.id)
-        .where(_in_pool_clause())
-        .order_by(case((_has_contacts_clause(), 0), else_=1), Lead.created_at, Lead.id)
-        .limit(limit)
-    )
+    issue_unknown: bool = True
+    max_niche_share: float = 1.0
+
+    def niche_cap(self, limit: int) -> int | None:
+        """How many leads of one niche fit into a batch, None if there is no limit."""
+        return None if self.max_niche_share >= 1 else max(1, int(limit * self.max_niche_share))
+
+
+# Parallel batches can take leads this one has just picked; then it picks others.
+_ISSUE_ATTEMPTS: int = 10
+
+
+async def _pick_leads(
+    session: AsyncSession, wanted: int, rules: IssueRules, cap: int | None, in_batch: Counter[str]
+) -> list[int]:
+    """The next leads by the order of handing out, within the limit of a niche."""
+    group = case(*((Lead.site_status.in_(statuses), rank) for rank, statuses in enumerate(ISSUE_GROUPS)), else_=99)
     stmt = (
-        update(Lead)
-        .where(Lead.id.in_(next_new), Lead.crm_status == STATUS_NEW)
-        .values(crm_status=STATUS_ISSUED, issued_at=datetime.now(UTC))
-        .returning(Lead)
-        .execution_options(synchronize_session=False)
+        select(Lead.id, Lead.category)
+        .where(_in_pool_clause())
+        .order_by(group, Lead.score.desc(), case((_has_contacts_clause(), 0), else_=1), Lead.created_at, Lead.id)
     )
-    leads = list((await session.scalars(stmt)).all())
-    await session.commit()
+    if not rules.issue_unknown:
+        stmt = stmt.where(Lead.site_status != SITE_UNKNOWN)
+    if cap is None:
+        return list((await session.scalars(stmt.with_only_columns(Lead.id).limit(wanted))).all())
+
+    picked: list[int] = []
+    counts = Counter(in_batch)
+    for lead_id, category in (await session.execute(stmt)).all():
+        if counts[category] < cap:
+            counts[category] += 1
+            picked.append(lead_id)
+            if len(picked) == wanted:
+                break
+    return picked
+
+
+async def issue_next_leads(session: AsyncSession, limit: int, rules: IssueRules | None = None) -> list[Lead]:
+    """
+    Hand out up to `limit` new leads: the most certain about needing a site first, by score within that.
+
+    Each lead becomes 'issued' only if it is still new, so concurrent calls never return the same lead.
+    """
+    rules = rules or IssueRules()
+    cap = rules.niche_cap(limit)
+    leads: list[Lead] = []
+    in_batch: Counter[str] = Counter()
+    for _ in range(_ISSUE_ATTEMPTS):
+        picked = await _pick_leads(session, limit - len(leads), rules, cap, in_batch)
+        if not picked:
+            break
+        stmt = (
+            update(Lead)
+            .where(Lead.id.in_(picked), Lead.crm_status == STATUS_NEW)
+            .values(crm_status=STATUS_ISSUED, issued_at=datetime.now(UTC))
+            .returning(Lead)
+            .execution_options(synchronize_session=False)
+        )
+        taken = list((await session.scalars(stmt)).all())
+        await session.commit()
+        leads += taken
+        in_batch.update(lead.category for lead in taken)
+        if len(leads) >= limit:
+            break
     # RETURNING has no guaranteed order.
-    return sorted(leads, key=lambda lead: (not lead.has_contacts, lead.created_at, lead.id))
+    return sorted(
+        leads,
+        key=lambda lead: (issue_group(lead.site_status), -lead.score, not lead.has_contacts, lead.created_at, lead.id),
+    )
 
 
 async def return_undelivered_leads(session: AsyncSession, lead_ids: list[int]) -> None:
@@ -295,6 +354,14 @@ async def return_undelivered_leads(session: AsyncSession, lead_ids: list[int]) -
 async def count_new_leads(session: AsyncSession) -> int:
     """Number of leads not handed out yet."""
     result = await session.execute(select(func.count(Lead.id)).where(_in_pool_clause()))
+    return int(result.scalar_one())
+
+
+async def count_unknown_site_leads(session: AsyncSession) -> int:
+    """How many leads of the pool have no verdict about the site yet."""
+    result = await session.execute(
+        select(func.count(Lead.id)).where(_in_pool_clause(), Lead.site_status == SITE_UNKNOWN)
+    )
     return int(result.scalar_one())
 
 

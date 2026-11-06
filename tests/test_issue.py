@@ -203,7 +203,11 @@ def batch_env(session_maker, monkeypatch: pytest.MonkeyPatch):
     """Handlers use the module-level session maker; pauses are removed."""
     monkeypatch.setattr(issue, "async_session_maker", session_maker)
     monkeypatch.setattr(issue, "MESSAGE_PAUSE_SECONDS", 0)
-    monkeypatch.setattr(issue, "settings", Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=1, LEADS_BATCH_SIZE=3))
+    monkeypatch.setattr(
+        issue,
+        "settings",
+        Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=1, LEADS_BATCH_SIZE=3, LEADS_MAX_NICHE_SHARE=1),
+    )
     issue._issuing_to.clear()
     return session_maker
 

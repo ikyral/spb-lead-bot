@@ -531,7 +531,7 @@ def batch_env(session_maker, monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(issue, "async_session_maker", session_maker)
     monkeypatch.setattr(issue.asyncio, "sleep", record_pause)
-    monkeypatch.setattr(issue, "settings", _settings(LEADS_BATCH_SIZE=3))
+    monkeypatch.setattr(issue, "settings", _settings(LEADS_BATCH_SIZE=3, LEADS_MAX_NICHE_SHARE=1))
     issue._issuing_to.clear()
     session_maker.pauses = pauses
     return session_maker

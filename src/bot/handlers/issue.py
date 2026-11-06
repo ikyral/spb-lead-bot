@@ -34,9 +34,11 @@ from src.bot.keyboards import (
 from src.config import settings
 from src.database.models import Lead
 from src.database.repo import (
+    IssueRules,
     async_session_maker,
     count_issued_leads,
     count_new_leads,
+    count_unknown_site_leads,
     get_contact_status_counts,
     get_status_counts,
     issue_next_leads,
@@ -133,10 +135,25 @@ def _describe_topup(decision: TopupDecision) -> str:
     return "⏸ Автосбор выключен. Запустить вручную: /collect_now"
 
 
+def _describe_held_back(held_back: int, unknown: int, rules: IssueRules, size: int) -> list[str]:
+    """Why leads still in the pool did not go into a short batch."""
+    lines: list[str] = []
+    waiting = 0 if rules.issue_unknown else unknown
+    if waiting:
+        lines.append(f"⏳ <b>{waiting}</b> ждут проверки сайта: сейчас такие лиды не выдаются (LEADS_ISSUE_UNKNOWN).")
+    if held_back > waiting:
+        lines.append(
+            f"⚖️ Ещё <b>{held_back - waiting}</b> не вошли в пачку: "
+            f"одна ниша занимает не больше {rules.niche_cap(size)} из {size}."
+        )
+    return lines
+
+
 async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> None:
     size = settings.LEADS_BATCH_SIZE
+    rules = IssueRules(issue_unknown=settings.LEADS_ISSUE_UNKNOWN, max_niche_share=settings.LEADS_MAX_NICHE_SHARE)
     async with async_session_maker() as session:
-        leads = await issue_next_leads(session, size)
+        leads = await issue_next_leads(session, size, rules)
 
     in_group = is_group_chat(message)
     pause = GROUP_MESSAGE_PAUSE_SECONDS if in_group else MESSAGE_PAUSE_SECONDS
@@ -169,6 +186,7 @@ async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> N
 
     async with async_session_maker() as session:
         pool_size = await count_new_leads(session)
+        unknown = await count_unknown_site_leads(session)
 
     delivered = len(leads) - len(undelivered)
     lines: list[str] = []
@@ -176,11 +194,22 @@ async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> N
         lines.append(f"✅ Выдано лидов: <b>{delivered}</b>. В запасе: <b>{pool_size}</b>.")
     if undelivered:
         lines.append(f"⚠️ Не удалось отправить: <b>{len(undelivered)}</b>, они остались в запасе.")
+    # What was held back by the rules: leads that failed to be delivered are reported above.
+    held_back = pool_size - len(undelivered) if len(leads) < size else 0
     if len(leads) < size:
         if not leads:
-            lines.append("📭 Новых лидов в запасе нет.")
+            lines.append("📭 Подходящих лидов сейчас нет." if held_back else "📭 Новых лидов в запасе нет.")
         else:
-            lines.append(f"В запасе было меньше {size}, выдал сколько есть.")
+            lines.append(
+                f"Подходящих было меньше {size}, выдал сколько есть."
+                if held_back
+                else f"В запасе было меньше {size}, выдал сколько есть."
+            )
+    if held_back > 0:
+        # More leads would not change the rules: the pool is refilled only if it is really low.
+        lines += _describe_held_back(held_back, unknown, rules, size)
+        await collector_runner.check_pool()
+    elif len(leads) < size:
         lines.append(_describe_topup(await collector_runner.request_topup(TRIGGER_BATCH)))
     else:
         await collector_runner.check_pool()

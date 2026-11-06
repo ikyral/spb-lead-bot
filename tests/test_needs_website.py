@@ -1,6 +1,7 @@
 """Tests for telling leads that need a website from those that do not: statuses, verdicts, order, chains, niches."""
 
-from datetime import UTC, datetime
+import asyncio
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -14,10 +15,19 @@ from src.bot.keyboards import (
     SITE_YES_BUTTON_TEXT,
     get_issued_lead_keyboard,
 )
+from src.config import Settings
 from src.database.models import CONTACT_REPLIED, STATUS_ISSUED, STATUS_NEW, Lead
-from src.database.repo import count_new_leads, get_leads, issue_next_leads, set_site_verdict
+from src.database.repo import (
+    IssueRules,
+    count_new_leads,
+    count_unknown_site_leads,
+    get_leads,
+    issue_next_leads,
+    set_site_verdict,
+)
 from src.services.pipeline import save_collected_places
 from src.services.providers.base import RawPlace
+from src.services.scheduler import TopupDecision, TopupOutcome
 from src.services.site_status import (
     CONFIDENCE_HIGH,
     CONFIDENCE_LOW,
@@ -281,3 +291,143 @@ async def test_button_while_browsing_moves_to_the_next_lead(session_maker) -> No
     assert "Второй" in callback.message.edit_text.await_args.args[0]
     async with session_maker() as session:
         assert await count_new_leads(session) == 1
+
+
+# ---------- the order and the shares of a batch ----------
+
+_START = datetime(2026, 11, 5, 10, 0, tzinfo=UTC)
+
+
+async def _add(session_maker, *rows: dict) -> None:
+    async with session_maker() as session:
+        for number, row in enumerate(rows):
+            values = {
+                "external_id": f"2gis_{number}",
+                "name": row.get("name", f"Организация {number}"),
+                "created_at": _START + timedelta(minutes=number),
+                **row,
+            }
+            session.add(_lead(**{**values, "id": None}))
+        await session.commit()
+
+
+async def _issued_names(session_maker, limit: int = 30, rules: IssueRules | None = None) -> list[str]:
+    async with session_maker() as session:
+        return [lead.name for lead in await issue_next_leads(session, limit, rules)]
+
+
+async def test_most_certain_first_and_by_score_within_a_group(session_maker) -> None:
+    await _add(
+        session_maker,
+        {"name": "неизвестен, высокий балл", "site_status": SITE_UNKNOWN, "score": 99},
+        {"name": "возможно есть", "site_status": SITE_UNCERTAIN, "score": 90},
+        {"name": "не найден", "site_status": SITE_NOT_FOUND, "score": 80},
+        {"name": "соцсеть", "site_status": SITE_SOCIAL_ONLY, "score": 60},
+        {"name": "мёртвый", "site_status": SITE_DEAD, "score": 70},
+        {"name": "вердикт", "site_status": SITE_NO_SITE, "site_source": SOURCE_MANUAL, "score": 65},
+    )
+    assert await _issued_names(session_maker) == [
+        "мёртвый", "вердикт", "соцсеть", "не найден", "возможно есть", "неизвестен, высокий балл",
+    ]
+
+
+async def test_known_site_is_never_handed_out_and_unknown_can_be_held_back(session_maker) -> None:
+    await _add(
+        session_maker,
+        {"name": "есть сайт", "site_status": SITE_FOUND, "score": 100},
+        {"name": "неизвестен", "site_status": SITE_UNKNOWN},
+        {"name": "не найден", "site_status": SITE_NOT_FOUND},
+    )
+    assert await _issued_names(session_maker, rules=IssueRules(issue_unknown=False)) == ["не найден"]
+    async with session_maker() as session:
+        assert await count_unknown_site_leads(session) == 1
+    assert await _issued_names(session_maker) == ["неизвестен"]
+    assert await _issued_names(session_maker) == []
+
+
+async def test_one_niche_takes_no_more_than_its_share_of_a_batch(session_maker) -> None:
+    rows = [{"name": f"красота {n}", "category": "beauty", "score": 90} for n in range(8)]
+    rows += [{"name": f"сервис {n}", "category": "auto_repair", "score": 50} for n in range(2)]
+    await _add(session_maker, *rows)
+
+    names = await _issued_names(session_maker, 6, IssueRules(max_niche_share=0.5))
+
+    assert sum(name.startswith("красота") for name in names) == 3
+    assert sum(name.startswith("сервис") for name in names) == 2
+    assert len(names) == 5  # a short batch rather than more of the same niche
+
+
+async def test_share_rounds_down_and_one_means_no_limit(session_maker) -> None:
+    assert IssueRules(max_niche_share=0.5).niche_cap(5) == 2
+    assert IssueRules(max_niche_share=0.1).niche_cap(3) == 1
+    assert IssueRules(max_niche_share=1).niche_cap(30) is None
+    await _add(session_maker, *({"name": f"красота {n}", "category": "beauty"} for n in range(4)))
+    assert len(await _issued_names(session_maker, 4, IssueRules(max_niche_share=1))) == 4
+
+
+async def test_parallel_batches_with_a_niche_limit_do_not_overlap_or_break_it(session_maker) -> None:
+    niches = ("beauty", "auto_repair", "massage", "florists")
+    await _add(session_maker, *({"name": str(n), "category": niches[n % 4]} for n in range(40)))
+
+    async def take() -> list[Lead]:
+        async with session_maker() as session:
+            return await issue_next_leads(session, 8, IssueRules(max_niche_share=0.5))
+
+    batches = await asyncio.gather(*(take() for _ in range(5)))
+    ids = [lead.id for batch in batches for lead in batch]
+    assert len(ids) == len(set(ids))
+    for batch in batches:
+        for niche in niches:
+            assert sum(lead.category == niche for lead in batch) <= 4
+
+
+def _batch_message() -> MagicMock:
+    message = MagicMock(spec=Message)
+    message.answer = AsyncMock()
+    message.chat = MagicMock(id=1, type="private")
+    return message
+
+
+def _runner() -> MagicMock:
+    runner = MagicMock()
+    runner.check_pool = AsyncMock()
+    runner.request_topup = AsyncMock(return_value=TopupDecision(TopupOutcome.STARTED))
+    return runner
+
+
+async def _run_batch(monkeypatch, session_maker, **overrides) -> tuple[str, MagicMock]:
+    monkeypatch.setattr(issue, "async_session_maker", session_maker)
+    monkeypatch.setattr(issue, "MESSAGE_PAUSE_SECONDS", 0)
+    monkeypatch.setattr(issue, "settings", Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=1, **overrides))
+    message, runner = _batch_message(), _runner()
+    await issue._issue_batch(message, runner)
+    return message.answer.await_args.args[0], runner
+
+
+async def test_batch_explains_how_many_wait_for_a_check_of_the_site(session_maker, monkeypatch) -> None:
+    await _add(
+        session_maker,
+        {"name": "неизвестен 1", "site_status": SITE_UNKNOWN},
+        {"name": "неизвестен 2", "site_status": SITE_UNKNOWN},
+        {"name": "не найден", "site_status": SITE_NOT_FOUND},
+    )
+    text, runner = await _run_batch(monkeypatch, session_maker, LEADS_ISSUE_UNKNOWN=False, LEADS_MAX_NICHE_SHARE=1)
+    assert "<b>2</b> ждут проверки сайта" in text
+    # More collection would not make them pass the rule: only the usual check of the pool.
+    runner.request_topup.assert_not_awaited()
+    runner.check_pool.assert_awaited_once()
+
+
+async def test_batch_explains_the_limit_of_a_niche(session_maker, monkeypatch) -> None:
+    await _add(session_maker, *({"name": f"красота {n}", "category": "beauty"} for n in range(5)))
+    text, runner = await _run_batch(monkeypatch, session_maker, LEADS_BATCH_SIZE=4, LEADS_MAX_NICHE_SHARE=0.5)
+    assert "Выдано лидов: <b>2</b>" in text
+    assert "<b>3</b> не вошли в пачку" in text
+    assert "не больше 2 из 4" in text
+    runner.request_topup.assert_not_awaited()
+
+
+async def test_really_empty_pool_still_asks_for_more(session_maker, monkeypatch) -> None:
+    text, runner = await _run_batch(monkeypatch, session_maker, LEADS_MAX_NICHE_SHARE=0.5)
+    assert "Новых лидов в запасе нет" in text
+    runner.request_topup.assert_awaited_once()

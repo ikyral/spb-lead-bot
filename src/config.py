@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     LEADS_MIN_POOL: int = Field(default=60, ge=0)
     # false: an organization from 2GIS without a phone or a site is a lead, the owner looks in its card.
     LEADS_REQUIRE_CONTACT: bool = False
+    # false: leads with nothing known about the site are not handed out at all.
+    LEADS_ISSUE_UNKNOWN: bool = True
+    # The largest share of a batch that one niche may take; 1 = no limit.
+    LEADS_MAX_NICHE_SHARE: float = Field(default=0.5, gt=0, le=1)
 
     # Automatic collection. Search targets and the schedule are validated by src.services.collector.
     # false, or an empty COLLECT_PROVIDERS, means leads come from an external collector as files.
