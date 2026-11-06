@@ -81,6 +81,12 @@ class Settings(BaseSettings):
 
     SCRAPER_HEADLESS: bool = True  # false only for manual debugging on a computer with a screen
 
+    # The collector on a computer with a screen: a person passes a captcha by hand. The bot ignores these.
+    SCRAPER_ASSISTED: bool = False
+    SCRAPER_PROFILE_DIR: str = "data/browser_profile"
+    SCRAPER_ASSISTED_WAIT_MINUTES: float = Field(default=5.0, gt=0, le=30)
+    SCRAPER_ASSISTED_MAX_CAPTCHAS: int = Field(default=2, ge=1, le=5)
+
     # The collector for a separate computer (collect_cli.py). Relative paths are from the project root.
     COLLECTOR_PROVIDERS: str = "2gis"
     COLLECTOR_DB_PATH: str = "data/collector.db"
