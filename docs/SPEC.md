@@ -87,9 +87,14 @@ Format: `(south_lat, west_lon, north_lat, east_lon)`
             "title": "🏨 Отели и базы отдыха",
             "osm_tags": [("tourism", "hotel"), ("tourism", "guest_house"), ("tourism", "chalet")],
             "query_2gis": "отель гостиница база отдыха",
-            "high_margin": True
-        }
+            "high_margin": False
+        },
+        # And small businesses, with OSM tags and queries in src/services/providers/base.py:
+        # barbershop, nails, massage, tire_service, detailing, cleaning, renovation,
+        # appliance_repair, workshop, tutors, photographers, florists.
     }
+
+`hotels` and `horeca` are collected but ranked lower: see the scoring formula.
 
 ## 5. Website Classification Rules (src/services/checker.py)
 - Social/Aggregator domains (`social_only`): `vk.com`, `vk.ru`, `t.me`, `taplink.cc`, `wa.me`, `instagram.com`, `yclients.com`, `dikidi.net`, `linktr.ee`.

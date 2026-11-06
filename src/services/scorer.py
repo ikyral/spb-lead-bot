@@ -32,7 +32,10 @@ HIGH_MARGIN_CATEGORY_KEYS: frozenset[str] = frozenset({
     "auto_repair",
     "beauty",
     "legal_b2b",
-    "hotels",
+    "massage",
+    "detailing",
+    "cleaning",
+    "renovation",
 })
 
 # 'ремонт' targets renovation and car repair; small repair shops (shoes, clothes, phones,
