@@ -1176,7 +1176,8 @@ async def test_export_command_sends_a_versioned_file_without_personal_data(sessi
     [(None, 30), ("2", 2), ("500", ENRICH_REQUEST_MAX_LEADS), (" 7 ", 7)],
 )
 async def test_export_command_keeps_to_the_limits(session_maker, monkeypatch, args: str | None, expected: int) -> None:
-    await _add(session_maker, *(_lead(number) for number in range(10, 90)))
+    # Several niches: no more than 10 leads of one go into a file.
+    await _add(session_maker, *(_lead(number, category=f"niche{number % 8}") for number in range(10, 90)))
 
     message = await _export_command(session_maker, monkeypatch, args)
 
