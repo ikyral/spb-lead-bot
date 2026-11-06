@@ -16,6 +16,7 @@ from src.bot.middlewares import AdminOnlyMiddleware
 from src.bot.notifier import AdminNotifier
 from src.config import resolve_path, settings, settings_error
 from src.database.repo import async_session_maker, engine, init_db
+from src.services.chains import load_chain_index, refresh_chain_flags
 from src.services.collector import load_collector_config
 from src.services.dgis_key import DgisKeyPolicy, DgisQuota
 from src.services.lead_import import ImportService
@@ -49,6 +50,9 @@ async def main() -> None:
         raise SystemExit(f"Invalid configuration in .env / environment: {exc}") from exc
 
     await init_db()
+    # Applies a changed list of brands, and marks chains in a database from an older version.
+    async with async_session_maker() as session:
+        await refresh_chain_flags(session, await load_chain_index(session, settings))
 
     bot = Bot(
         token=bot_token,

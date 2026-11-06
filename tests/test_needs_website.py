@@ -25,7 +25,15 @@ from src.database.repo import (
     issue_next_leads,
     set_site_verdict,
 )
-from src.services.pipeline import save_collected_places
+from src.services.chains import (
+    DEFAULT_CHAIN_BLOCKLIST,
+    ChainIndex,
+    is_generic_name,
+    load_chain_index,
+    parse_blocklist,
+    refresh_chain_flags,
+)
+from src.services.pipeline import import_csv_harvest, save_collected_places
 from src.services.providers.base import RawPlace
 from src.services.scheduler import TopupDecision, TopupOutcome
 from src.services.site_status import (
@@ -431,3 +439,166 @@ async def test_really_empty_pool_still_asks_for_more(session_maker, monkeypatch)
     text, runner = await _run_batch(monkeypatch, session_maker, LEADS_MAX_NICHE_SHARE=0.5)
     assert "Новых лидов в запасе нет" in text
     runner.request_topup.assert_awaited_once()
+
+
+# ---------- small businesses, not chains ----------
+
+
+def _index(*rows: tuple[str, str | None], min_branches: int = 3, blocklist: tuple[str, ...] = ("пятерочка",)):
+    index = ChainIndex(min_branches, blocklist)
+    for name, address in rows:
+        index.add(name, address)
+    return index
+
+
+def test_three_branches_by_the_normalized_name_make_a_chain() -> None:
+    index = _index(("Улыбка, стоматология", "Невский, 1"), ("«УЛЫБКА»", "Литейный, 2"))
+    assert index.is_chain("Улыбка") is False
+    index.add("улыбка, клиника", "Садовая, 3")
+    assert index.is_chain("Улыбка") is True
+    assert index.branches("Улыбка") == 3
+
+
+def test_the_same_address_is_one_branch_and_no_address_is_not_counted() -> None:
+    index = _index(("Клиника Улыбка", "Невский, 1"), ("Клиника Улыбка", "невский 1"), ("Клиника Улыбка", None))
+    assert index.branches("Клиника Улыбка") == 1
+
+
+@pytest.mark.parametrize("name", ["Шиномонтаж", "Автосервис", "Салон красоты", "Ремонт обуви", "Цветы"])
+def test_a_name_that_only_says_the_trade_is_not_a_chain(name: str) -> None:
+    index = _index((name, "Невский, 1"), (name, "Литейный, 2"), (name, "Садовая, 3"), (name, "Гороховая, 4"))
+    assert is_generic_name(name.lower())
+    assert index.is_chain(name) is False
+
+
+def test_a_brand_with_a_trade_in_its_name_is_still_counted() -> None:
+    name = "Автосервис Мотор"
+    index = _index((name, "Невский, 1"), (name, "Литейный, 2"), (name, "Садовая, 3"))
+    assert index.is_chain(name) is True
+
+
+@pytest.mark.parametrize("name", ["Пятёрочка", "ПЯТЕРОЧКА, супермаркет", "Магазин Пятёрочка у дома"])
+def test_blocklist_matches_whole_words(name: str) -> None:
+    assert _index().is_chain(name) is True
+
+
+def test_blocklist_does_not_match_a_part_of_a_word() -> None:
+    assert _index(blocklist=("мтс",)).is_chain("Мтсервис") is False
+    assert _index(blocklist=("лента",)).is_chain("Лентами украшаем") is False
+
+
+def test_blocklist_setting_replaces_the_default() -> None:
+    assert parse_blocklist("") == tuple(parse_blocklist(",".join(DEFAULT_CHAIN_BLOCKLIST)))
+    assert parse_blocklist(" Моя Сеть , ") == ("моя сеть",)
+    assert "пятерочка" in parse_blocklist("")  # normalized: 'ё' does not matter
+
+
+def _place(number: int, name: str, address: str | None, phone: str | None = None) -> RawPlace:
+    return RawPlace(
+        external_id=f"2gis_{number}",
+        source="2gis",
+        name=name,
+        category="beauty",
+        address=address,
+        phone=phone,
+        contacts_known=phone is not None,
+    )
+
+
+@pytest.fixture
+def _sites_are_not_checked(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_analyze(url, client=None):
+        return "no_site", None
+
+    monkeypatch.setattr("src.services.pipeline.analyze_website", fake_analyze)
+
+
+@pytest.mark.usefixtures("_sites_are_not_checked")
+async def test_chain_is_kept_for_counting_but_is_never_handed_out(session_maker) -> None:
+    places = [_place(n, "Сеть Улыбка", f"Улица {n}") for n in range(3)] + [_place(9, "Одиночка", "Улица 9")]
+    async with session_maker() as session:
+        stats = await save_collected_places(session, places)
+        assert stats["saved_new"] == 1  # new for the owner: the chain does not count
+        assert await count_new_leads(session) == 1
+        assert [lead.name for lead in await issue_next_leads(session, 10)] == ["Одиночка"]
+
+
+@pytest.mark.usefixtures("_sites_are_not_checked")
+async def test_branches_with_one_phone_are_counted_before_they_are_merged(session_maker) -> None:
+    phone = "+7 812 555-01-01"
+    places = [_place(n, "Сеть Улыбка", f"Улица {n}", phone) for n in range(3)]
+    async with session_maker() as session:
+        await save_collected_places(session, places)
+        assert await issue_next_leads(session, 10) == []
+
+
+@pytest.mark.usefixtures("_sites_are_not_checked")
+async def test_third_branch_in_a_later_run_marks_the_earlier_ones(session_maker) -> None:
+    async with session_maker() as session:
+        await save_collected_places(session, [_place(1, "Сеть", "Улица 1"), _place(2, "Сеть", "Улица 2")])
+        assert await count_new_leads(session) == 2
+        await save_collected_places(session, [_place(3, "Сеть", "Улица 3")])
+        assert await count_new_leads(session) == 0
+        assert await issue_next_leads(session, 10) == []
+
+
+@pytest.mark.usefixtures("_sites_are_not_checked")
+async def test_branches_with_a_working_site_count_too(session_maker, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A place with a working site is not saved, but it is still a branch of the chain."""
+
+    async def analyze(url, client=None):
+        return ("has_site", url) if url else ("no_site", None)
+
+    monkeypatch.setattr("src.services.pipeline.analyze_website", analyze)
+    with_site = [RawPlace(
+        external_id=f"2gis_{n}", source="2gis", name="Сеть", category="beauty", address=f"Улица {n}",
+        phone=f"+7 812 555-01-0{n}", raw_website="https://x.example",
+    ) for n in range(2)]
+    async with session_maker() as session:
+        await save_collected_places(session, [*with_site, _place(9, "Сеть", "Улица 9")])
+        assert await count_new_leads(session) == 0
+
+
+async def test_lead_already_handed_out_is_not_touched(session_maker) -> None:
+    lead_id = await _save(
+        session_maker, name="Пятёрочка", crm_status=STATUS_ISSUED, issued_at=datetime.now(UTC)
+    )
+    async with session_maker() as session:
+        await refresh_chain_flags(session, await load_chain_index(session, _chain_settings()))
+        assert (await session.get(Lead, lead_id)).is_chain in (False, None)
+
+
+def _chain_settings(**overrides) -> Settings:
+    return Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=1, **overrides)
+
+
+async def test_old_lead_without_a_mark_gets_one_and_only_a_recount_removes_it(session_maker) -> None:
+    lead_id = await _save(session_maker, name="Пятёрочка", is_chain=None)
+    async with session_maker() as session:
+        assert await count_new_leads(session) == 1
+        assert await refresh_chain_flags(session, await load_chain_index(session, _chain_settings())) == 1
+        assert await count_new_leads(session) == 0
+
+        changed = _chain_settings(LEADS_CHAIN_BLOCKLIST="другая сеть")
+        await refresh_chain_flags(session, await load_chain_index(session, changed))
+        assert await count_new_leads(session) == 0  # not removed by itself
+
+        await refresh_chain_flags(session, await load_chain_index(session, changed), reset=True)
+        await session.refresh(await session.get(Lead, lead_id))
+        assert await count_new_leads(session) == 1
+
+
+async def test_csv_import_goes_through_the_same_filter(session_maker, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_analyze(url, client=None):
+        return "dead_site", None
+
+    monkeypatch.setattr("src.services.pipeline.analyze_website", fake_analyze)
+    data = (
+        "Название;Рубрика;Телефон;Сайт;Адрес\n"
+        "Пятёрочка;Магазин;+78125550101;http://x.example;Улица 1\n"
+        "Маленькая мастерская Ивана;Ремонт;+78125550102;http://y.example;Улица 2\n"
+    ).encode()
+    async with session_maker() as session:
+        stats = await import_csv_harvest(session, data)
+        assert stats["saved_new"] == 1
+        assert [lead.name for lead in await issue_next_leads(session, 10)] == ["Маленькая мастерская Ивана"]

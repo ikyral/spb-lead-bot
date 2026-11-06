@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.config import settings
 from src.database.repo import find_existing_external_ids, get_lead_fingerprints, save_new_leads
+from src.services.chains import load_chain_index, refresh_chain_flags
 from src.services.checker import analyze_website, create_check_client
 from src.services.dedup import DuplicateIndex, merge_duplicate_places
 from src.services.dgis_key import DgisKeyPolicy, DgisQuota
@@ -51,6 +52,7 @@ async def _process_and_save_places(
     concurrency: int = CHECK_CONCURRENCY,
     progress: ProgressCallback | None = None,
     extra_fields: dict[str, Any] | None = None,
+    seen: list[RawPlace] | None = None,
 ) -> dict[str, int]:
     """
     Verify places concurrently, score them, and persist qualified leads.
@@ -58,8 +60,11 @@ async def _process_and_save_places(
     The same business found by several sources is merged before checking websites;
     a qualified place matching an already saved lead counts as a duplicate.
     `progress` is notified after every check; its errors never break the harvest.
+    `seen` is everything this run has seen, also what is not saved, for counting branches of chains.
     """
     total_found = len(places)
+    # Before merging: branches with one phone for the whole chain would become one place.
+    observed = places if seen is None else seen
     places = merge_duplicate_places(places)
     if not places:
         return {
@@ -102,8 +107,12 @@ async def _process_and_save_places(
     qualified = 0
     duplicates_skipped = 0
     leads_to_save: list[dict[str, Any]] = []
+    chains_to_save: list[dict[str, Any]] = []
 
     known_leads = await _load_known_leads(session)
+    chains = await load_chain_index(session, settings)
+    for place in observed:
+        chains.add(place.name, place.address)
 
     for place, site_status, details in results:
         # There is no site to check, but the organization may well have one: its card will tell.
@@ -131,7 +140,8 @@ async def _process_and_save_places(
             duplicates_skipped += 1
             continue
 
-        leads_to_save.append({
+        is_chain = chains.is_chain(place.name)
+        (chains_to_save if is_chain else leads_to_save).append({
             "external_id": place.external_id,
             "source": place.source,
             "name": place.name,
@@ -152,12 +162,18 @@ async def _process_and_save_places(
             "site_confidence": confidence_of_check(site_status, place.source),
             "site_source": source_of_status(place.source) if site_status != SITE_UNKNOWN else None,
             "site_checked_at": None if site_status == SITE_UNKNOWN else datetime.now(UTC),
+            "is_chain": is_chain,
             **(extra_fields or {}),
         })
 
     # One transaction for the whole harvest instead of a commit per lead (~30x faster on SQLite).
     saved_new, already_saved = await save_new_leads(session, leads_to_save)
     duplicates_skipped += already_saved
+    # Kept to count branches next time, but they are not new leads for anyone.
+    saved_chains, _ = await save_new_leads(session, chains_to_save)
+    marked = await refresh_chain_flags(session, chains)
+    if saved_chains or marked:
+        logger.info("Chains: %d saved aside, %d earlier leads marked", saved_chains, marked)
 
     return {
         "total_found": total_found,
@@ -185,7 +201,7 @@ async def save_collected_places(
         if place.external_id not in known_ids
         and known_leads.find(place.name, place.phone, place.map_url, place.address) is None
     ]
-    stats = await _process_and_save_places(session, fresh, extra_fields=extra_fields)
+    stats = await _process_and_save_places(session, fresh, extra_fields=extra_fields, seen=places)
     stats["total_found"] = len(places)
     stats["duplicates_skipped"] += len(places) - len(fresh)
     return stats
