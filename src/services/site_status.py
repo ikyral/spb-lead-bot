@@ -32,6 +32,8 @@ SOURCE_2GIS: str = "2gis"
 SOURCE_OSM: str = "osm"
 SOURCE_SEARCH: str = "search"
 SOURCE_MANUAL: str = "manual"
+# A person let the collector read the card of the organization on 2GIS.
+SOURCE_2GIS_CARD: str = "2gis_card"
 
 # The order of handing out: every later group goes only after the earlier ones.
 ISSUE_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -65,7 +67,7 @@ def confidence_of_check(site_status: str, source: str) -> str | None:
 
     A listed address was really opened. The absence of a site is weaker: OSM often just lacks the tag.
     """
-    if site_status in (SITE_DEAD, SITE_SOCIAL_ONLY):
+    if site_status in (SITE_DEAD, SITE_SOCIAL_ONLY, SITE_FOUND):
         return CONFIDENCE_HIGH
     if site_status == SITE_NO_SITE:
         return CONFIDENCE_LOW if source == SOURCE_OSM else CONFIDENCE_MEDIUM

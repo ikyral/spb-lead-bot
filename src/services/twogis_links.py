@@ -13,6 +13,9 @@ _FIRM_NUMBER_RE = re.compile(r"[0-9]+", re.ASCII)
 _HOST_RE = re.compile(r"(?:www\.)?2gis\.[a-z]{2,10}", re.ASCII)
 # Telegram refuses a whole message over a bad button, so only an unremarkable link becomes one.
 _MAX_BUTTON_URL_LENGTH: int = 512
+# Only the host whose robots.txt the page reader follows, and only the page of an organization.
+_READABLE_CARD_HOSTS: frozenset[str] = frozenset({"2gis.ru", "www.2gis.ru"})
+_CARD_PATH_RE = re.compile(r"(?:/[a-z0-9][a-z0-9_-]*)?/firm/([0-9]+)/?", re.ASCII)
 
 
 def build_card_url(city_slug: str, firm_id: object) -> str | None:
@@ -38,3 +41,14 @@ def twogis_card_url(url: str | None) -> str | None:
     if parts.scheme not in ("http", "https") or not _HOST_RE.fullmatch(parts.netloc):
         return None
     return url
+
+
+def readable_card_number(url: str | None) -> str | None:
+    """The number of the organization if a browser may open this link as its card, otherwise None."""
+    if twogis_card_url(url) is None:
+        return None
+    parts = urlsplit(str(url))
+    if parts.netloc not in _READABLE_CARD_HOSTS or parts.query or parts.fragment:
+        return None
+    match = _CARD_PATH_RE.fullmatch(parts.path)
+    return match.group(1) if match else None

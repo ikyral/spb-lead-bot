@@ -42,6 +42,12 @@ class PageSnapshot:
     title: str
     html: str
     json_bodies: list[dict[str, Any]] = field(default_factory=list)
+    # Where each of json_bodies came from, in the same order.
+    json_urls: list[str] = field(default_factory=list)
+
+    def bodies_from(self, wanted: Callable[[str], bool]) -> list[dict[str, Any]]:
+        """The bodies that came from the addresses of interest."""
+        return [body for url, body in zip(self.json_urls, self.json_bodies, strict=True) if wanted(url)]
 
 
 class PlaywrightSession:
@@ -95,9 +101,11 @@ class PlaywrightSession:
             raise ProviderUnavailableError("браузер не запущен")
 
         reads: list[asyncio.Future[dict[str, Any] | None]] = []
+        urls: list[str] = []
 
         def on_response(response: Response) -> None:
             if wants_body(response.url):
+                urls.append(response.url)
                 reads.append(asyncio.ensure_future(_read_json(response)))
 
         page.on("response", on_response)
@@ -106,12 +114,14 @@ class PlaywrightSession:
             with suppress(PlaywrightTimeoutError):
                 await page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_TIMEOUT_SECONDS * 1000)
             bodies = await asyncio.gather(*reads)
+            read_bodies = [(body_url, body) for body_url, body in zip(urls, bodies, strict=True) if body is not None]
             return PageSnapshot(
                 status=response.status if response is not None else None,
                 final_url=page.url,
                 title=await page.title(),
                 html=await page.content(),
-                json_bodies=[body for body in bodies if body is not None],
+                json_bodies=[body for _, body in read_bodies],
+                json_urls=[body_url for body_url, _ in read_bodies],
             )
         except PlaywrightTimeoutError:
             raise ProviderTemporaryError("страница не загрузилась вовремя") from None
