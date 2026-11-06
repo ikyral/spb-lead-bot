@@ -187,3 +187,5 @@ class CollectorState(Base):
     last_pool_reminder_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
     # The last warning about the API key running out: '<expiry date>:<day of the warning or "expired">'.
     key_warning_mark: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
+    # On a collector's computer: when its diagnostics ran lately, times in ISO format separated by commas.
+    scraper_check_runs: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)

@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.database.repo import get_unexported_leads, mark_leads_exported
-from src.services.lead_file import build_document, lead_to_record
+from src.services.lead_file import KIND_ENRICH_RESULT, build_document, build_enrich_document, lead_to_record
 
 
 @dataclass
@@ -23,9 +23,9 @@ class ExportResult:
     files: list[Path] = field(default_factory=list)
 
 
-def _unique_path(export_dir: Path, now: datetime) -> Path:
+def _unique_path(export_dir: Path, now: datetime, prefix: str) -> Path:
     """leads_YYYYMMDD_HHMMSS.json; several files within a second get a number."""
-    stem = f"leads_{now.strftime('%Y%m%d_%H%M%S')}"
+    stem = f"{prefix}_{now.strftime('%Y%m%d_%H%M%S')}"
     path = export_dir / f"{stem}.json"
     number = 1
     while path.exists():
@@ -34,14 +34,20 @@ def _unique_path(export_dir: Path, now: datetime) -> Path:
     return path
 
 
-def _write_file(export_dir: Path, now: datetime, document: dict[str, Any]) -> Path:
+def _write_file(export_dir: Path, now: datetime, document: dict[str, Any], prefix: str = "leads") -> Path:
     """Write through a temporary file: nobody can pick up a half-written export."""
     export_dir.mkdir(parents=True, exist_ok=True)
-    path = _unique_path(export_dir, now)
+    path = _unique_path(export_dir, now, prefix)
     temporary = path.with_name(f"{path.name}.tmp")
     temporary.write_text(json.dumps(document, ensure_ascii=False, indent=1), encoding="utf-8", newline="\n")
     os.replace(temporary, path)
     return path
+
+
+def write_enrich_result(export_dir: Path, records: list[dict[str, Any]]) -> Path:
+    """Write a result of reading cards. Not async on purpose: it also runs while the run is being cancelled."""
+    now = datetime.now().astimezone()
+    return _write_file(export_dir, now, build_enrich_document(KIND_ENRICH_RESULT, records, now), prefix="enrich")
 
 
 async def export_new_leads(

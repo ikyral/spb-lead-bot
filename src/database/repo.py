@@ -1,4 +1,5 @@
 from collections import Counter
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -38,6 +39,7 @@ from src.services.site_status import (
     UNVERIFIED_STATUSES,
     issue_group,
 )
+from src.services.twogis_links import TWOGIS_SOURCES, readable_card_number
 
 engine: AsyncEngine = create_async_engine(settings.DB_URL, echo=False)
 async_session_maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
@@ -75,7 +77,7 @@ NEW_LEAD_COLUMNS: tuple[str, ...] = (
     "is_chain",
 )
 # The same for the collector_state table.
-NEW_STATE_COLUMNS: tuple[str, ...] = ("last_pool_reminder_at", "key_warning_mark")
+NEW_STATE_COLUMNS: tuple[str, ...] = ("last_pool_reminder_at", "key_warning_mark", "scraper_check_runs")
 # The same for the provider_state table.
 NEW_PROVIDER_COLUMNS: tuple[str, ...] = ("requests_total", "key_fingerprint")
 # Blocks in a row after which a provider stays off until an admin turns it on.
@@ -402,6 +404,33 @@ async def get_pool_stats(session: AsyncSession) -> PoolStats:
     )
 
 
+async def get_unknown_site_leads(session: AsyncSession, limit: int) -> list[Lead]:
+    """The best of the pool that nobody has looked at, whose card on 2GIS a collector can open."""
+    stmt = (
+        select(Lead)
+        .where(_in_pool_clause(), Lead.site_status == SITE_UNKNOWN, Lead.source.in_(TWOGIS_SOURCES))
+        .order_by(Lead.score.desc(), Lead.created_at, Lead.id)
+    )
+    # A link is checked in Python, so a bad one cannot make a batch shorter than the pool allows.
+    leads: list[Lead] = []
+    for lead in (await session.scalars(stmt)).all():
+        if readable_card_number(lead.source_url) is not None:
+            leads.append(lead)
+            if len(leads) == limit:
+                break
+    return leads
+
+
+async def get_leads_by_external_ids(session: AsyncSession, external_ids: list[str]) -> dict[str, Lead]:
+    """The leads known by these IDs."""
+    leads: dict[str, Lead] = {}
+    for start in range(0, len(external_ids), _EXISTENCE_CHECK_CHUNK):
+        chunk = external_ids[start:start + _EXISTENCE_CHECK_CHUNK]
+        for lead in (await session.scalars(select(Lead).where(Lead.external_id.in_(chunk)))).all():
+            leads[lead.external_id] = lead
+    return leads
+
+
 async def count_new_leads_with_contacts(session: AsyncSession) -> int:
     """How many of the leads not handed out yet can be contacted without opening their card."""
     result = await session.execute(
@@ -655,6 +684,29 @@ async def get_collector_state(session: AsyncSession) -> CollectorState:
         session.add(state)
         await session.flush()
     return state
+
+
+async def claim_scraper_check(
+    session: AsyncSession, limit: int, window: timedelta, now: datetime
+) -> tuple[datetime | None, int]:
+    """
+    Take one of the diagnostics runs allowed within the window.
+
+    Returns when the next one becomes possible if none is left (else None), and how many are left.
+    """
+    state = await get_collector_state(session)
+    runs: list[datetime] = []
+    for part in (state.scraper_check_runs or "").split(","):
+        with suppress(ValueError):
+            moment = datetime.fromisoformat(part)
+            if moment + window > now:
+                runs.append(moment)
+    if len(runs) >= limit:
+        return min(runs) + window, 0
+    runs.append(now)
+    state.scraper_check_runs = ",".join(moment.isoformat(timespec="seconds") for moment in runs)
+    await session.commit()
+    return None, limit - len(runs)
 
 
 async def get_leads_stats(session: AsyncSession) -> dict[str, int]:
