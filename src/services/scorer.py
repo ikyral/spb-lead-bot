@@ -2,8 +2,7 @@
 
 import re
 
-# The source says nothing about the site: not the same as 'no_site', which means there is none.
-SITE_UNKNOWN: str = "unknown"
+from src.services.site_status import SITE_UNKNOWN
 
 STATUS_POINTS: dict[str, int] = {
     "dead_site": 45,

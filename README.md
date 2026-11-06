@@ -216,10 +216,12 @@
 
 ### Обновление схемы базы и откат
 
-Новые колонки `leads.email`, `leads.source_url`, `leads.issued_at`, `leads.contact_status`, `leads.contact_status_by_id`, `leads.contact_status_by`, `leads.contact_status_at`, `leads.exported_at`, `leads.imported_at`, `leads.rubric`, `collector_state.key_warning_mark`, `provider_state.requests_total`, `provider_state.key_fingerprint`, индекс и таблицы `collector_state`, `provider_state`, `import_log`, `search_progress` появляются сами при запуске бота, существующие лиды не меняются и попадают в очередь выдачи. Перед обновлением сделайте копию файла базы.
+Новые колонки `leads.email`, `leads.source_url`, `leads.issued_at`, `leads.contact_status`, `leads.contact_status_by_id`, `leads.contact_status_by`, `leads.contact_status_at`, `leads.exported_at`, `leads.imported_at`, `leads.rubric`, `leads.site_url`, `leads.site_confidence`, `leads.site_source`, `leads.site_checked_at`, `leads.is_chain`, `collector_state.key_warning_mark`, `provider_state.requests_total`, `provider_state.key_fingerprint`, индекс и таблицы `collector_state`, `provider_state`, `import_log`, `search_progress` появляются сами при запуске бота, существующие лиды не меняются и попадают в очередь выдачи. Перед обновлением сделайте копию файла базы.
 
-Старая версия бота работает с обновлённой базой без изменений, но не покажет новые статусы в своих счётчиках. Чтобы полностью убрать изменения (SQLite 3.35+), остановите бота и выполните:
+Старая версия бота работает с обновлённой базой без изменений, но не покажет новые статусы в своих счётчиках. Чтобы полностью убрать изменения (SQLite 3.35+), остановите бота и выполните. Первые две строки нужны потому, что старая версия показала бы новые статусы сайта как «Есть сайт»:
 
+    UPDATE leads SET crm_status = 'rejected' WHERE site_status = 'site_found' AND crm_status = 'new';
+    UPDATE leads SET site_status = 'unknown' WHERE site_status IN ('site_found', 'site_uncertain', 'site_not_found');
     UPDATE leads SET crm_status = 'rejected' WHERE contact_status = 'rejected';
     UPDATE leads SET crm_status = 'in_work' WHERE crm_status = 'issued';
     DROP INDEX ix_leads_crm_status_created_at;
@@ -233,6 +235,11 @@
     ALTER TABLE leads DROP COLUMN exported_at;
     ALTER TABLE leads DROP COLUMN imported_at;
     ALTER TABLE leads DROP COLUMN rubric;
+    ALTER TABLE leads DROP COLUMN site_url;
+    ALTER TABLE leads DROP COLUMN site_confidence;
+    ALTER TABLE leads DROP COLUMN site_source;
+    ALTER TABLE leads DROP COLUMN site_checked_at;
+    ALTER TABLE leads DROP COLUMN is_chain;
     DROP TABLE import_log;
     DROP TABLE collector_state;
     DROP TABLE provider_state;

@@ -55,6 +55,11 @@ NEW_LEAD_COLUMNS: tuple[str, ...] = (
     "exported_at",
     "imported_at",
     "rubric",
+    "site_url",
+    "site_confidence",
+    "site_source",
+    "site_checked_at",
+    "is_chain",
 )
 # The same for the collector_state table.
 NEW_STATE_COLUMNS: tuple[str, ...] = ("last_pool_reminder_at", "key_warning_mark")

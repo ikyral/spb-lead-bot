@@ -91,6 +91,13 @@ class Lead(Base):
     imported_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
     # The source's own category. `category` above is the niche the organization was searched for.
     rubric: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    # What is known about the site beyond site_status; see src/services/site_status.py.
+    site_url: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
+    site_confidence: Mapped[str | None] = mapped_column(String(16), nullable=True, default=None)
+    site_source: Mapped[str | None] = mapped_column(String(16), nullable=True, default=None)
+    site_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    # Part of a chain: kept so that branches can be counted across runs, but never handed out.
+    is_chain: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
 
     @property
     def has_contacts(self) -> bool:

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -17,7 +18,8 @@ from src.services.providers.base import RawPlace
 from src.services.providers.csv_loader import parse_csv_leads
 from src.services.providers.osm import OSMOverpassProvider
 from src.services.providers.twogis import TwoGisOptions, TwoGisProvider
-from src.services.scorer import SITE_UNKNOWN, calculate_lead_score
+from src.services.scorer import calculate_lead_score
+from src.services.site_status import SITE_DEAD, SITE_UNKNOWN, confidence_of_check, source_of_status
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +148,10 @@ async def _process_and_save_places(
             "email": place.email,
             "source_url": place.source_url,
             "rubric": place.rubric,
+            "site_url": place.raw_website if site_status == SITE_DEAD else None,
+            "site_confidence": confidence_of_check(site_status, place.source),
+            "site_source": source_of_status(place.source) if site_status != SITE_UNKNOWN else None,
+            "site_checked_at": None if site_status == SITE_UNKNOWN else datetime.now(UTC),
             **(extra_fields or {}),
         })
 
