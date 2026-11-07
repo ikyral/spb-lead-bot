@@ -14,6 +14,10 @@ class SettingsError(ValueError):
     """The settings cannot work. The message is meant for the owner; any other ValueError is a bug."""
 
 
+# OUTREACH_OFFER and OUTREACH_SIGNATURE are cut to this many characters.
+OUTREACH_TEXT_MAX: int = 300
+
+
 class Settings(BaseSettings):
     """Application configuration loaded from environment variables and .env file."""
 
@@ -58,6 +62,10 @@ class Settings(BaseSettings):
     # The list is comma-separated and replaces the one in src/services/chains.py; empty = that list.
     LEADS_CHAIN_MIN_BRANCHES: int = Field(default=3, ge=2)
     LEADS_CHAIN_BLOCKLIST: str = ""
+    # The first message under a lead without a site: what the owner offers, in one phrase, and how to reach them.
+    # Empty = a neutral text from src/bot/texts.py. Longer values are cut, so a card stays within Telegram's limit.
+    OUTREACH_OFFER: str = ""
+    OUTREACH_SIGNATURE: str = ""
 
     # Automatic collection. Search targets and the schedule are validated by src.services.collector.
     # false, or an empty COLLECT_PROVIDERS, means leads come from an external collector as files.
@@ -141,6 +149,11 @@ class Settings(BaseSettings):
         if value == "" and info.field_name and info.field_name != "COLLECT_PROVIDERS":
             return cls.model_fields[info.field_name].get_default(call_default_factory=True)
         return value
+
+    @field_validator("OUTREACH_OFFER", "OUTREACH_SIGNATURE")
+    @classmethod
+    def _trim_outreach(cls, value: str) -> str:
+        return " ".join(value.split())[:OUTREACH_TEXT_MAX]
 
     @model_validator(mode="after")
     def _use_preferred_key_name(self) -> "Settings":

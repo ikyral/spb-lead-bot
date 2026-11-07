@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Dialect, Index, Integer, String, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Dialect, Index, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -98,6 +98,9 @@ class Lead(Base):
     site_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
     # Part of a chain: kept so that branches can be counted across runs, but never handed out.
     is_chain: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
+    # Contacts as links with where each came from: JSON [{"url": ..., "sources": ["2gis", "google"]}].
+    # See src/services/contact_links.py. `email` and `socials` keep the first email and all networks as before.
+    contact_links: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     @property
     def has_contacts(self) -> bool:

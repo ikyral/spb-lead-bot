@@ -81,6 +81,26 @@ UNKNOWN_PROVIDER_TEXT: str = (
 
 HELP_HIDDEN_TEXT: str = "Остальные команды доступны только администраторам бота."
 
+# ---------- the first message to a lead ----------
+# {название}, {ниша}, {предложение} and {подпись} are replaced; the result is shown in <code> and escaped there.
+OUTREACH_NO_SITE_TEMPLATE: str = (
+    "Здравствуйте! «{название}» есть на картах, но сайта у вас найти не удалось. "
+    "В сфере «{ниша}» клиенты часто сначала ищут в интернете цены, адрес и как записаться. "
+    "{предложение} Если интересно, расскажу подробнее, а если нет, просто не отвечайте. {подпись}"
+)
+OUTREACH_DEAD_SITE_TEMPLATE: str = (
+    "Здравствуйте! Сайт «{название}» сейчас не открывается. "
+    "В сфере «{ниша}» клиенты часто сначала ищут в интернете цены, адрес и как записаться, "
+    "и неработающий сайт может их отпугнуть. "
+    "{предложение} Если интересно, расскажу подробнее, а если нет, просто не отвечайте. {подпись}"
+)
+# When OUTREACH_OFFER or OUTREACH_SIGNATURE is empty.
+OUTREACH_OFFER_FALLBACK: str = "Я делаю сайты для небольших бизнесов и могу показать, как он мог бы выглядеть у вас."
+OUTREACH_SIGNATURE_FALLBACK: str = "Хорошего дня!"
+OUTREACH_TITLE: str = "✉️ <b>Первое сообщение</b> (нажмите на текст, чтобы скопировать):"
+CONTACTS_TITLE: str = "🔗 <b>Контакты:</b>"
+CONTACT_SOURCE_TITLES: dict[str, str] = {"2gis": "2ГИС", "google": "Google"}
+
 
 @dataclass(frozen=True)
 class CommandHelp:
