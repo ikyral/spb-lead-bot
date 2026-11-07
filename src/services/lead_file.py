@@ -28,6 +28,8 @@ ENRICH_SCHEMA_VERSION: int = 1
 ENRICH_GOOGLE_SCHEMA_VERSION: int = 2
 FOUND_BY_GOOGLE: str = "google"
 KIND_ENRICH_REQUEST: str = "enrich_request"
+# Said when a request comes back to the bot instead of a result; the bot adds where the right file is.
+REQUEST_FILE_ERROR: str = "это файл запроса: его читает сборщик, а боту отправляют файл с результатом"
 KIND_ENRICH_RESULT: str = "enrich_result"
 # More than this at once is pointless: a person passes captchas, and a collector reads 30 cards per run.
 ENRICH_REQUEST_MAX_LEADS: int = 60

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.bot.formatters import format_lead_card, generate_pitch_text, site_verdict_text
 from src.bot.keyboards import STALE_BUTTON_TEXT, get_export_keyboard, get_lead_card_keyboard, manual_site_verdict
+from src.bot.texts import CRM_STATS_BUTTON_TEXT, IN_WORK_BUTTON_TEXT, NEW_LEADS_BUTTON_TEXT
 from src.database.models import Lead
 from src.database.repo import (
     async_session_maker,
@@ -108,14 +109,14 @@ async def render_lead_page(
     await _reply(target, card_text, kb=kb, edit=edit)
 
 
-@router.message(F.text == "📋 Новые лиды")
+@router.message(F.text == NEW_LEADS_BUTTON_TEXT)
 async def handle_new_leads(message: Message) -> None:
     """Show the first new lead card."""
     async with async_session_maker() as session:
         await render_lead_page(message, session, crm_status="new", offset=0)
 
 
-@router.message(F.text == "💼 В работе")
+@router.message(F.text == IN_WORK_BUTTON_TEXT)
 async def handle_in_work_leads(message: Message) -> None:
     """Show the first lead currently in work."""
     async with async_session_maker() as session:
@@ -184,7 +185,7 @@ async def handle_lead_action(callback: CallbackQuery) -> None:
             await render_lead_page(callback, session, crm_status=current_status, offset=offset, edit=True)
 
 
-@router.message(F.text == "📊 Статистика и CSV")
+@router.message(F.text == CRM_STATS_BUTTON_TEXT)
 async def handle_stats(message: Message) -> None:
     """Show CRM statistics and export buttons."""
     async with async_session_maker() as session:

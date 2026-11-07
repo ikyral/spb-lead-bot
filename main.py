@@ -7,10 +7,13 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
+from src.bot.commands import register_bot_commands
 from src.bot.handlers.collector import router as collector_router
+from src.bot.handlers.fallback import router as fallback_router
 from src.bot.handlers.imports import router as imports_router
 from src.bot.handlers.issue import router as issue_router
 from src.bot.handlers.leads import router as leads_router
+from src.bot.handlers.menu import router as menu_router
 from src.bot.handlers.search import router as search_router
 from src.bot.middlewares import AdminOnlyMiddleware
 from src.bot.notifier import AdminNotifier
@@ -69,6 +72,9 @@ async def main() -> None:
     dp.include_router(issue_router)
     dp.include_router(collector_router)
     dp.include_router(imports_router)
+    dp.include_router(menu_router)
+    # Last: it takes any private text the others did not.
+    dp.include_router(fallback_router)
 
     twogis_key = settings.TWOGIS_API_KEY.get_secret_value() if settings.TWOGIS_API_KEY else None
     dgis_quota = (
@@ -118,7 +124,12 @@ async def main() -> None:
         collector_runner.add_interval_job(
             import_service.scan_inbox, settings.IMPORT_INBOX_INTERVAL_SECONDS, "import_inbox"
         )
+
     # Polling calls these inside its own lifetime, while the bot can still send messages.
+    async def set_command_menus(bot: Bot) -> None:
+        await register_bot_commands(bot, settings.admin_ids)
+
+    dp.startup.register(set_command_menus)
     dp.startup.register(collector_runner.start)
     dp.shutdown.register(collector_runner.shutdown)
 

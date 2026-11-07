@@ -5,8 +5,11 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest
 
 import main
 from src.config import Settings
@@ -96,11 +99,15 @@ async def test_main_wires_the_collector_into_the_bot_lifetime(monkeypatch: pytes
     monkeypatch.setattr(main, "async_session_maker", session_maker)
     monkeypatch.setattr(main, "settings_error", None)
     monkeypatch.setattr(main, "settings", Settings(_env_file=None, BOT_TOKEN="123456:TEST", ADMIN_TG_ID=1))
+    # The command menu fails, as it does when an admin has never pressed /start: startup must go on.
+    set_commands = AsyncMock(side_effect=TelegramBadRequest(method=MagicMock(), message="chat not found"))
+    monkeypatch.setattr(Bot, "set_my_commands", set_commands)
 
     await main.main()
 
     status = seen["status"]
-    assert seen["routers"] == {"search", "leads", "issue", "collector", "imports"}
+    assert set_commands.await_count == 2  # everyone, then the admin
+    assert seen["routers"] == {"search", "leads", "issue", "collector", "imports", "menu", "fallback"}
     assert seen["scheduler_running"] is True
     assert seen["scheduler_running_after"] is False
     assert status.next_run_at is not None
@@ -150,9 +157,18 @@ async def test_main_counts_requests_of_the_key_and_warns_about_its_end(
     monkeypatch.setattr(main, "settings", current)
 
     # Routers are module globals, and main() has already run in this process.
-    routers = (main.search_router, main.leads_router, main.issue_router, main.collector_router, main.imports_router)
+    routers = (
+        main.search_router,
+        main.leads_router,
+        main.issue_router,
+        main.collector_router,
+        main.imports_router,
+        main.menu_router,
+        main.fallback_router,
+    )
     for router in routers:
         router._parent_router = None
+    monkeypatch.setattr(Bot, "set_my_commands", AsyncMock())
 
     await main.main()
 

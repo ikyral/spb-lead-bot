@@ -17,6 +17,7 @@ from src.services.lead_enrich import EnrichStats, apply_enrichment
 from src.services.lead_file import (
     KIND_ENRICH_REQUEST,
     KIND_ENRICH_RESULT,
+    REQUEST_FILE_ERROR,
     LeadFileError,
     clean_text,
     file_kind,
@@ -145,7 +146,7 @@ class ImportService:
             if kind == KIND_ENRICH_RESULT:
                 await self._import_enrichment(data, result)
             elif kind == KIND_ENRICH_REQUEST:
-                raise LeadFileError("это файл запроса: его читает сборщик, а боту отправляют файл с результатом")
+                raise LeadFileError(REQUEST_FILE_ERROR)
             elif kind is not None:
                 raise LeadFileError("неизвестный тип файла в поле kind")
             else:

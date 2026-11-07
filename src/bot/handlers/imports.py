@@ -9,9 +9,11 @@ from datetime import UTC, datetime
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BufferedInputFile, LinkPreviewOptions, Message
+from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, LinkPreviewOptions, Message
 
 from src.bot.formatters import format_import_messages, format_niche_table, format_unknown_niche
+from src.bot.keyboards import get_after_enrichment_keyboard
+from src.bot.texts import EXPORT_CAPTION_STEPS, EXPORT_WRONG_NUMBER_TEXT
 from src.database.repo import async_session_maker
 from src.services.lead_file import (
     ENRICH_REQUEST_MAX_LEADS,
@@ -33,16 +35,19 @@ logger = logging.getLogger(__name__)
 router = Router(name="imports")
 
 EXPORT_UNKNOWN_DEFAULT: int = 30
+_NICHE_TITLE_LIMIT: int = 100
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 
-async def _say(message: Message, status: Message | None, text: str) -> None:
+async def _say(
+    message: Message, status: Message | None, text: str, reply_markup: InlineKeyboardMarkup | None = None
+) -> None:
     """Replace the 'importing' note, or write anew if that is impossible. Failing to say it is not fatal."""
     try:
         if status is not None:
-            await status.edit_text(text, parse_mode="HTML", link_preview_options=_NO_PREVIEW)
+            await status.edit_text(text, parse_mode="HTML", link_preview_options=_NO_PREVIEW, reply_markup=reply_markup)
         else:
-            await message.answer(text, parse_mode="HTML", link_preview_options=_NO_PREVIEW)
+            await message.answer(text, parse_mode="HTML", link_preview_options=_NO_PREVIEW, reply_markup=reply_markup)
     except TelegramAPIError as exc:
         logger.warning("Could not send the import result: %s", exc)
 
@@ -64,18 +69,16 @@ async def _answer_all(message: Message, texts: list[str]) -> None:
 
 
 def _export_caption(count: int, limit: int, explored: int, niche: str | None) -> str:
+    """HTML within the caption limit of 1024: the niche title is cut and escaped."""
     parts = [f"Лидов в файле: {count}"]
     if niche is not None:
-        parts.append(f"ниша: {niche_title(niche)}")
+        parts.append(f"ниша: {niche_title(niche)[:_NICHE_TITLE_LIMIT]}")
     elif explored:
         parts.append(f"из них для проверки новых ниш: {explored}")
     text = ", ".join(parts) + "."
     if niche is None and count < limit:
         text += f" Меньше {limit}: из одной ниши берётся не больше {MAX_LEADS_PER_NICHE}."
-    return (
-        f"{text} На компьютере со сборщиком: "
-        "collect_cli.py --assisted --enrich этот_файл, а файл с результатом отправьте сюда."
-    )
+    return f"{html.escape(text)}\n\n{EXPORT_CAPTION_STEPS}"
 
 
 @router.message(Command("export_unknown"))
@@ -83,10 +86,14 @@ async def handle_export_unknown(message: Message, command: CommandObject) -> Non
     """Send a file with leads nobody has looked at, from the most promising niches, for a collector to read."""
     number, niche_text = _parse_export_args(command.args)
     if number == 0:
-        await message.answer(f"Использование: /export_unknown [N] [ниша], N от 1 до {ENRICH_REQUEST_MAX_LEADS}.")
+        await message.answer(EXPORT_WRONG_NUMBER_TEXT.format(max=ENRICH_REQUEST_MAX_LEADS), parse_mode="HTML")
         return
     limit = min(number, ENRICH_REQUEST_MAX_LEADS) if number else EXPORT_UNKNOWN_DEFAULT
+    await send_enrich_request(message, limit, niche_text)
 
+
+async def send_enrich_request(message: Message, limit: int, niche_text: str | None = None) -> None:
+    """Send the file for a collector to the chat of this message: from /export_unknown and from the buttons."""
     niche: str | None = None
     async with async_session_maker() as session:
         if niche_text is not None:
@@ -108,7 +115,8 @@ async def handle_export_unknown(message: Message, command: CommandObject) -> Non
     try:
         await message.answer_document(
             BufferedInputFile(content, filename=f"enrich_request_{now.strftime('%Y%m%d_%H%M%S')}.json"),
-            caption=html.escape(_export_caption(len(plan.leads), limit, plan.explored, niche)),
+            caption=_export_caption(len(plan.leads), limit, plan.explored, niche),
+            parse_mode="HTML",
         )
     except TelegramAPIError as exc:
         logger.warning("Could not send the file for a collector: %s", exc)
@@ -146,7 +154,8 @@ async def handle_lead_file(message: Message, bot: Bot, import_service: ImportSer
     result = await import_service.import_bytes(
         buffer.getvalue(), document.file_name, SOURCE_TELEGRAM, exclude_chat=message.chat.id
     )
-    first, *others = format_import_messages(result)
-    await _say(message, status, first)
-    for text in others:
-        await _say(message, None, text)
+    texts = format_import_messages(result)
+    # Under the last message of an enrichment: what to do next. Other chats get the report without buttons.
+    markup = get_after_enrichment_keyboard() if result.ok and result.enrichment is not None else None
+    for index, text in enumerate(texts):
+        await _say(message, status if index == 0 else None, text, markup if index == len(texts) - 1 else None)

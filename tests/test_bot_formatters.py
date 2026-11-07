@@ -123,10 +123,16 @@ def test_keyboards_callback_data_limits():
     # 1. Main menu reply keyboard
     reply_kb = get_main_menu_keyboard()
     button_texts = [btn.text for row in reply_kb.keyboard for btn in row]
-    assert "🔍 Поиск по СПб" in button_texts
-    assert "📋 Новые лиды" in button_texts
-    assert "💼 В работе" in button_texts
-    assert "📊 Статистика и CSV" in button_texts
+    assert button_texts == [
+        f"📦 Следующие {settings.LEADS_BATCH_SIZE}",
+        "🔎 Обогащение",
+        "📊 Ниши и статистика",
+        "❓ Помощь",
+        "🔍 Поиск по СПб",
+        "📋 Новые лиды",
+        "💼 В работе",
+        "📊 Статистика и CSV",
+    ]
 
     # 2. Districts keyboard
     dist_kb = get_districts_keyboard()

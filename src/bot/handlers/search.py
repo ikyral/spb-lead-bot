@@ -18,6 +18,8 @@ from src.bot.keyboards import (
     get_group_panel_keyboard,
     get_main_menu_keyboard,
 )
+from src.bot.middlewares import PUBLIC_FLAG, is_admin
+from src.bot.texts import SEARCH_MENU_BUTTON_TEXT, START_ADMIN_TEXT, START_USER_TEXT
 from src.config import settings
 from src.database.repo import async_session_maker
 from src.services.pipeline import MAX_CSV_PLACES, import_csv_harvest, run_lead_harvest
@@ -80,9 +82,9 @@ class ProgressReporter:
             logger.debug("Progress update skipped: %s", exc)
 
 
-@router.message(CommandStart())
+@router.message(CommandStart(), flags={PUBLIC_FLAG: True})
 async def handle_start(message: Message) -> None:
-    """Handle /start command, welcome admin, and display main menu."""
+    """Handle /start: what the bot does and what to press next. Strangers in private get a short note."""
     if is_group_chat(message):
         # The bottom keyboard would appear for everyone, and privacy mode hides its buttons from the bot.
         await message.answer(
@@ -91,19 +93,13 @@ async def handle_start(message: Message) -> None:
             parse_mode="HTML",
         )
         return
-
-    text = (
-        "👋 <b>Добро пожаловать в SPb Lead Finder!</b>\n\n"
-        "Бот ищет потенциальных клиентов на разработку сайтов в Санкт-Петербурге:\n"
-        "• ❌ Бизнесы без сайта\n"
-        "• 📱 Ссылки только на соцсети (VK, Telegram, Taplink)\n"
-        "• ⚠️ Мертвые и неработающие сайты\n\n"
-        "Выберите действие в меню или отправьте CSV-файл для анализа:"
-    )
-    await message.answer(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+    if not is_admin(message):
+        await message.answer(START_USER_TEXT, parse_mode="HTML")
+        return
+    await message.answer(START_ADMIN_TEXT, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
 
 
-@router.message(F.text == "🔍 Поиск по СПб")
+@router.message(F.text == SEARCH_MENU_BUTTON_TEXT)
 async def handle_search_menu(message: Message) -> None:
     """Prompt user to select an administrative district of Saint Petersburg."""
     await message.answer(

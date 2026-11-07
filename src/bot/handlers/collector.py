@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery, Message
 
 from src.bot.formatters import format_collector_status
 from src.bot.keyboards import STALE_BUTTON_TEXT
+from src.bot.texts import UNKNOWN_PROVIDER_TEXT
 from src.services.scheduler import TRIGGER_MANUAL, CollectorRunner
 
 router = Router(name="collector")
@@ -81,7 +82,7 @@ async def handle_provider_on(message: Message, command: CommandObject, collector
     """Turn a source back on after blocks. This is the only way out of an automatic switch-off."""
     name = (command.args or "").strip() or ("2gis" if collector_runner.known_provider("2gis") else "2gis_scraper")
     if not collector_runner.known_provider(name):
-        await message.answer(f"Неизвестный источник: {html.escape(name)}. Список: /collect_status", parse_mode="HTML")
+        await message.answer(UNKNOWN_PROVIDER_TEXT.format(name=html.escape(name)), parse_mode="HTML")
         return
     await collector_runner.enable_provider(name)
     await message.answer(
