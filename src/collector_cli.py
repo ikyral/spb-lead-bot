@@ -6,7 +6,8 @@ pauses, limits and stops: a block is registered in the local database and honour
 
 --assisted is for a person at the computer: at a captcha the browser window waits for them.
 With it, --check looks at one live page to see if the parser understands the site, and --enrich
-reads the cards of leads the bot asked about, for a file to send back to the bot.
+reads the cards of leads the bot asked about, for a file to send back to the bot. --google with
+--enrich looks for the same leads on Google instead, and for contacts on the sites found there.
 
 Exit codes: 0 done, 1 error, 2 a source refused or is waiting after a refusal, 130 interrupted.
 """
@@ -31,8 +32,9 @@ from src.database.repo import enable_provider, get_provider_states, init_db
 from src.services.assisted_runs import CHECK_MAX_PAGES, ENRICH_MAX_CARDS, CheckReport, EnrichRun, run_check, run_enrich
 from src.services.collector import REST_REASON, CollectorConfig, load_collector_config
 from src.services.dgis_key import DGIS_PROVIDER_NAME, DgisKeyPolicy, DgisQuota, key_expiry_notice
+from src.services.google_assisted import GoogleOptions, GoogleRun, run_google_enrich
 from src.services.lead_export import ExportResult, export_new_leads
-from src.services.lead_file import LeadFileError, parse_enrich_request
+from src.services.lead_file import EnrichRequest, LeadFileError, parse_enrich_request
 from src.services.lead_import import read_limited
 from src.services.providers.registry import build_providers
 from src.services.providers.twogis import TwoGisOptions
@@ -50,6 +52,8 @@ SCRAPER_PROVIDER_NAME = "2gis_scraper"
 CHECK_LOG_PATH = "logs/scraper_check.json"
 SAMPLES_DIR = "data/samples"
 ERROR_LOG_PATH = "logs/collector_errors.log"
+# Where --enrich-latest looks for the newest request: the exports folder and where browsers save files.
+REQUEST_FILE_PATTERN = "enrich_request_*.json"
 
 _HIDDEN = "<скрыто>"
 # The query of a link holds API keys and search words, the part before '@' a password of a database.
@@ -77,6 +81,16 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         metavar="ФАЙЛ",
         help="вместе с --assisted: прочитать карточки из файла команды /export_unknown и записать файл для бота",
     )
+    mode.add_argument(
+        "--enrich-latest",
+        action="store_true",
+        help="как --enrich, но с самым свежим файлом enrich_request_*.json из папки выгрузки или из Загрузок",
+    )
+    parser.add_argument(
+        "--google",
+        action="store_true",
+        help="вместе с --assisted и --enrich: искать сайт и контакты лидов в Google, а не в карточках 2ГИС",
+    )
     parser.add_argument(
         "--save-sample",
         action="store_true",
@@ -101,8 +115,10 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         parser.error("--check не зависит от интервала, у него свой лимит: --ignore-interval здесь не нужен")
     if args.save_sample and not args.check:
         parser.error("--save-sample работает только вместе с --check")
-    if (args.check or args.enrich is not None) and not args.assisted:
+    if (args.check or args.enrich is not None or args.enrich_latest) and not args.assisted:
         parser.error("--check и --enrich работают только вместе с --assisted: капчу проходит человек")
+    if args.google and not (args.enrich is not None or args.enrich_latest):
+        parser.error("--google работает только вместе с --assisted и --enrich ФАЙЛ или --enrich-latest")
     return args
 
 
@@ -320,18 +336,31 @@ def _print_enrich(run: EnrichRun) -> None:
     print(f"Отправьте боту файл: {run.path}" if run.path else "Файл не создан: прочитать ничего не удалось.")
 
 
-async def _enrich(
-    current: Settings, session_maker: async_sessionmaker[AsyncSession], file_name: str, ignore_interval: bool = False
-) -> int:
-    _collector_config(current)  # the same check of the settings as before a collection
+def _latest_request(current: Settings) -> Path | None:
+    """The newest request file: in the exports folder or where a browser saved it from Telegram."""
+    folders = [resolve_path(current.COLLECTOR_EXPORT_DIR), Path.home() / "Downloads"]
+    files = [path for folder in folders if folder.is_dir() for path in folder.glob(REQUEST_FILE_PATTERN)]
+    return max(files, key=lambda path: path.stat().st_mtime, default=None)
+
+
+async def _read_request(current: Settings, path: Path) -> EnrichRequest | None:
+    """The request in a file, or None after saying why it cannot be used."""
     try:
-        data = await asyncio.to_thread(read_limited, Path(file_name), current.IMPORT_MAX_FILE_BYTES)
-        request = parse_enrich_request(data, current.IMPORT_MAX_FILE_BYTES)
+        data = await asyncio.to_thread(read_limited, path, current.IMPORT_MAX_FILE_BYTES)
+        return parse_enrich_request(data, current.IMPORT_MAX_FILE_BYTES)
     except OSError as exc:
         print(f"Файл запроса не прочитан: {exc.strerror or type(exc).__name__}.")
-        return EXIT_ERROR
     except LeadFileError as exc:
         print(f"Файл запроса не принят: {exc}.")
+    return None
+
+
+async def _enrich(
+    current: Settings, session_maker: async_sessionmaker[AsyncSession], path: Path, ignore_interval: bool = False
+) -> int:
+    _collector_config(current)  # the same check of the settings as before a collection
+    request = await _read_request(current, path)
+    if request is None:
         return EXIT_ERROR
 
     run = EnrichRun()
@@ -348,6 +377,63 @@ async def _enrich(
     finally:
         # Also when interrupted: what was read is in the file, and the person has to know where.
         _print_enrich(run)
+    if run.refused or run.blocked:
+        return EXIT_BLOCKED
+    return EXIT_ERROR if run.failed else EXIT_OK
+
+
+def _print_google(run: GoogleRun, options: GoogleOptions) -> None:
+    if run.refused == REST_REASON:
+        print(f"Google не открывался: {run.refused}. {_rest_hint(run.retry_at, '--assisted --google --enrich ФАЙЛ')}")
+        return
+    if run.refused is not None:
+        print(f"Google не открывался: {run.refused}. Не запускайте повторно раньше времени.")
+        if "отключён" in run.refused:
+            print("Включить вручную: python collect_cli.py --enable-provider google")
+        return
+    sites = run.count(lambda record: bool(record["website"]))
+    socials = run.count(lambda record: not record["website"] and bool(record["socials"]))
+    print(
+        f"Поисков в Google: {run.searched}. Лидов обработано {len(run.records)}: сайт найден у {sites}, "
+        f"только соцсети у {socials}, ничего не найдено у {len(run.records) - sites - socials}."
+    )
+    not_searched = run.planned - len(run.records)
+    if not_searched:
+        print(f"Не обработано из-за остановки: {not_searched}.")
+    if run.over_limit:
+        print(f"За запуск ищется не больше {options.max_per_run} лидов, остальные {run.over_limit} не обработаны.")
+    for reason, count in run.rejected.most_common():
+        print(f"Записей пропущено ({reason}): {count}.")
+    if run.blocked:
+        print(
+            f"Google отказал: {run.blocked}. Это записано как блокировка, следующий запуск после паузы. "
+            "После трёх блокировок подряд Google отключится до python collect_cli.py --enable-provider google."
+        )
+    if run.stopped:
+        print(f"Поиск остановлен: {run.stopped}.")
+    if run.failed:
+        print(f"Поиск остановлен: {run.failed}.")
+    if run.day_left is not None:
+        print(f"Запросов в Google на сегодня осталось: {run.day_left}.")
+    print(f"Отправьте боту файл: {run.path}" if run.path else "Файл не создан: ни один лид не обработан.")
+
+
+async def _google_enrich(
+    current: Settings, session_maker: async_sessionmaker[AsyncSession], path: Path, ignore_interval: bool = False
+) -> int:
+    request = await _read_request(current, path)
+    if request is None:
+        return EXIT_ERROR
+
+    run = GoogleRun()
+    options = GoogleOptions.from_settings(current, ignore_interval=ignore_interval)
+    try:
+        await run_google_enrich(session_maker, request, options, resolve_path(current.COLLECTOR_EXPORT_DIR), run)
+    finally:
+        # Also when interrupted: what was found is in the file, and the person has to know where.
+        for problem in run.problems:
+            _write_error_log(f"google: {problem}", current)
+        _print_google(run, options)
     if run.refused or run.blocked:
         return EXIT_BLOCKED
     return EXIT_ERROR if run.failed else EXIT_OK
@@ -377,8 +463,16 @@ async def _run(args: argparse.Namespace, current: Settings) -> int:
             logger.warning("The interval between runs is skipped by the decision of the owner (--ignore-interval)")
         if args.check:
             return await _check(current, session_maker, args.save_sample)
-        if args.enrich is not None:
-            return await _enrich(current, session_maker, args.enrich, args.ignore_interval)
+        if args.enrich is not None or args.enrich_latest:
+            path = Path(args.enrich) if args.enrich is not None else _latest_request(current)
+            if path is None:
+                print(f"Файл запроса не найден: нет {REQUEST_FILE_PATTERN} ни в папке выгрузки, ни в Загрузках.")
+                return EXIT_ERROR
+            if args.enrich_latest:
+                print(f"Файл запроса: {path}")
+            if args.google:
+                return await _google_enrich(current, session_maker, path, args.ignore_interval)
+            return await _enrich(current, session_maker, path, args.ignore_interval)
 
         names: list[str] = []
         if not args.export_only:
@@ -424,19 +518,25 @@ def _without_secrets(text: str, current: Settings) -> str:
     return _URL_QUERY_RE.sub(rf"\1?{_HIDDEN}", text)
 
 
-def _report_unexpected(exc: Exception, current: Settings) -> None:
-    """A bug or a failure nobody foresaw: say what it is, and keep the details for whoever fixes it."""
-    print(f"Непредвиденная ошибка: {type(exc).__name__}: {_without_secrets(str(exc), current)}")
-    details = _without_secrets("".join(traceback.format_exception(exc)), current)
+def _write_error_log(details: str, current: Settings) -> Path | None:
+    """Append to the log of errors, without secrets. None, after saying why, if it could not be written."""
     path = resolve_path(ERROR_LOG_PATH)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as file:
-            file.write(f"--- {datetime.now(UTC).isoformat(timespec='seconds')}\n{details}\n")
+            file.write(f"--- {datetime.now(UTC).isoformat(timespec='seconds')}\n{_without_secrets(details, current)}\n")
     except OSError as write_error:
         print(f"Подробности не записаны: {write_error.strerror or type(write_error).__name__}.")
-        return
-    print(f"Подробности: {path}")
+        return None
+    return path
+
+
+def _report_unexpected(exc: Exception, current: Settings) -> None:
+    """A bug or a failure nobody foresaw: say what it is, and keep the details for whoever fixes it."""
+    print(f"Непредвиденная ошибка: {type(exc).__name__}: {_without_secrets(str(exc), current)}")
+    path = _write_error_log("".join(traceback.format_exception(exc)), current)
+    if path is not None:
+        print(f"Подробности: {path}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -463,7 +563,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Ошибка настроек: {exc}")
         return EXIT_ERROR
     except KeyboardInterrupt:
-        if args.enrich is not None:
+        if args.google:
+            print("Прервано. Браузер закрыт, найденное сохранено в файл.")
+        elif args.enrich is not None or args.enrich_latest:
             print("Прервано. Браузер закрыт, прочитанные карточки сохранены в файл.")
         elif args.check:
             print("Прервано. Браузер закрыт.")

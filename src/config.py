@@ -102,6 +102,17 @@ class Settings(BaseSettings):
     # How many times collect_cli.py --check may look at the site within 24 hours.
     SCRAPER_CHECK_MAX_PER_DAY: int = Field(default=3, ge=1, le=10)
 
+    # Looking for the site and contacts of leads on Google, only with collect_cli.py --assisted --google.
+    # The upper bounds keep it a person's pace whatever is configured; pauses are fixed in the code.
+    GOOGLE_MAX_PER_RUN: int = Field(default=15, ge=1, le=20)
+    GOOGLE_MAX_PER_DAY: int = Field(default=60, ge=1, le=100)
+    # 0 = no interval, as for the parser of 2GIS: when to run is then up to the owner.
+    GOOGLE_MIN_HOURS_BETWEEN_RUNS: float = Field(default=3.0, ge=0.0)
+    # How close the name of a lead must be to the address or the title of a result, from 0.5 to 1.
+    GOOGLE_NAME_MATCH_THRESHOLD: float = Field(default=0.6, ge=0.5, le=1.0)
+    # Cookies of the browser for Google, kept apart from those for 2GIS.
+    GOOGLE_PROFILE_DIR: str = "data/google_profile"
+
     # The collector for a separate computer (collect_cli.py). Relative paths are from the project root.
     COLLECTOR_PROVIDERS: str = "2gis"
     COLLECTOR_DB_PATH: str = "data/collector.db"

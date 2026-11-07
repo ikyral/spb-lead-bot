@@ -127,6 +127,9 @@ class ProviderState(Base):
     # API requests spent with the key identified by key_fingerprint (a hash, never the key itself).
     requests_total: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     key_fingerprint: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
+    # Requests sent on requests_day (the local date of the computer, ISO format), for a daily ceiling.
+    requests_day: Mapped[str | None] = mapped_column(String(10), nullable=True, default=None)
+    requests_day_used: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class SearchProgress(Base):
