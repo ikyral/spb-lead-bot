@@ -12,6 +12,7 @@ from src.bot.handlers.collector import router as collector_router
 from src.bot.handlers.fallback import router as fallback_router
 from src.bot.handlers.imports import router as imports_router
 from src.bot.handlers.issue import router as issue_router
+from src.bot.handlers.issue import stop_background_batches
 from src.bot.handlers.leads import router as leads_router
 from src.bot.handlers.menu import router as menu_router
 from src.bot.handlers.search import router as search_router
@@ -132,6 +133,8 @@ async def main() -> None:
     dp.startup.register(set_command_menus)
     dp.startup.register(collector_runner.start)
     dp.shutdown.register(collector_runner.shutdown)
+    # Before the database closes: leads of a batch cut short go back to the pool.
+    dp.shutdown.register(stop_background_batches)
 
     if not settings.NOTIFY_ADMINS_PRIVATE and not settings.notify_chat_ids:
         logger.warning("NOTIFY_ADMINS_PRIVATE=false needs NOTIFY_CHAT_IDS: without chats admins are still notified")

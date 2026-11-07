@@ -20,6 +20,7 @@ from src.bot.formatters import (
     format_collector_status,
     format_funnel_stats,
     format_issued_lead,
+    format_request_usage,
 )
 from src.bot.handlers import collector as collector_handlers
 from src.bot.handlers import issue, leads
@@ -53,8 +54,10 @@ from src.database.repo import (
     return_undelivered_leads,
     set_contact_status,
 )
-from src.services.collector import CollectResult
-from src.services.scheduler import TopupDecision, TopupOutcome
+from src.services.collector import CollectResult, load_collector_config
+from src.services.dgis_key import DgisKeyPolicy, DgisQuota
+from src.services.providers.registry import ProviderSet
+from src.services.scheduler import CollectorRunner, DgisKeyStatus, RequestUsage, TopupDecision, TopupOutcome
 
 
 def _lead(number: int, **fields) -> Lead:
@@ -899,6 +902,7 @@ async def test_batch_button_with_any_size_reaches_the_handler(guarded_dispatcher
     issue._issuing_to.clear()
     for number, text_ in enumerate(("📦 Следующие 30", "📦 Следующие 50", "/next_leads", "📦 Следующие")):
         await guarded_dispatcher.feed_update(_bot(), _update(number, 100, text_), collector_runner=MagicMock())
+        await asyncio.gather(*issue._background_batches)  # the batch goes out in the background
     assert calls == ["📦 Следующие 30", "📦 Следующие 50", "/next_leads"]
 
 
@@ -1102,3 +1106,56 @@ async def test_rollback_leaves_no_new_site_status_for_the_old_version(old_databa
     assert crm == {"osm_1": "rejected", "osm_2": "in_work"}  # a site was found: it must not go back to the pool
     assert "site_url" not in await _columns(old_database)
     assert "is_chain" not in await _columns(old_database)
+
+
+# ---------- API requests in the statistics ----------
+
+
+def _usage(key: DgisKeyStatus | None) -> RequestUsage:
+    return RequestUsage(collector_today=12, collector_day_limit=200, dgis_key=key)
+
+
+def _key(used: int, limit: int) -> DgisKeyStatus:
+    return DgisKeyStatus(used=used, limit=limit, reserve=50, expires_on=None, days_left=None, request_contacts=False)
+
+
+def test_request_usage_shows_the_day_the_total_and_what_is_left() -> None:
+    text_ = format_request_usage(_usage(_key(used=640, limit=1000)))
+
+    assert "Сбор за сутки (2ГИС и OSM): <b>12</b> из 200" in text_
+    assert "2ГИС всего с этим ключом: <b>640</b>" in text_
+    assert "Осталось по лимиту ключа: <b>360</b> из 1000" in text_
+    assert "резерв 50" in text_
+
+
+def test_request_usage_without_a_limit_or_a_key() -> None:
+    assert "Лимит ключа не задан" in format_request_usage(_usage(_key(used=5, limit=0)))
+    assert "ключ не задан" in format_request_usage(_usage(None))
+    assert "<b>0</b> из 1000" in format_request_usage(_usage(_key(used=1200, limit=1000)))
+
+
+async def test_stats_command_adds_the_requests_when_the_runner_is_there(batch_env) -> None:
+    runner = MagicMock()
+    runner.get_request_usage = AsyncMock(return_value=_usage(_key(used=10, limit=1000)))
+    message = _message()
+
+    await issue.handle_leads_stats(message, runner)
+
+    assert "Осталось по лимиту ключа: <b>990</b>" in message.answer.await_args.args[0]
+
+
+async def test_the_runner_counts_requests_from_the_database(session_maker) -> None:
+    quota = DgisQuota(session_maker, "KEY", DgisKeyPolicy(limit=1000, reserve=50))
+    await quota.sync_key()
+    for _ in range(3):
+        await quota.spend()
+    config = load_collector_config(Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=1))
+    runner = CollectorRunner(
+        session_maker, ProviderSet(providers=[], disabled={}), config, AsyncMock(), dgis_quota=quota
+    )
+
+    usage = await runner.get_request_usage()
+
+    assert usage.dgis_key is not None and usage.dgis_key.used == 3 and usage.dgis_key.limit == 1000
+    assert usage.collector_today == 0
+    assert usage.collector_day_limit == config.max_requests_per_day

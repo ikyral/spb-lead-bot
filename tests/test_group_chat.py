@@ -25,7 +25,7 @@ from src.bot.handlers import fallback, issue, leads, menu, search
 from src.bot.keyboards import get_group_panel_keyboard
 from src.bot.middlewares import NO_ACCESS_TEXT, AdminOnlyMiddleware
 from src.bot.notifier import AdminNotifier
-from src.bot.texts import ADMIN_ONLY_TEXT
+from src.bot.texts import ADMIN_ONLY_TEXT, BATCH_BUSY_TEXT, BATCH_BUSY_TOAST, BATCH_STARTED_TOAST
 from src.config import Settings
 from src.database.models import CONTACT_CONTACTED, STATUS_ISSUED, STATUS_NEW, Lead
 from src.database.repo import count_issued_leads, count_new_leads, issue_next_leads
@@ -636,8 +636,9 @@ async def test_inline_button_hands_out_a_batch(batch_env) -> None:
     callback.message = _group_message()
 
     await issue.handle_next_batch_button(callback, _runner())
+    await asyncio.gather(*issue._background_batches)
 
-    callback.answer.assert_awaited_once_with()
+    callback.answer.assert_awaited_once_with(BATCH_STARTED_TOAST)
     assert len(_cards(callback.message)) == 3
 
 
@@ -792,3 +793,104 @@ async def test_flood_wait_on_the_batch_notice_does_not_stop_the_batch(batch_env)
     assert len(_cards(message)) == 2
     async with batch_env() as session:
         assert await count_issued_leads(session) == 2
+
+
+# ---------- the batch goes out in the background ----------
+
+
+async def _let_background_run(steps: int = 200) -> None:
+    for _ in range(steps):
+        await asyncio.sleep(0)
+
+
+async def test_button_is_answered_before_the_batch_and_the_handler_does_not_wait(batch_env, monkeypatch) -> None:
+    order: list[str] = []
+    release = asyncio.Event()
+
+    async def slow_batch(message, runner) -> None:
+        order.append("batch started")
+        await release.wait()
+        order.append("batch done")
+
+    monkeypatch.setattr(issue, "_issue_batch", slow_batch)
+    callback = MagicMock(spec=CallbackQuery)
+    callback.answer = AsyncMock(side_effect=lambda *args, **kwargs: order.append("answered"))
+    callback.message = _group_message()
+
+    await asyncio.wait_for(issue.handle_next_batch_button(callback, _runner()), timeout=1)
+    await _let_background_run()
+
+    assert order == ["answered", "batch started"]  # the handler is done, the batch is still going
+    callback.answer.assert_awaited_once_with(BATCH_STARTED_TOAST)
+    release.set()
+    await asyncio.gather(*issue._background_batches)
+    assert order[-1] == "batch done"
+    assert issue._issuing_to == set()
+
+
+async def test_double_tap_hands_out_one_batch(batch_env) -> None:
+    await _add_leads(batch_env, 6)  # two batches of 3 in the pool
+    first, second = MagicMock(spec=CallbackQuery), MagicMock(spec=CallbackQuery)
+    for callback in (first, second):
+        callback.answer = AsyncMock()
+        callback.message = _group_message()
+
+    await issue.handle_next_batch_button(first, _runner())
+    await issue.handle_next_batch_button(second, _runner())
+    await asyncio.gather(*issue._background_batches)
+
+    second.answer.assert_awaited_once_with(BATCH_BUSY_TOAST)
+    assert len(_cards(first.message)) == 3
+    assert _cards(second.message) == []
+    async with batch_env() as session:
+        assert await count_issued_leads(session) == 3
+        assert await count_new_leads(session) == 3
+
+
+async def test_double_tap_of_the_bottom_button_hands_out_one_batch(batch_env) -> None:
+    await _add_leads(batch_env, 6)
+    first, second = _group_message(), _group_message()
+
+    await issue.handle_next_batch_request(first, _runner())
+    await issue.handle_next_batch_request(second, _runner())
+    await asyncio.gather(*issue._background_batches)
+
+    second.answer.assert_awaited_once_with(BATCH_BUSY_TEXT, reply_markup=None, parse_mode="HTML")
+    async with batch_env() as session:
+        assert await count_issued_leads(session) == 3
+
+
+async def test_a_button_too_old_to_answer_still_gets_its_batch(batch_env) -> None:
+    await _add_leads(batch_env, 3)
+    callback = MagicMock(spec=CallbackQuery)
+    callback.answer = AsyncMock(side_effect=TelegramBadRequest(method=METHOD, message="query is too old"))
+    callback.message = _group_message()
+
+    await issue.handle_next_batch_button(callback, _runner())
+    await asyncio.gather(*issue._background_batches)
+
+    assert len(_cards(callback.message)) == 3
+
+
+async def test_stopping_the_bot_returns_the_leads_not_yet_sent(batch_env, monkeypatch) -> None:
+    await _add_leads(batch_env, 3)
+    sent: list[int] = []
+    never = asyncio.Event()
+
+    async def send_one_then_hang(message, lead) -> None:
+        if sent:
+            await never.wait()
+        sent.append(lead.id)
+
+    monkeypatch.setattr(issue, "_send_card", send_one_then_hang)
+    await issue.handle_next_batch_request(_group_message(), _runner())
+    await _let_background_run()
+    assert len(sent) == 1
+
+    await issue.stop_background_batches()
+
+    assert issue._background_batches == set()
+    assert issue._issuing_to == set()
+    async with batch_env() as session:
+        assert await count_issued_leads(session) == 1
+        assert await count_new_leads(session) == 2

@@ -19,6 +19,7 @@ from src.bot.keyboards import (
 )
 from src.bot.middlewares import PUBLIC_FLAG, is_admin
 from src.bot.texts import ENRICH_BUTTON_TEXT, ENRICH_GUIDE_TEXT, HELP_BUTTON_TEXT, STATS_BUTTON_TEXT
+from src.services.scheduler import CollectorRunner
 
 logger = logging.getLogger(__name__)
 router = Router(name="menu")
@@ -61,7 +62,7 @@ async def handle_enrich_request_button(callback: CallbackQuery) -> None:
 
 
 @router.message(F.text == STATS_BUTTON_TEXT)
-async def handle_stats_menu(message: Message) -> None:
-    """The funnel with its CSV export, then the table of niches."""
-    await handle_leads_stats(message)
+async def handle_stats_menu(message: Message, collector_runner: CollectorRunner) -> None:
+    """The funnel with its CSV export and the API requests, then the table of niches."""
+    await handle_leads_stats(message, collector_runner)
     await handle_niches(message)

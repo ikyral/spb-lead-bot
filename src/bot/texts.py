@@ -18,6 +18,9 @@ REQUEST_FILE_BUTTON_TEXT: str = "📄 Получить файл запроса"
 MORE_ENRICH_BUTTON_TEXT: str = "🔎 Ещё 30 на обогащение"
 
 NO_ACCESS_TEXT: str = "⛔ Нет доступа"
+BATCH_BUSY_TEXT: str = "⏳ Предыдущая пачка ещё отправляется."
+BATCH_BUSY_TOAST: str = "Предыдущая пачка ещё отправляется"
+BATCH_STARTED_TOAST: str = "⏳ Выдаю лиды…"
 ADMIN_ONLY_TEXT: str = "🔒 Эта команда доступна только администраторам бота. Что можно: /help"
 
 # Run on the computer with the collector, in the project folder with .venv active.
