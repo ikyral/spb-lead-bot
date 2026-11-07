@@ -24,6 +24,9 @@ from src.services.twogis_links import TWOGIS_SOURCES, readable_card_number
 SCHEMA_VERSION: int = 1
 # Files of the enrichment: the bot asks about leads, a collector answers from their cards.
 ENRICH_SCHEMA_VERSION: int = 1
+# Results of a search on Google: a bot that knows only version 1 refuses them instead of taking them for cards.
+ENRICH_GOOGLE_SCHEMA_VERSION: int = 2
+FOUND_BY_GOOGLE: str = "google"
 KIND_ENRICH_REQUEST: str = "enrich_request"
 KIND_ENRICH_RESULT: str = "enrich_result"
 # More than this at once is pointless: a person passes captchas, and a collector reads 30 cards per run.
@@ -39,6 +42,7 @@ REASON_NO_CONTACTS = "нет телефона и сайта"
 REASON_NO_PARSED_FLAG = "нет признака parsed"
 REASON_BAD_WEBSITE = "адрес сайта непригоден"
 REASON_BAD_CARD_LINK = "ссылка не ведёт на карточку этой организации в 2ГИС"
+REASON_BAD_FOUND_BY = "неизвестно, откуда данные: поле found_by"
 
 _NAME_MAX = 255
 _ADDRESS_MAX = 512
@@ -310,6 +314,11 @@ class EnrichRequestItem:
     source_id: str
     source_url: str
     firm_number: str
+    # For a search by name, not a part of what the item is. Requests made before these were added lack some.
+    name: str | None = field(default=None, compare=False)
+    address: str | None = field(default=None, compare=False)
+    district: str | None = field(default=None, compare=False)
+    category: str | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -333,6 +342,8 @@ class EnrichRecord:
     website: str | None = None
     socials: list[str] = field(default_factory=list)
     email: str | None = None
+    # None: read from the card on 2GIS. FOUND_BY_GOOGLE: found by a search on Google and on the site found there.
+    found_by: str | None = None
 
     @property
     def external_id(self) -> str:
@@ -349,13 +360,16 @@ class EnrichResult:
 
 
 def enrich_request_record(lead: Lead) -> dict[str, Any]:
-    """One lead in a request: enough to find its card, and nothing else."""
+    """One lead in a request: enough to find its card or to search for it by name, and nothing else."""
     return {
         "source": lead.source,
         "source_id": lead.external_id.removeprefix(f"{lead.source}_"),
         "source_url": lead.source_url,
         "name": lead.name,
         "district": lead.district,
+        # Optional, an older collector ignores them: for a search on Google.
+        "address": lead.address,
+        "category": lead.category,
     }
 
 
@@ -368,9 +382,10 @@ def enrich_result_record(
     website: str | None = None,
     socials: list[str] | None = None,
     email: str | None = None,
+    found_by: str | None = None,
 ) -> dict[str, Any]:
     """One lead in a result. Each has the same fields, whether the card was recognized or not."""
-    return {
+    record: dict[str, Any] = {
         "source": source,
         "source_id": source_id,
         "parsed": parsed,
@@ -380,12 +395,18 @@ def enrich_result_record(
         "email": email,
         "fetched_at": fetched_at.isoformat(),
     }
+    # Only when set: results read from cards stay exactly as they were.
+    if found_by is not None:
+        record["found_by"] = found_by
+    return record
 
 
-def build_enrich_document(kind: str, records: list[dict[str, Any]], exported_at: datetime) -> dict[str, Any]:
+def build_enrich_document(
+    kind: str, records: list[dict[str, Any]], exported_at: datetime, schema_version: int = ENRICH_SCHEMA_VERSION
+) -> dict[str, Any]:
     """A whole file of the enrichment. Public data of organizations only."""
     return {
-        "schema_version": ENRICH_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "kind": kind,
         "exported_at": exported_at.isoformat(),
         "count": len(records),
@@ -405,16 +426,19 @@ def file_kind(data: bytes, max_bytes: int) -> str | None:
     raise LeadFileError("неизвестный тип файла: поле kind не является строкой")
 
 
-def _enrich_records(data: bytes, max_bytes: int, max_records: int, kind: str) -> list[Any]:
-    """The records of a file of this kind. Here, unlike in the older format, nothing may be left out."""
+def _enrich_records(
+    data: bytes, max_bytes: int, max_records: int, kind: str, versions: tuple[int, ...] = (ENRICH_SCHEMA_VERSION,)
+) -> tuple[int, list[Any]]:
+    """The version and the records of a file of this kind. Here, unlike in the older format, nothing may be left out."""
     if file_kind(data, max_bytes) != kind:
         raise LeadFileError(f"это не файл {kind}: другое значение kind")
     document = _load_json(data)
 
     version = document.get("schema_version")
-    if isinstance(version, bool) or version != ENRICH_SCHEMA_VERSION:
+    if isinstance(version, bool) or version not in versions:
         shown = clean_text(str(version))[:20]
-        raise LeadFileError(f"неизвестная версия схемы {shown}, понятна версия {ENRICH_SCHEMA_VERSION}")
+        known = ", ".join(str(number) for number in versions)
+        raise LeadFileError(f"неизвестная версия схемы {shown}, понятна версия {known}")
 
     records = document.get("records")
     if not isinstance(records, list):
@@ -426,7 +450,7 @@ def _enrich_records(data: bytes, max_bytes: int, max_records: int, kind: str) ->
         raise LeadFileError("файл повреждён: count не совпадает с числом записей")
     if document.get("checksum") != compute_checksum(records):
         raise LeadFileError("файл повреждён: контрольная сумма не совпадает")
-    return records
+    return version, records
 
 
 def _identity(record: Any) -> tuple[str, str]:
@@ -446,12 +470,21 @@ def _parse_request_item(record: Any) -> EnrichRequestItem:
     number = readable_card_number(source_url)
     if source_url is None or number is None or source_id.split("_", 1)[0] != number or source not in TWOGIS_SOURCES:
         raise _RejectedRecord(REASON_BAD_CARD_LINK)
-    return EnrichRequestItem(source=source, source_id=source_id, source_url=source_url, firm_number=number)
+    return EnrichRequestItem(
+        source=source,
+        source_id=source_id,
+        source_url=source_url,
+        firm_number=number,
+        name=_text(record, "name", _NAME_MAX),
+        address=_text(record, "address", _ADDRESS_MAX),
+        district=_text(record, "district", _DISTRICT_MAX),
+        category=_text(record, "category", _RUBRIC_MAX),
+    )
 
 
 def parse_enrich_request(data: bytes, max_bytes: int) -> EnrichRequest:
     """Check a request on a collector. A file that is not right as a whole raises LeadFileError."""
-    records = _enrich_records(data, max_bytes, ENRICH_REQUEST_MAX_LEADS, KIND_ENRICH_REQUEST)
+    _, records = _enrich_records(data, max_bytes, ENRICH_REQUEST_MAX_LEADS, KIND_ENRICH_REQUEST)
     request = EnrichRequest(total=len(records))
     for record in records:
         try:
@@ -476,9 +509,12 @@ def _parse_result_record(record: Any) -> EnrichRecord:
     parsed = record.get("parsed")
     if not isinstance(parsed, bool):
         raise _RejectedRecord(REASON_NO_PARSED_FLAG)
+    found_by = record.get("found_by")
+    if found_by not in (None, FOUND_BY_GOOGLE):
+        raise _RejectedRecord(REASON_BAD_FOUND_BY)
     fetched_at = _fetched_at(record)
     if not parsed:
-        return EnrichRecord(source=source, source_id=source_id, parsed=False, fetched_at=fetched_at)
+        return EnrichRecord(source=source, source_id=source_id, parsed=False, fetched_at=fetched_at, found_by=found_by)
 
     phones = _text_list(record, "phones", _PHONES_MAX_ITEMS, _PHONE_MAX)
     socials = _text_list(record, "socials", _SOCIALS_MAX_ITEMS, _SOCIAL_MAX)
@@ -497,6 +533,7 @@ def _parse_result_record(record: Any) -> EnrichRecord:
         website=website,
         socials=socials,
         email=_text(record, "email", _EMAIL_MAX),
+        found_by=found_by,
     )
 
 
@@ -520,11 +557,20 @@ def is_valid_result_record(record: dict[str, Any]) -> bool:
 
 def parse_enrich_result(data: bytes, max_bytes: int, max_records: int) -> EnrichResult:
     """Check a result on the server. A file that is not right as a whole raises LeadFileError."""
-    records = _enrich_records(data, max_bytes, max_records, KIND_ENRICH_RESULT)
+    version, records = _enrich_records(
+        data, max_bytes, max_records, KIND_ENRICH_RESULT, (ENRICH_SCHEMA_VERSION, ENRICH_GOOGLE_SCHEMA_VERSION)
+    )
     result = EnrichResult(total=len(records))
     for record in records:
         try:
             result.records.append(_parse_result_record(record))
         except _RejectedRecord as exc:
             result.rejected[exc.reason] += 1
+    # A file is all from cards or all from Google, and its version says which: a mix is a damaged or forged file.
+    from_google = {record.found_by == FOUND_BY_GOOGLE for record in result.records}
+    if from_google and from_google != {version == ENRICH_GOOGLE_SCHEMA_VERSION}:
+        raise LeadFileError(
+            f"версия схемы {ENRICH_GOOGLE_SCHEMA_VERSION} только для результатов поиска в Google, "
+            f"версия {ENRICH_SCHEMA_VERSION} только для карточек 2ГИС: в файле другое"
+        )
     return result

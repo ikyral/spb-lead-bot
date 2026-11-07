@@ -5,6 +5,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
+from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.base import BaseTrigger
@@ -200,14 +201,24 @@ def _progress_key(provider: BaseMapProvider, target: SearchTarget) -> str:
     return hashlib.sha256(repr(parts).encode("utf-8")).hexdigest()
 
 
-def interval_ends_at(provider: BaseMapProvider, state: ProviderState | None) -> datetime | None:
+class RunRules(Protocol):
+    """What the rest between runs depends on: a provider, or a source the collector visits by other means."""
+
+    @property
+    def min_hours_between_runs(self) -> float: ...
+
+    @property
+    def ignore_interval(self) -> bool: ...
+
+
+def interval_ends_at(provider: RunRules, state: ProviderState | None) -> datetime | None:
     """When the interval after the last run ends, None if there is no interval or no run."""
     if not provider.min_hours_between_runs or state is None or state.last_run_at is None:
         return None
     return state.last_run_at + timedelta(hours=provider.min_hours_between_runs)
 
 
-def unavailable_reason(provider: BaseMapProvider, state: ProviderState | None, now: datetime) -> str | None:
+def unavailable_reason(provider: RunRules, state: ProviderState | None, now: datetime) -> str | None:
     """Why a provider must not be used right now, or None if it may."""
     if state is None:
         return None

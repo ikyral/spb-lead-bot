@@ -1,5 +1,5 @@
 """
-Updates leads from what a collector read in their cards on 2GIS.
+Updates leads from what a collector read in their cards on 2GIS, or found on Google and on the site found there.
 
 Unlike an ordinary import this changes leads that already exist, so it holds back wherever a
 person's work or knowledge may be at stake: handed-out and rejected leads and verdicts about a
@@ -23,7 +23,7 @@ from src.database.repo import get_leads_by_external_ids
 from src.services.chains import load_chain_index
 from src.services.checker import analyze_website, create_check_client
 from src.services.dedup import normalize_phones
-from src.services.lead_file import EnrichRecord, EnrichResult
+from src.services.lead_file import FOUND_BY_GOOGLE, EnrichRecord, EnrichResult
 from src.services.normalize import normalize_email, normalize_phone_list, normalize_website
 from src.services.scorer import calculate_lead_score
 from src.services.site_status import (
@@ -31,9 +31,12 @@ from src.services.site_status import (
     SITE_FOUND,
     SITE_HAS_SITE,
     SITE_NO_SITE,
+    SITE_NOT_FOUND,
     SITE_SOCIAL_ONLY,
     SOURCE_2GIS_CARD,
+    SOURCE_GOOGLE,
     SOURCE_MANUAL,
+    UNVERIFIED_STATUSES,
     confidence_of_check,
 )
 
@@ -47,6 +50,7 @@ REASON_MANUAL = "о сайте уже есть ручной вердикт"
 REASON_NOT_NEWER = "эти данные не новее уже применённых"
 REASON_DUPLICATE_PHONE = "такой телефон уже есть у другого лида"
 REASON_CHANGED = "лид изменился, пока проверялись сайты"
+REASON_KNOWN_BETTER = "о сайте уже известно больше, чем нашёл поиск"
 
 # Sites are checked at the same time, like in the pipeline: they mostly wait on the network.
 _CHECK_CONCURRENCY: int = 20
@@ -79,7 +83,11 @@ class EnrichStats:
     sites_dead: int = 0
     sites_social: int = 0
     no_site: int = 0
+    # Only from a search on Google: it found neither a site nor a social network.
+    not_found: int = 0
     not_recognized: int = 0
+    # Some records came from a search on Google, not from cards.
+    from_google: bool = False
     ignored: Counter[str] = field(default_factory=Counter)
     useful: list[UsefulLead] = field(default_factory=list)
 
@@ -103,9 +111,25 @@ def _why_not_updated(lead: Lead | None, record: EnrichRecord) -> str | None:
     if lead.site_source == SOURCE_MANUAL:
         return REASON_MANUAL
     # Otherwise an old file sent again, or a late one, would bring back what is already out of date.
-    if lead.site_source == SOURCE_2GIS_CARD and lead.site_checked_at and record.fetched_at <= lead.site_checked_at:
+    if (
+        lead.site_source in (SOURCE_2GIS_CARD, SOURCE_GOOGLE)
+        and lead.site_checked_at
+        and record.fetched_at <= lead.site_checked_at
+    ):
         return REASON_NOT_NEWER
+    # Not finding a site is the weakest thing to know: it must not hide what a card or a check said.
+    if record.found_by == FOUND_BY_GOOGLE and not record.website and lead.site_status not in UNVERIFIED_STATUSES:
+        return REASON_KNOWN_BETTER
     return None
+
+
+def _without_site(record: EnrichRecord) -> tuple[str, str | None]:
+    """The status of a record without a site. A card that lists none says so; a search only did not find one."""
+    if record.found_by != FOUND_BY_GOOGLE:
+        return SITE_NO_SITE, None
+    if record.socials:
+        return SITE_SOCIAL_ONLY, record.socials[0]
+    return SITE_NOT_FOUND, None
 
 
 def _joined(parts: list[str], limit: int) -> str | None:
@@ -149,6 +173,7 @@ async def _check_sites(records: list[EnrichRecord]) -> dict[str, tuple[str, str 
 def _update_values(lead: Lead, record: EnrichRecord, check: tuple[str, str | None], branches: int) -> dict[str, Any]:
     """The new values of a lead, by the rules of the pipeline for a lead with this site."""
     website = normalize_website(record.website)
+    source = SOURCE_GOOGLE if record.found_by == FOUND_BY_GOOGLE else SOURCE_2GIS_CARD
     site_status, details = check
     if site_status == SITE_HAS_SITE:
         site_status = SITE_FOUND
@@ -164,8 +189,8 @@ def _update_values(lead: Lead, record: EnrichRecord, check: tuple[str, str | Non
         "raw_website": website[:_URL_COLUMN_MAX] if website else None,
         "site_url": website[:_URL_COLUMN_MAX] if website and site_status in (SITE_FOUND, SITE_DEAD) else None,
         "site_status": site_status,
-        "site_confidence": confidence_of_check(site_status, SOURCE_2GIS_CARD),
-        "site_source": SOURCE_2GIS_CARD,
+        "site_confidence": confidence_of_check(site_status, source),
+        "site_source": source,
         "site_checked_at": datetime.now(UTC),
         "score": calculate_lead_score(lead.category, site_status, phone, socials, small_chain=branches == 2),
     }
@@ -188,6 +213,8 @@ def _count_update(stats: EnrichStats, site_status: str) -> None:
         stats.sites_dead += 1
     elif site_status == SITE_SOCIAL_ONLY:
         stats.sites_social += 1
+    elif site_status == SITE_NOT_FOUND:
+        stats.not_found += 1
     else:
         stats.no_site += 1
 
@@ -216,7 +243,7 @@ async def _apply_records(
             stats.ignored[REASON_DUPLICATE_PHONE] += 1
             continue
 
-        check = checks.get(record.external_id) if record.website else (SITE_NO_SITE, None)
+        check = checks.get(record.external_id) if record.website else _without_site(record)
         if check is None:
             # The lead became usable only now, say it came back to the pool: without a check nothing is known.
             stats.ignored[REASON_CHANGED] += 1
@@ -272,6 +299,7 @@ async def apply_enrichment(session_maker: async_sessionmaker[AsyncSession], pars
 
     usable: dict[str, EnrichRecord] = {}
     for record in parsed.records:
+        stats.from_google = stats.from_google or record.found_by == FOUND_BY_GOOGLE
         if not record.parsed:
             stats.not_recognized += 1
         elif record.external_id in usable:

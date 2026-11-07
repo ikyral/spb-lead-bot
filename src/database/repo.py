@@ -80,7 +80,7 @@ NEW_LEAD_COLUMNS: tuple[str, ...] = (
 # The same for the collector_state table.
 NEW_STATE_COLUMNS: tuple[str, ...] = ("last_pool_reminder_at", "key_warning_mark", "scraper_check_runs")
 # The same for the provider_state table.
-NEW_PROVIDER_COLUMNS: tuple[str, ...] = ("requests_total", "key_fingerprint")
+NEW_PROVIDER_COLUMNS: tuple[str, ...] = ("requests_total", "key_fingerprint", "requests_day", "requests_day_used")
 # Blocks in a row after which a provider stays off until an admin turns it on.
 MAX_CONSECUTIVE_BLOCKS: int = 3
 
@@ -100,6 +100,8 @@ def _add_missing_columns(sync_conn: Connection) -> None:
                 elif name == "requests_total":
                     # NULL would never compare below the limit, and no request could be spent.
                     sync_conn.execute(text("UPDATE provider_state SET requests_total = 0"))
+                elif name == "requests_day_used":
+                    sync_conn.execute(text("UPDATE provider_state SET requests_day_used = 0"))
 
 
 def _move_contact_results_out_of_crm_status(sync_conn: Connection) -> None:
@@ -693,6 +695,24 @@ async def spend_provider_request(session: AsyncSession, name: str, fingerprint: 
     )
     await session.commit()
     return result.rowcount > 0
+
+
+async def spend_daily_request(session: AsyncSession, name: str, day: str, ceiling: int) -> int | None:
+    """
+    Count one request of `day`, unless `ceiling` of them were sent that day already.
+
+    Returns how many are left for the day after this one, None if none could be taken.
+    """
+    state = await _provider_state(session, name)
+    if state.requests_day != day:
+        state.requests_day = day
+        state.requests_day_used = 0
+    if state.requests_day_used >= ceiling:
+        await session.commit()
+        return None
+    state.requests_day_used += 1
+    await session.commit()
+    return ceiling - state.requests_day_used
 
 
 async def enable_provider(session: AsyncSession, name: str) -> None:

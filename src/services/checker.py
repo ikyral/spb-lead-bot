@@ -31,6 +31,53 @@ SOCIAL_DOMAINS: tuple[str, ...] = (
     "linktr.ee",
 )
 
+# Maps, catalogs, reviews, classifieds and registries: they list an organization, but are not its site.
+# Only the search on Google uses this list; a site from a source is judged by SOCIAL_DOMAINS alone.
+CATALOG_DOMAINS: tuple[str, ...] = (
+    "2gis.ru",
+    "2gis.com",
+    "yandex.ru",
+    "yandex.com",
+    "ya.ru",
+    "google.com",
+    "google.ru",
+    "zoon.ru",
+    "flamp.ru",
+    "otzovik.com",
+    "irecommend.ru",
+    "yell.ru",
+    "orgpage.ru",
+    "spravker.ru",
+    "spr.ru",
+    "cataloxy.ru",
+    "prodoctorov.ru",
+    "napopravku.ru",
+    "docdoc.ru",
+    "sberhealth.ru",
+    "infodoctor.ru",
+    "startsmile.ru",
+    "restoclub.ru",
+    "afisha.ru",
+    "tripadvisor.ru",
+    "tripadvisor.com",
+    "ostrovok.ru",
+    "booking.com",
+    "rusprofile.ru",
+    "list-org.com",
+    "checko.ru",
+    "sbis.ru",
+    "zachestnyibiznes.ru",
+    "audit-it.ru",
+    "avito.ru",
+    "hh.ru",
+    "youla.ru",
+    "wikipedia.org",
+    "youtube.com",
+    "dzen.ru",
+    "ok.ru",
+    "facebook.com",
+)
+
 DEFAULT_USER_AGENT: str = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
@@ -40,12 +87,21 @@ DEFAULT_HEADERS: dict[str, str] = {
 }
 
 
-def is_social_domain(host: str | None) -> bool:
-    """Check if the given host belongs to any known social/aggregator domain."""
+def _host_in(host: str | None, domains: tuple[str, ...]) -> bool:
     if not host:
         return False
     normalized_host = host.lower().rstrip(".")
-    return any(normalized_host == domain or normalized_host.endswith(f".{domain}") for domain in SOCIAL_DOMAINS)
+    return any(normalized_host == domain or normalized_host.endswith(f".{domain}") for domain in domains)
+
+
+def is_social_domain(host: str | None) -> bool:
+    """Check if the given host belongs to any known social/aggregator domain."""
+    return _host_in(host, SOCIAL_DOMAINS)
+
+
+def is_catalog_domain(host: str | None) -> bool:
+    """A map, a catalog or a registry: it lists the organization, it is not its site."""
+    return _host_in(host, CATALOG_DOMAINS)
 
 
 def create_check_client(
