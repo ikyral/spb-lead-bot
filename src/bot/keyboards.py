@@ -10,10 +10,14 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.bot.texts import (
     BATCH_BUTTON_TEXT,
+    CRM_STATS_BUTTON_TEXT,
     ENRICH_BUTTON_TEXT,
     HELP_BUTTON_TEXT,
+    IN_WORK_BUTTON_TEXT,
     MORE_ENRICH_BUTTON_TEXT,
+    NEW_LEADS_BUTTON_TEXT,
     REQUEST_FILE_BUTTON_TEXT,
+    SEARCH_MENU_BUTTON_TEXT,
     STATS_BUTTON_TEXT,
 )
 from src.config import settings
@@ -52,12 +56,13 @@ LEAD_OUTCOMES: dict[str, str] = {
 
 
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
-    """Return the persistent bottom reply keyboard, for private chats only."""
-    # The buttons of the older menu ('🔍 Поиск по СПб' and others) still work when typed or left on a screen.
+    """Return the persistent bottom reply keyboard, for private chats only: the main buttons, then the older menu."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BATCH_BUTTON_TEXT), KeyboardButton(text=ENRICH_BUTTON_TEXT)],
             [KeyboardButton(text=STATS_BUTTON_TEXT), KeyboardButton(text=HELP_BUTTON_TEXT)],
+            [KeyboardButton(text=SEARCH_MENU_BUTTON_TEXT), KeyboardButton(text=NEW_LEADS_BUTTON_TEXT)],
+            [KeyboardButton(text=IN_WORK_BUTTON_TEXT), KeyboardButton(text=CRM_STATS_BUTTON_TEXT)],
         ],
         resize_keyboard=True,
         is_persistent=True,

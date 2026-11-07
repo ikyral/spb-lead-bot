@@ -9,6 +9,11 @@ BATCH_BUTTON_TEXT: str = f"📦 Следующие {settings.LEADS_BATCH_SIZE}"
 ENRICH_BUTTON_TEXT: str = "🔎 Обогащение"
 STATS_BUTTON_TEXT: str = "📊 Ниши и статистика"
 HELP_BUTTON_TEXT: str = "❓ Помощь"
+# The older menu, in the second block of the bottom keyboard.
+SEARCH_MENU_BUTTON_TEXT: str = "🔍 Поиск по СПб"
+NEW_LEADS_BUTTON_TEXT: str = "📋 Новые лиды"
+IN_WORK_BUTTON_TEXT: str = "💼 В работе"
+CRM_STATS_BUTTON_TEXT: str = "📊 Статистика и CSV"
 REQUEST_FILE_BUTTON_TEXT: str = "📄 Получить файл запроса"
 MORE_ENRICH_BUTTON_TEXT: str = "🔎 Ещё 30 на обогащение"
 

@@ -19,7 +19,7 @@ from src.bot.keyboards import (
     get_main_menu_keyboard,
 )
 from src.bot.middlewares import PUBLIC_FLAG, is_admin
-from src.bot.texts import START_ADMIN_TEXT, START_USER_TEXT
+from src.bot.texts import SEARCH_MENU_BUTTON_TEXT, START_ADMIN_TEXT, START_USER_TEXT
 from src.config import settings
 from src.database.repo import async_session_maker
 from src.services.pipeline import MAX_CSV_PLACES, import_csv_harvest, run_lead_harvest
@@ -99,7 +99,7 @@ async def handle_start(message: Message) -> None:
     await message.answer(START_ADMIN_TEXT, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
 
 
-@router.message(F.text == "🔍 Поиск по СПб")
+@router.message(F.text == SEARCH_MENU_BUTTON_TEXT)
 async def handle_search_menu(message: Message) -> None:
     """Prompt user to select an administrative district of Saint Petersburg."""
     await message.answer(
