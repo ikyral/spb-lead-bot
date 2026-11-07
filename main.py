@@ -2,12 +2,14 @@
 
 import asyncio
 import logging
+from datetime import time
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from src.bot.commands import register_bot_commands
+from src.bot.digest import DIGEST_JOB_ID, DailyDigest
 from src.bot.handlers.collector import router as collector_router
 from src.bot.handlers.fallback import router as fallback_router
 from src.bot.handlers.imports import router as imports_router
@@ -15,6 +17,7 @@ from src.bot.handlers.issue import router as issue_router
 from src.bot.handlers.issue import stop_background_batches
 from src.bot.handlers.leads import router as leads_router
 from src.bot.handlers.menu import router as menu_router
+from src.bot.handlers.reminders import router as reminders_router
 from src.bot.handlers.search import router as search_router
 from src.bot.middlewares import AdminOnlyMiddleware
 from src.bot.notifier import AdminNotifier
@@ -73,6 +76,7 @@ async def main() -> None:
     dp.include_router(issue_router)
     dp.include_router(collector_router)
     dp.include_router(imports_router)
+    dp.include_router(reminders_router)
     dp.include_router(menu_router)
     # Last: it takes any private text the others did not.
     dp.include_router(fallback_router)
@@ -121,6 +125,20 @@ async def main() -> None:
         settings.LEADS_REQUIRE_CONTACT,
     )
     dp["import_service"] = import_service
+
+    hour, minute = settings.digest_hour_minute
+    daily_digest = DailyDigest(
+        async_session_maker,
+        notifier,
+        collector_config.timezone,
+        time(hour, minute),
+        settings.FOLLOWUP_AFTER_DAYS,
+        usage=collector_runner.get_request_usage,
+        enabled=settings.DIGEST_ENABLED,
+    )
+    dp["daily_digest"] = daily_digest
+    if settings.DIGEST_ENABLED:
+        collector_runner.add_daily_job(daily_digest.send_scheduled, hour, minute, DIGEST_JOB_ID)
     if settings.IMPORT_INBOX_INTERVAL_SECONDS > 0:
         collector_runner.add_interval_job(
             import_service.scan_inbox, settings.IMPORT_INBOX_INTERVAL_SECONDS, "import_inbox"

@@ -12,6 +12,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 
 import main
+from src.bot.digest import DIGEST_JOB_ID, DailyDigest
 from src.config import Settings
 
 
@@ -86,6 +87,7 @@ async def test_main_wires_the_collector_into_the_bot_lifetime(monkeypatch: pytes
         runner = self["collector_runner"]
         seen["status"] = await runner.get_status()
         seen["routers"] = {router.name for router in self.sub_routers}
+        seen["digest_job"] = runner._scheduler.get_job(DIGEST_JOB_ID)
         seen["scheduler_running"] = runner._scheduler.running
         await self.emit_shutdown(bot=bot, **self.workflow_data)
         seen["scheduler_running_after"] = runner._scheduler.running
@@ -102,12 +104,15 @@ async def test_main_wires_the_collector_into_the_bot_lifetime(monkeypatch: pytes
     # The command menu fails, as it does when an admin has never pressed /start: startup must go on.
     set_commands = AsyncMock(side_effect=TelegramBadRequest(method=MagicMock(), message="chat not found"))
     monkeypatch.setattr(Bot, "set_my_commands", set_commands)
+    # The plan runs once right after the start: here it must not reach Telegram.
+    monkeypatch.setattr(DailyDigest, "send_scheduled", AsyncMock())
 
     await main.main()
 
     status = seen["status"]
     assert set_commands.await_count == 2  # everyone, then the admin
-    assert seen["routers"] == {"search", "leads", "issue", "collector", "imports", "menu", "fallback"}
+    assert seen["routers"] == {"search", "leads", "issue", "collector", "imports", "reminders", "menu", "fallback"}
+    assert seen["digest_job"] is not None  # DIGEST_ENABLED is on by default
     assert seen["scheduler_running"] is True
     assert seen["scheduler_running_after"] is False
     assert status.next_run_at is not None
@@ -163,12 +168,14 @@ async def test_main_counts_requests_of_the_key_and_warns_about_its_end(
         main.issue_router,
         main.collector_router,
         main.imports_router,
+        main.reminders_router,
         main.menu_router,
         main.fallback_router,
     )
     for router in routers:
         router._parent_router = None
     monkeypatch.setattr(Bot, "set_my_commands", AsyncMock())
+    monkeypatch.setattr(DailyDigest, "send_scheduled", AsyncMock())
 
     await main.main()
 

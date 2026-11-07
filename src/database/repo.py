@@ -33,6 +33,8 @@ from src.services.site_status import (
     CONFIDENCE_HIGH,
     CONFIDENCE_LOW,
     ISSUE_GROUPS,
+    NO_SITE_STATUSES,
+    SITE_DEAD,
     SITE_FOUND,
     SITE_NO_SITE,
     SITE_UNKNOWN,
@@ -77,9 +79,15 @@ NEW_LEAD_COLUMNS: tuple[str, ...] = (
     "site_checked_at",
     "is_chain",
     "contact_links",
+    "remind_at",
 )
 # The same for the collector_state table.
-NEW_STATE_COLUMNS: tuple[str, ...] = ("last_pool_reminder_at", "key_warning_mark", "scraper_check_runs")
+NEW_STATE_COLUMNS: tuple[str, ...] = (
+    "last_pool_reminder_at",
+    "key_warning_mark",
+    "scraper_check_runs",
+    "digest_sent_on",
+)
 # The same for the provider_state table.
 NEW_PROVIDER_COLUMNS: tuple[str, ...] = ("requests_total", "key_fingerprint", "requests_day", "requests_day_used")
 # Blocks in a row after which a provider stays off until an admin turns it on.
@@ -522,21 +530,107 @@ async def count_issued_leads(session: AsyncSession) -> int:
     return int(result.scalar_one())
 
 
+# After these there is nothing to remind about.
+REMINDER_ENDING_STATUSES: frozenset[str] = frozenset({CONTACT_REPLIED, CONTACT_REJECTED})
+
+
 async def set_contact_status(
     session: AsyncSession, lead_id: int, status: str, changed_by_id: int, changed_by: str
 ) -> None:
-    """Save what came of contacting a handed-out lead, who said so and when."""
-    await session.execute(
-        update(Lead)
-        .where(Lead.id == lead_id)
-        .values(
-            contact_status=status,
-            contact_status_by_id=changed_by_id,
-            contact_status_by=changed_by[:128],
-            contact_status_at=datetime.now(UTC),
+    """Save what came of contacting a handed-out lead, who said so and when. An answer or a refusal ends reminders."""
+    values: dict[str, Any] = {
+        "contact_status": status,
+        "contact_status_by_id": changed_by_id,
+        "contact_status_by": changed_by[:128],
+        "contact_status_at": datetime.now(UTC),
+    }
+    if status in REMINDER_ENDING_STATUSES:
+        values["remind_at"] = None
+    await session.execute(update(Lead).where(Lead.id == lead_id).values(**values))
+    await session.commit()
+
+
+async def set_remind_at(session: AsyncSession, lead_id: int, remind_at: datetime | None) -> Lead | None:
+    """Set or clear the reminder of a handed-out lead. None if there is no such lead, or it is past reminding."""
+    lead = await session.get(Lead, lead_id)
+    if lead is None or lead.issued_at is None or lead.contact_status in REMINDER_ENDING_STATUSES:
+        await session.commit()
+        return None
+    lead.remind_at = remind_at
+    await session.commit()
+    return lead
+
+
+def _followup_clause(due_before: datetime, stale_before: datetime) -> ColumnElement[bool]:
+    """Wrote to them and the reminder is due, or wrote long ago, heard nothing and set no reminder."""
+    return and_(
+        Lead.issued_at.is_not(None),
+        func.coalesce(Lead.contact_status, "").not_in(REMINDER_ENDING_STATUSES),
+        or_(
+            Lead.remind_at < due_before,
+            and_(
+                Lead.remind_at.is_(None),
+                Lead.contact_status == CONTACT_CONTACTED,
+                Lead.contact_status_at < stale_before,
+            ),
+        ),
+    )
+
+
+async def get_followups(session: AsyncSession, due_before: datetime, stale_before: datetime, limit: int) -> list[Lead]:
+    """Leads to remind about: due reminders by their date, then those written to the longest ago."""
+    stmt = (
+        select(Lead)
+        .where(_followup_clause(due_before, stale_before))
+        .order_by(Lead.remind_at.is_(None), Lead.remind_at, Lead.contact_status_at, Lead.id)
+        .limit(limit)
+    )
+    return list((await session.scalars(stmt)).all())
+
+
+@dataclass(frozen=True)
+class DigestCounts:
+    """The numbers of the morning plan."""
+
+    useful_in_pool: int
+    waiting_for_enrichment: int
+    reminders_due: int
+    written_no_answer: int
+
+
+async def get_digest_counts(session: AsyncSession, due_before: datetime, stale_before: datetime) -> DigestCounts:
+    useful = (*NO_SITE_STATUSES, SITE_DEAD)
+    issued_not_ended = and_(
+        Lead.issued_at.is_not(None), func.coalesce(Lead.contact_status, "").not_in(REMINDER_ENDING_STATUSES)
+    )
+    row = (
+        await session.execute(
+            select(
+                func.count(Lead.id).filter(_in_pool_clause(), Lead.site_status.in_(useful)),
+                func.count(Lead.id).filter(_in_pool_clause(), Lead.site_status == SITE_UNKNOWN),
+                func.count(Lead.id).filter(issued_not_ended, Lead.remind_at < due_before),
+                func.count(Lead.id).filter(
+                    Lead.contact_status == CONTACT_CONTACTED, Lead.contact_status_at < stale_before
+                ),
+            )
         )
+    ).one()
+    return DigestCounts(int(row[0]), int(row[1]), int(row[2]), int(row[3]))
+
+
+async def claim_digest_day(session: AsyncSession, day: str) -> bool:
+    """Mark the morning plan of `day` as sent. False if it was sent already: one UPDATE, so twice is impossible."""
+    await get_collector_state(session)  # the row may not exist yet
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            update(CollectorState)
+            .where(CollectorState.id == 1, func.coalesce(CollectorState.digest_sent_on, "") != day)
+            .values(digest_sent_on=day)
+        ),
     )
     await session.commit()
+    return result.rowcount > 0
 
 
 async def get_contact_status_counts(session: AsyncSession) -> dict[str, int]:

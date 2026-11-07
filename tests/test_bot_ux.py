@@ -23,7 +23,7 @@ from aiogram.types import (
 
 from src.bot import commands as bot_commands
 from src.bot.formatters import MAX_MESSAGE_LENGTH, format_help, format_import_report, format_unknown_niche
-from src.bot.handlers import collector, fallback, imports, issue, leads, menu, search
+from src.bot.handlers import collector, fallback, imports, issue, leads, menu, reminders, search
 from src.bot.middlewares import AdminOnlyMiddleware
 from src.bot.texts import (
     ENRICH_COMMAND,
@@ -43,10 +43,20 @@ from src.services.lead_import import ImportResult
 ADMIN, SECOND_ADMIN, STRANGER = 100, 200, 999
 GROUP = -1001
 METHOD = MagicMock(spec=SendMessage)
-ROUTERS = (search.router, leads.router, issue.router, collector.router, imports.router, menu.router, fallback.router)
+ROUTERS = (
+    search.router,
+    leads.router,
+    issue.router,
+    collector.router,
+    imports.router,
+    reminders.router,
+    menu.router,
+    fallback.router,
+)
 ADMIN_ONLY_COMMANDS = {
     "next_leads",
     "rescore",
+    "today",
     "export_unknown",
     "leads_stats",
     "niches",

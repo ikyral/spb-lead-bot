@@ -101,6 +101,8 @@ class Lead(Base):
     # Contacts as links with where each came from: JSON [{"url": ..., "sources": ["2gis", "google"]}].
     # See src/services/contact_links.py. `email` and `socials` keep the first email and all networks as before.
     contact_links: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # When to remind the owner about a lead they wrote to; cleared by 'replied' and 'rejected'.
+    remind_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
 
     @property
     def has_contacts(self) -> bool:
@@ -195,3 +197,5 @@ class CollectorState(Base):
     key_warning_mark: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
     # On a collector's computer: when its diagnostics ran lately, times in ISO format separated by commas.
     scraper_check_runs: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
+    # The day (in COLLECT_TIMEZONE, ISO format) the morning plan went out: a restart must not send it again.
+    digest_sent_on: Mapped[str | None] = mapped_column(String(10), nullable=True, default=None)
