@@ -11,15 +11,17 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from src.bot.chats import is_group_chat
-from src.bot.texts import ADMIN_ONLY_TEXT, NO_ACCESS_TEXT
+from src.bot.texts import ADMIN_ONLY_TEXT, NO_ACCESS_TEXT, OWNER_ONLY_TEXT
 from src.config import settings
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["NO_ACCESS_TEXT", "PUBLIC_FLAG", "AdminOnlyMiddleware", "is_admin"]
+__all__ = ["NO_ACCESS_TEXT", "OWNER_ONLY_FLAG", "PUBLIC_FLAG", "AdminOnlyMiddleware", "is_admin", "is_owner"]
 
 # A handler with flags={PUBLIC_FLAG: True} answers anyone in a private chat; it decides itself what to show.
 PUBLIC_FLAG: str = "public"
+# A handler with flags={OWNER_ONLY_FLAG: True} changes what everybody shares: the owner of the bot only.
+OWNER_ONLY_FLAG: str = "owner_only"
 # A refusal to one person in one chat comes this rarely: in a group everyone sees it, in private it is a hint.
 _REPLY_COOLDOWN_SECONDS: float = 300.0
 # Bounds the memory of who was answered; entries older than the cooldown are useless anyway.
@@ -52,6 +54,9 @@ class AdminOnlyMiddleware(BaseMiddleware):
             from_user = data["event_from_user"]
 
         if from_user and from_user.id in settings.admin_ids:
+            if get_flag(data, OWNER_ONLY_FLAG) and from_user.id != settings.ADMIN_TG_ID:
+                await self._refuse_operator(event, from_user.id)
+                return None
             return await handler(event, data)
         if isinstance(event, Message) and not is_group_chat(event) and get_flag(data, PUBLIC_FLAG):
             return await handler(event, data)
@@ -73,6 +78,16 @@ class AdminOnlyMiddleware(BaseMiddleware):
         except TelegramAPIError as exc:
             logger.warning("Could not refuse access to user %s: %s", user_id, exc)
 
+    async def _refuse_operator(self, event: TelegramObject, user_id: int) -> None:
+        """An operator is one of the team: told every time, why it does not work."""
+        try:
+            if isinstance(event, CallbackQuery):
+                await event.answer(OWNER_ONLY_TEXT, show_alert=True)
+            elif isinstance(event, Message):
+                await event.answer(OWNER_ONLY_TEXT)
+        except TelegramAPIError as exc:
+            logger.warning("Could not refuse an operator %s: %s", user_id, exc)
+
     def _should_reply(self, message: Message, user_id: int) -> bool:
         """Only commands and buttons, not files; once in a while, so a refusal cannot be used to flood a chat."""
         if not getattr(message, "text", None):
@@ -86,6 +101,11 @@ class AdminOnlyMiddleware(BaseMiddleware):
             self._replied_at.clear()
         self._replied_at[key] = now
         return True
+
+
+def is_owner(user_id: int | None) -> bool:
+    """The owner of the bot: ADMIN_TG_ID. ADMIN_TG_IDS are operators."""
+    return user_id is not None and user_id == settings.ADMIN_TG_ID
 
 
 def is_admin(message: Message) -> bool:

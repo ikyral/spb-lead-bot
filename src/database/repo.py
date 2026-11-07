@@ -4,7 +4,20 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import ColumnElement, Connection, CursorResult, and_, case, func, inspect, or_, select, text, update
+from sqlalchemy import (
+    ColumnElement,
+    Connection,
+    CursorResult,
+    and_,
+    case,
+    func,
+    inspect,
+    or_,
+    select,
+    text,
+    true,
+    update,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -80,6 +93,12 @@ NEW_LEAD_COLUMNS: tuple[str, ...] = (
     "is_chain",
     "contact_links",
     "remind_at",
+    "issued_to_user_id",
+    "owner_user_id",
+    "owner_name",
+    "owned_until",
+    "reserved_by",
+    "reserved_until",
 )
 # The same for the collector_state table.
 NEW_STATE_COLUMNS: tuple[str, ...] = (
@@ -320,11 +339,14 @@ async def _pick_leads(
     return picked
 
 
-async def issue_next_leads(session: AsyncSession, limit: int, rules: IssueRules | None = None) -> list[Lead]:
+async def issue_next_leads(
+    session: AsyncSession, limit: int, rules: IssueRules | None = None, user_id: int | None = None
+) -> list[Lead]:
     """
     Hand out up to `limit` new leads: the most certain about needing a site first, by score within that.
 
-    Each lead becomes 'issued' only if it is still new, so concurrent calls never return the same lead.
+    Each lead becomes 'issued' to `user_id` only if it is still new, in the same statement, so
+    concurrent calls, of one person or of several, never return the same lead.
     """
     rules = rules or IssueRules()
     cap = rules.niche_cap(limit)
@@ -337,7 +359,7 @@ async def issue_next_leads(session: AsyncSession, limit: int, rules: IssueRules 
         stmt = (
             update(Lead)
             .where(Lead.id.in_(picked), Lead.crm_status == STATUS_NEW)
-            .values(crm_status=STATUS_ISSUED, issued_at=datetime.now(UTC))
+            .values(crm_status=STATUS_ISSUED, issued_at=datetime.now(UTC), issued_to_user_id=user_id)
             .returning(Lead)
             .execution_options(synchronize_session=False)
         )
@@ -361,7 +383,7 @@ async def return_undelivered_leads(session: AsyncSession, lead_ids: list[int]) -
     await session.execute(
         update(Lead)
         .where(Lead.id.in_(lead_ids), Lead.crm_status == STATUS_ISSUED, Lead.contact_status.is_(None))
-        .values(crm_status=STATUS_NEW, issued_at=None)
+        .values(crm_status=STATUS_NEW, issued_at=None, issued_to_user_id=None)
     )
     await session.commit()
 
@@ -416,11 +438,28 @@ async def get_pool_stats(session: AsyncSession) -> PoolStats:
     )
 
 
-async def get_unknown_site_candidates(session: AsyncSession, niche: str | None = None) -> list[Lead]:
-    """All of the pool that nobody has looked at and whose card on 2GIS a collector can open, the best first."""
+def free_for_export_clause(user_id: int | None, now: datetime) -> ColumnElement[bool]:
+    """Not in a request file of someone else that is still being read."""
+    clause = or_(Lead.reserved_until.is_(None), Lead.reserved_until <= now)
+    return or_(clause, Lead.reserved_by == user_id) if user_id is not None else clause
+
+
+async def get_unknown_site_candidates(
+    session: AsyncSession, niche: str | None = None, user_id: int | None = None, now: datetime | None = None
+) -> list[Lead]:
+    """
+    All of the pool that nobody has looked at and whose card on 2GIS a collector can open, the best first.
+
+    Leads in a request file of another person are left out until their reserve ends.
+    """
     stmt = (
         select(Lead)
-        .where(_in_pool_clause(), Lead.site_status == SITE_UNKNOWN, Lead.source.in_(TWOGIS_SOURCES))
+        .where(
+            _in_pool_clause(),
+            Lead.site_status == SITE_UNKNOWN,
+            Lead.source.in_(TWOGIS_SOURCES),
+            free_for_export_clause(user_id, now or datetime.now(UTC)),
+        )
         .order_by(Lead.score.desc(), Lead.created_at, Lead.id)
     )
     if niche is not None:
@@ -534,18 +573,52 @@ async def count_issued_leads(session: AsyncSession) -> int:
 REMINDER_ENDING_STATUSES: frozenset[str] = frozenset({CONTACT_REPLIED, CONTACT_REJECTED})
 
 
+# 'Нет ответа' gives the lead back to the pool after this long; until then it waits for a late answer.
+NO_ANSWER_RELEASE: timedelta = timedelta(hours=24)
+
+
+def _ownership_values(status: str, user_id: int, user_name: str, now: datetime, days: int) -> dict[str, Any]:
+    """
+    Whose the lead becomes. 'Написал': the one who pressed, for `days`. 'Ответили': its person, with no end.
+
+    'Нет ответа': nobody's, back to the pool after NO_ANSWER_RELEASE. 'Отказ': it is never handed out again anyway.
+    """
+    if status == CONTACT_CONTACTED:
+        return {"owner_user_id": user_id, "owner_name": user_name[:128], "owned_until": now + timedelta(days=days)}
+    if status == CONTACT_REPLIED:
+        # Someone else pressing it (the owner of the bot) does not take the lead away from the person who wrote.
+        person = func.coalesce(Lead.owner_user_id, Lead.issued_to_user_id, user_id)
+        name = case((person == user_id, func.coalesce(Lead.owner_name, user_name[:128])), else_=Lead.owner_name)
+        return {"owner_user_id": person, "owner_name": name, "owned_until": None}
+    if status == CONTACT_NO_ANSWER:
+        return {"owner_user_id": None, "owner_name": None, "owned_until": now + NO_ANSWER_RELEASE}
+    return {"owned_until": None}
+
+
 async def set_contact_status(
-    session: AsyncSession, lead_id: int, status: str, changed_by_id: int, changed_by: str
+    session: AsyncSession,
+    lead_id: int,
+    status: str,
+    changed_by_id: int,
+    changed_by: str,
+    ownership_days: int | None = None,
 ) -> None:
-    """Save what came of contacting a handed-out lead, who said so and when. An answer or a refusal ends reminders."""
+    """
+    Save what came of contacting a handed-out lead, who said so and when. An answer or a refusal ends reminders.
+
+    With `ownership_days` the lead becomes the presser's, see _ownership_values.
+    """
+    now = datetime.now(UTC)
     values: dict[str, Any] = {
         "contact_status": status,
         "contact_status_by_id": changed_by_id,
         "contact_status_by": changed_by[:128],
-        "contact_status_at": datetime.now(UTC),
+        "contact_status_at": now,
     }
     if status in REMINDER_ENDING_STATUSES:
         values["remind_at"] = None
+    if ownership_days is not None:
+        values.update(_ownership_values(status, changed_by_id, changed_by, now, ownership_days))
     await session.execute(update(Lead).where(Lead.id == lead_id).values(**values))
     await session.commit()
 
@@ -577,15 +650,24 @@ def _followup_clause(due_before: datetime, stale_before: datetime) -> ColumnElem
     )
 
 
-async def get_followups(session: AsyncSession, due_before: datetime, stale_before: datetime, limit: int) -> list[Lead]:
-    """Leads to remind about: due reminders by their date, then those written to the longest ago."""
+async def get_followups(
+    session: AsyncSession, due_before: datetime, stale_before: datetime, limit: int, user_id: int | None = None
+) -> list[Lead]:
+    """Leads to remind about: due reminders by their date, then those written to the longest ago. Of one person."""
     stmt = (
         select(Lead)
-        .where(_followup_clause(due_before, stale_before))
+        .where(_followup_clause(due_before, stale_before), _of_person(user_id))
         .order_by(Lead.remind_at.is_(None), Lead.remind_at, Lead.contact_status_at, Lead.id)
         .limit(limit)
     )
     return list((await session.scalars(stmt)).all())
+
+
+def _of_person(user_id: int | None) -> ColumnElement[bool]:
+    """The leads of one person (see src/database/ownership.py), or of everybody for None."""
+    if user_id is None:
+        return true()
+    return func.coalesce(Lead.owner_user_id, Lead.issued_to_user_id) == user_id
 
 
 @dataclass(frozen=True)
@@ -598,10 +680,15 @@ class DigestCounts:
     written_no_answer: int
 
 
-async def get_digest_counts(session: AsyncSession, due_before: datetime, stale_before: datetime) -> DigestCounts:
+async def get_digest_counts(
+    session: AsyncSession, due_before: datetime, stale_before: datetime, user_id: int | None = None
+) -> DigestCounts:
+    """The pool is everybody's; reminders and silence are counted of one person if `user_id` is given."""
     useful = (*NO_SITE_STATUSES, SITE_DEAD)
     issued_not_ended = and_(
-        Lead.issued_at.is_not(None), func.coalesce(Lead.contact_status, "").not_in(REMINDER_ENDING_STATUSES)
+        Lead.issued_at.is_not(None),
+        func.coalesce(Lead.contact_status, "").not_in(REMINDER_ENDING_STATUSES),
+        _of_person(user_id),
     )
     row = (
         await session.execute(
@@ -610,7 +697,7 @@ async def get_digest_counts(session: AsyncSession, due_before: datetime, stale_b
                 func.count(Lead.id).filter(_in_pool_clause(), Lead.site_status == SITE_UNKNOWN),
                 func.count(Lead.id).filter(issued_not_ended, Lead.remind_at < due_before),
                 func.count(Lead.id).filter(
-                    Lead.contact_status == CONTACT_CONTACTED, Lead.contact_status_at < stale_before
+                    Lead.contact_status == CONTACT_CONTACTED, Lead.contact_status_at < stale_before, _of_person(user_id)
                 ),
             )
         )

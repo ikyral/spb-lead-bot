@@ -57,6 +57,7 @@ ADMIN_ONLY_COMMANDS = {
     "next_leads",
     "rescore",
     "today",
+    "team",
     "export_unknown",
     "leads_stats",
     "niches",
@@ -100,16 +101,25 @@ def test_everyone_gets_a_short_menu_and_admins_get_every_command() -> None:
         assert command.command.islower() and len(command.command) <= 32
 
 
+def test_an_operator_menu_has_no_commands_that_change_shared_data() -> None:
+    operator = {command.command for command in bot_commands.admin_commands(owner=False)}
+
+    assert {"rescore", "collect_now", "collect_on", "collect_off", "provider_on", "team"}.isdisjoint(operator)
+    assert {"next_leads", "today", "export_unknown", "leads_stats", "niches", "help"} <= operator
+
+
 async def test_menus_go_to_everyone_and_to_the_chat_of_each_admin() -> None:
     bot = MagicMock()
     bot.set_my_commands = AsyncMock()
 
-    await bot_commands.register_bot_commands(bot, frozenset({SECOND_ADMIN, ADMIN}))
+    await bot_commands.register_bot_commands(bot, ADMIN, frozenset({SECOND_ADMIN, ADMIN}))
 
-    scopes = [call.kwargs["scope"] for call in bot.set_my_commands.await_args_list]
+    calls = bot.set_my_commands.await_args_list
+    scopes = [call.kwargs["scope"] for call in calls]
     assert isinstance(scopes[0], BotCommandScopeDefault)
     assert [scope.chat_id for scope in scopes[1:] if isinstance(scope, BotCommandScopeChat)] == [ADMIN, SECOND_ADMIN]
-    assert len(bot.set_my_commands.await_args_list[1].args[0]) == len(bot_commands.admin_commands())
+    assert len(calls[1].args[0]) == len(bot_commands.admin_commands())  # the owner: everything
+    assert len(calls[2].args[0]) == len(bot_commands.admin_commands(owner=False))  # an operator
 
 
 @pytest.mark.parametrize(
@@ -124,7 +134,7 @@ async def test_a_failed_menu_is_only_logged_and_the_others_are_still_set(error: 
     bot = MagicMock()
     bot.set_my_commands = AsyncMock(side_effect=[error, error, None])
 
-    await bot_commands.register_bot_commands(bot, [ADMIN, SECOND_ADMIN])
+    await bot_commands.register_bot_commands(bot, ADMIN, [SECOND_ADMIN])
 
     assert bot.set_my_commands.await_count == 3
     assert "command menu" in caplog.text
@@ -286,17 +296,18 @@ async def test_a_failed_import_has_no_buttons() -> None:
 async def test_the_button_for_a_request_is_answered_before_the_file_is_built(monkeypatch) -> None:
     order: list[str] = []
 
-    async def send(message, limit, niche_text=None):
-        order.append(f"file {limit}")
+    async def send(message, limit, niche_text=None, user_id=None):
+        order.append(f"file {limit} for {user_id}")
 
     monkeypatch.setattr(menu, "send_enrich_request", send)
     callback = MagicMock(spec=CallbackQuery)
+    callback.from_user = User(id=200, is_bot=False, first_name="U")
     callback.message = MagicMock(spec=Message)
     callback.answer = AsyncMock(side_effect=lambda *args, **kwargs: order.append("answered"))
 
     await menu.handle_enrich_request_button(callback)
 
-    assert order == ["answered", "file 30"]
+    assert order == ["answered", "file 30 for 200"]  # the file is of whoever pressed
 
 
 # ---------- through the dispatcher ----------

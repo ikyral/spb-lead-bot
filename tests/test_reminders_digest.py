@@ -56,6 +56,7 @@ def _lead(number: int, **overrides: Any) -> Lead:
 
 
 def _issued(number: int, status: str | None = CONTACT_CONTACTED, written_days_ago: float = 1, **overrides: Any) -> Lead:
+    overrides.setdefault("issued_to_user_id", ADMIN)
     return _lead(
         number,
         crm_status=STATUS_ISSUED,
@@ -307,21 +308,29 @@ def test_a_wrong_digest_time_names_the_variable(raw: str) -> None:
 # ---------- sending the plan ----------
 
 
+def _notifier(admins: tuple[int, ...] = (ADMIN,), chats: tuple[int, ...] = ()) -> MagicMock:
+    notifier = MagicMock()
+    notifier.admin_targets = MagicMock(return_value=list(admins))
+    notifier.chat_targets = MagicMock(return_value=list(chats))
+    notifier.send_sequence_to = AsyncMock()
+    return notifier
+
+
 def _digest(session_maker, notifier: Any, now: datetime, **kwargs: Any) -> DailyDigest:
     return DailyDigest(session_maker, notifier, MSK, time(9, 30), 3, clock=lambda: now, **kwargs)
 
 
 async def test_the_plan_goes_out_once_a_day(session_maker) -> None:
     await _add(session_maker, _issued(1, remind_at=NOW - timedelta(hours=1)))
-    notifier = MagicMock()
-    notifier.send_sequence = AsyncMock()
+    notifier = _notifier()
 
     await _digest(session_maker, notifier, NOW).send_scheduled()
     # A restart after a deployment at 10:30: the plan of today has gone out already.
     await _digest(session_maker, notifier, NOW + timedelta(minutes=30)).send_scheduled()
 
-    notifier.send_sequence.assert_awaited_once()
-    messages = notifier.send_sequence.await_args.args[0]
+    notifier.send_sequence_to.assert_awaited_once()
+    target, messages = notifier.send_sequence_to.await_args.args
+    assert target == ADMIN
     assert len(messages) == 2  # the summary, then the lead to remind about
     summary, summary_markup = messages[0]
     assert "План на 09.11" in summary
@@ -334,48 +343,44 @@ async def test_the_plan_goes_out_once_a_day(session_maker) -> None:
 
 
 async def test_the_next_day_the_plan_goes_out_again(session_maker) -> None:
-    notifier = MagicMock()
-    notifier.send_sequence = AsyncMock()
+    notifier = _notifier()
 
     await _digest(session_maker, notifier, NOW).send_scheduled()
     await _digest(session_maker, notifier, NOW + timedelta(days=1)).send_scheduled()
 
-    assert notifier.send_sequence.await_count == 2
+    assert notifier.send_sequence_to.await_count == 2
 
 
 @pytest.mark.parametrize("hour_utc", [6, 9])  # 09:00 and 12:00 in Moscow
 async def test_no_plan_before_its_time_or_after_noon(session_maker, hour_utc: int) -> None:
-    notifier = MagicMock()
-    notifier.send_sequence = AsyncMock()
+    notifier = _notifier()
 
     await _digest(session_maker, notifier, datetime(2026, 11, 9, hour_utc, 0, tzinfo=UTC)).send_scheduled()
 
-    notifier.send_sequence.assert_not_awaited()
+    notifier.send_sequence_to.assert_not_awaited()
     async with session_maker() as session:
         state = await session.get(CollectorState, 1)
     assert state is None or state.digest_sent_on is None  # the day is not used up
 
 
 async def test_a_disabled_plan_is_not_sent(session_maker) -> None:
-    notifier = MagicMock()
-    notifier.send_sequence = AsyncMock()
+    notifier = _notifier()
 
     await _digest(session_maker, notifier, NOW, enabled=False).send_scheduled()
 
-    notifier.send_sequence.assert_not_awaited()
+    notifier.send_sequence_to.assert_not_awaited()
 
 
 async def test_a_failing_plan_does_not_raise(session_maker, caplog) -> None:
     async def broken_usage() -> RequestUsage:
         raise RuntimeError("database is gone")
 
-    notifier = MagicMock()
-    notifier.send_sequence = AsyncMock()
+    notifier = _notifier()
 
     await _digest(session_maker, notifier, NOW, usage=broken_usage).send_scheduled()
 
     assert "The morning plan failed" in caplog.text
-    notifier.send_sequence.assert_not_awaited()
+    notifier.send_sequence_to.assert_not_awaited()
     # The day is not used up: the next start may still send it.
     async with session_maker() as session:
         state = await session.get(CollectorState, 1)
@@ -458,6 +463,7 @@ async def test_today_sends_the_plan_to_the_chat_it_was_asked_in(session_maker, m
     await _add(session_maker, _issued(1, remind_at=NOW - timedelta(hours=1)), _issued(2, written_days_ago=6))
     message = MagicMock(spec=Message)
     message.chat = Chat(id=ADMIN, type="private")
+    message.from_user = User(id=ADMIN, is_bot=False, first_name="Admin")
     message.answer = AsyncMock()
     digest = _digest(session_maker, MagicMock(), NOW)
 

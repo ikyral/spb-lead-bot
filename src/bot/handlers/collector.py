@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery, Message
 
 from src.bot.formatters import format_collector_status
 from src.bot.keyboards import STALE_BUTTON_TEXT
+from src.bot.middlewares import OWNER_ONLY_FLAG
 from src.bot.texts import UNKNOWN_PROVIDER_TEXT
 from src.services.scheduler import TRIGGER_MANUAL, CollectorRunner
 
@@ -19,7 +20,7 @@ EXTERNAL_COLLECTOR_TEXT: str = (
 )
 
 
-@router.message(Command("collect_now"))
+@router.message(Command("collect_now"), flags={OWNER_ONLY_FLAG: True})
 async def handle_collect_now(message: Message, collector_runner: CollectorRunner) -> None:
     """Start a collection in the background; the result is sent when it finishes."""
     if collector_runner.external_mode:
@@ -30,7 +31,9 @@ async def handle_collect_now(message: Message, collector_runner: CollectorRunner
         await message.answer("⏳ Сбор уже выполняется. Итог придёт, когда он закончится.")
 
 
-@router.callback_query(F.data.in_({"panel:collect", "panel:status"}))
+# Starting a collection is the owner's; the status is for everybody.
+@router.callback_query(F.data == "panel:collect", flags={OWNER_ONLY_FLAG: True})
+@router.callback_query(F.data == "panel:status")
 async def handle_panel_button(callback: CallbackQuery, collector_runner: CollectorRunner) -> None:
     """The same as /collect_now and /collect_status from inline buttons."""
     if not isinstance(callback.message, Message):
@@ -55,7 +58,7 @@ async def handle_collect_status(message: Message, collector_runner: CollectorRun
     await message.answer(format_collector_status(await collector_runner.get_status()), parse_mode="HTML")
 
 
-@router.message(Command("collect_on"))
+@router.message(Command("collect_on"), flags={OWNER_ONLY_FLAG: True})
 async def handle_collect_on(message: Message, collector_runner: CollectorRunner) -> None:
     """Enable automatic collection."""
     if collector_runner.external_mode:
@@ -67,7 +70,7 @@ async def handle_collect_on(message: Message, collector_runner: CollectorRunner)
     await message.answer("✅ Автосбор включён.")
 
 
-@router.message(Command("collect_off"))
+@router.message(Command("collect_off"), flags={OWNER_ONLY_FLAG: True})
 async def handle_collect_off(message: Message, collector_runner: CollectorRunner) -> None:
     """Disable automatic collection: both the schedule and refilling the pool."""
     if collector_runner.external_mode:
@@ -77,7 +80,7 @@ async def handle_collect_off(message: Message, collector_runner: CollectorRunner
     await message.answer("⏸ Автосбор выключен. Сбор вручную по-прежнему работает: /collect_now")
 
 
-@router.message(Command("provider_on"))
+@router.message(Command("provider_on"), flags={OWNER_ONLY_FLAG: True})
 async def handle_provider_on(message: Message, command: CommandObject, collector_runner: CollectorRunner) -> None:
     """Turn a source back on after blocks. This is the only way out of an automatic switch-off."""
     name = (command.args or "").strip() or ("2gis" if collector_runner.known_provider("2gis") else "2gis_scraper")

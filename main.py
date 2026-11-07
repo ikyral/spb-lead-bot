@@ -2,7 +2,8 @@
 
 import asyncio
 import logging
-from datetime import time
+from datetime import datetime, time, timedelta
+from functools import partial
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -22,6 +23,7 @@ from src.bot.handlers.search import router as search_router
 from src.bot.middlewares import AdminOnlyMiddleware
 from src.bot.notifier import AdminNotifier
 from src.config import resolve_path, settings, settings_error
+from src.database.ownership import RELEASE_INTERVAL_SECONDS, assign_existing_leads, release_expired_lead_job
 from src.database.repo import async_session_maker, engine, init_db
 from src.services.chains import load_chain_index, refresh_chain_flags
 from src.services.collector import load_collector_config
@@ -60,6 +62,16 @@ async def main() -> None:
     # Applies a changed list of brands, and marks chains in a database from an older version.
     async with async_session_maker() as session:
         await refresh_chain_flags(session, await load_chain_index(session, settings))
+        # Several people: leads handed out by an older version become the owner's. Changes nothing the second time.
+        tomorrow = datetime.now(collector_config.timezone).date() + timedelta(days=1)
+        assigned = await assign_existing_leads(
+            session,
+            settings.ADMIN_TG_ID,
+            settings.LEAD_OWNERSHIP_DAYS,
+            datetime.combine(tomorrow, time(0), collector_config.timezone),
+        )
+        if assigned:
+            logger.info("Leads handed out before people were told apart, now the owner's: %d", assigned)
 
     bot = Bot(
         token=bot_token,
@@ -135,8 +147,12 @@ async def main() -> None:
         settings.FOLLOWUP_AFTER_DAYS,
         usage=collector_runner.get_request_usage,
         enabled=settings.DIGEST_ENABLED,
+        bot_owner_id=settings.ADMIN_TG_ID,
     )
     dp["daily_digest"] = daily_digest
+    collector_runner.add_interval_job(
+        partial(release_expired_lead_job, async_session_maker), RELEASE_INTERVAL_SECONDS, "lead_release"
+    )
     if settings.DIGEST_ENABLED:
         collector_runner.add_daily_job(daily_digest.send_scheduled, hour, minute, DIGEST_JOB_ID)
     if settings.IMPORT_INBOX_INTERVAL_SECONDS > 0:
@@ -146,7 +162,7 @@ async def main() -> None:
 
     # Polling calls these inside its own lifetime, while the bot can still send messages.
     async def set_command_menus(bot: Bot) -> None:
-        await register_bot_commands(bot, settings.admin_ids)
+        await register_bot_commands(bot, settings.ADMIN_TG_ID, settings.operator_ids)
 
     dp.startup.register(set_command_menus)
     dp.startup.register(collector_runner.start)

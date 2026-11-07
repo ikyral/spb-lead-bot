@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.bot.formatters import format_lead_card, generate_pitch_text, site_verdict_text
 from src.bot.keyboards import STALE_BUTTON_TEXT, get_export_keyboard, get_lead_card_keyboard, manual_site_verdict
+from src.bot.middlewares import OWNER_ONLY_FLAG
 from src.bot.texts import CRM_STATS_BUTTON_TEXT, IN_WORK_BUTTON_TEXT, NEW_LEADS_BUTTON_TEXT
 from src.database.models import Lead
 from src.database.repo import (
@@ -116,14 +117,15 @@ async def handle_new_leads(message: Message) -> None:
         await render_lead_page(message, session, crm_status="new", offset=0)
 
 
-@router.message(F.text == IN_WORK_BUTTON_TEXT)
+# The older CRM: shared leads with their contacts, and actions on the shared pool. The owner's.
+@router.message(F.text == IN_WORK_BUTTON_TEXT, flags={OWNER_ONLY_FLAG: True})
 async def handle_in_work_leads(message: Message) -> None:
     """Show the first lead currently in work."""
     async with async_session_maker() as session:
         await render_lead_page(message, session, crm_status="in_work", offset=0)
 
 
-@router.callback_query(F.data.startswith("lead:"))
+@router.callback_query(F.data.startswith("lead:"), flags={OWNER_ONLY_FLAG: True})
 async def handle_lead_action(callback: CallbackQuery) -> None:
     """Handle card actions: work, reject, pitch, a verdict about the site, prev, next."""
     parts = (callback.data or "").split(":")
@@ -185,7 +187,7 @@ async def handle_lead_action(callback: CallbackQuery) -> None:
             await render_lead_page(callback, session, crm_status=current_status, offset=offset, edit=True)
 
 
-@router.message(F.text == CRM_STATS_BUTTON_TEXT)
+@router.message(F.text == CRM_STATS_BUTTON_TEXT, flags={OWNER_ONLY_FLAG: True})
 async def handle_stats(message: Message) -> None:
     """Show CRM statistics and export buttons."""
     async with async_session_maker() as session:
@@ -203,7 +205,8 @@ async def handle_stats(message: Message) -> None:
     await message.answer(text, reply_markup=get_export_keyboard(), parse_mode="HTML")
 
 
-@router.callback_query(F.data.startswith("export:"))
+# CSV of every lead with its contacts, whoever works with it.
+@router.callback_query(F.data.startswith("export:"), flags={OWNER_ONLY_FLAG: True})
 async def handle_export_csv(callback: CallbackQuery) -> None:
     """Export selected leads to Excel-friendly CSV file."""
     crm_status = (callback.data or "").removeprefix("export:")

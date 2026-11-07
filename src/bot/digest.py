@@ -1,5 +1,6 @@
 """The morning plan: built from the database, sent to admins and notification chats once a day, or on /today."""
 
+import asyncio
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, time
@@ -31,6 +32,7 @@ class DailyDigest:
         usage: UsageSource | None = None,
         enabled: bool = True,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        bot_owner_id: int | None = None,
     ) -> None:
         self._session_maker = session_maker
         self._notifier = notifier
@@ -40,11 +42,27 @@ class DailyDigest:
         self._usage = usage
         self.enabled = enabled
         self._clock = clock
+        self._bot_owner_id = bot_owner_id
 
-    async def build(self, now: datetime | None = None) -> list[Outgoing]:
-        """The summary with the 'next batch' button, then a message with buttons for each lead to remind about."""
+    async def build(
+        self, now: datetime | None = None, user_id: int | None = None, personal: bool = True
+    ) -> list[Outgoing]:
+        """
+        The summary with the 'next batch' button, then a message with buttons for each lead to remind about.
+
+        Of `user_id`: their reminders, and each person's leads if it is the owner of the bot. Not `personal`:
+        the plan of a group, the pool and the people without anybody's reminders.
+        """
+        with_people = not personal or (user_id is not None and user_id == self._bot_owner_id)
         data = await load_digest(
-            self._session_maker, now or self._clock(), self._timezone, self._followup_after_days, self._usage
+            self._session_maker,
+            now or self._clock(),
+            self._timezone,
+            self._followup_after_days,
+            self._usage,
+            user_id=user_id,
+            with_people=with_people,
+            personal=personal,
         )
         messages: list[Outgoing] = [(format_digest_summary(data), get_next_batch_keyboard())]
         messages += [(format_followup(lead), get_followup_keyboard(lead.id)) for lead in data.followups]
@@ -66,13 +84,20 @@ class DailyDigest:
                 logger.info("Morning plan not sent at %s: outside its time from %s", local_time, self.start)
                 return
             # Built before the day is marked: a plan that could not be built is tried again at the next start.
-            messages = await self.build(now)
+            plans = {admin: await self.build(now, user_id=admin) for admin in self._notifier.admin_targets()}
+            shared = await self.build(now, personal=False) if self._notifier.chat_targets() else []
             async with self._session_maker() as session:
                 claimed = await claim_digest_day(session, now.astimezone(self._timezone).date().isoformat())
             if not claimed:
                 logger.info("Morning plan not sent at %s: it went out today already", local_time)
                 return
-            logger.info("Sending the morning plan: %d message(s)", len(messages))
-            await self._notifier.send_sequence(messages)
+            logger.info(
+                "Sending the morning plan to %d admin(s) and %d chat(s)", len(plans), len(self._notifier.chat_targets())
+            )
+            # Each admin gets their own plan; a group gets what is shared. One that refuses does not stop the rest.
+            await asyncio.gather(
+                *(self._notifier.send_sequence_to(admin, messages) for admin, messages in plans.items()),
+                *(self._notifier.send_sequence_to(chat, shared) for chat in self._notifier.chat_targets()),
+            )
         except Exception:
             logger.exception("The morning plan failed")

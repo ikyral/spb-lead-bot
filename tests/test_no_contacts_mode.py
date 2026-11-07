@@ -1236,7 +1236,9 @@ async def test_status_button_keeps_the_link_on_the_card(issue_env) -> None:
     markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert markup.inline_keyboard[0][0].url == "https://2gis.ru/spb/firm/1"
     assert markup.inline_keyboard[1][0].text == "✅ Написал"
-    assert markup.inline_keyboard[-1][0].text == ADD_PHONE_BUTTON_TEXT
+    texts = [row[0].text for row in markup.inline_keyboard]
+    assert ADD_PHONE_BUTTON_TEXT in texts
+    assert texts[-1] == "↩️ Вернуть в пул"  # the lead is the presser's now, and they may give it back
 
 
 async def test_refused_card_returns_to_the_pool_without_losing_the_others(issue_env) -> None:

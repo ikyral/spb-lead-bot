@@ -11,18 +11,29 @@ from aiogram.types import CallbackQuery, LinkPreviewOptions, Message
 
 from src.bot.chats import is_group_chat
 from src.bot.digest import DailyDigest
-from src.bot.formatters import format_followup, format_issued_lead, format_msk_date, format_user_label
-from src.bot.keyboards import STALE_BUTTON_TEXT, get_issued_lead_keyboard
+from src.bot.formatters import (
+    format_followup,
+    format_issued_lead,
+    format_msk_date,
+    format_team_person,
+    format_user_label,
+)
+from src.bot.keyboards import STALE_BUTTON_TEXT, get_issued_lead_keyboard, get_team_keyboard
+from src.bot.middlewares import OWNER_ONLY_FLAG
 from src.bot.texts import (
     DIGEST_DONE_MARK,
     DIGEST_LATER_DAYS,
     DIGEST_LATER_MARK,
     DIGEST_REJECT_MARK,
+    NOT_YOUR_LEAD_TEXT,
     REMIND_DAYS,
     REMIND_IMPOSSIBLE_TOAST,
     REMIND_SET_TOAST,
+    TEAM_EMPTY_TEXT,
 )
+from src.config import settings
 from src.database.models import CONTACT_CONTACTED, CONTACT_REJECTED, Lead
+from src.database.ownership import can_act, get_people_stats, get_team_leads
 from src.database.repo import REMINDER_ENDING_STATUSES, async_session_maker, set_contact_status, set_remind_at
 
 logger = logging.getLogger(__name__)
@@ -54,6 +65,9 @@ async def handle_remind(callback: CallbackQuery) -> None:
     remind_at = datetime.now(UTC) + timedelta(days=days)
     # One quick write before the answer: the answer must not promise a reminder that was not saved.
     async with async_session_maker() as session:
+        known = await session.get(Lead, lead_id)
+        if known is not None and await _refuse_if_not_theirs(callback, known):
+            return
         lead = await set_remind_at(session, lead_id, remind_at)
     if lead is None:
         await callback.answer(REMIND_IMPOSSIBLE_TOAST, show_alert=True)
@@ -89,15 +103,18 @@ async def handle_followup(callback: CallbackQuery) -> None:
         if lead is None or lead.issued_at is None:
             await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
             return
+        if await _refuse_if_not_theirs(callback, lead):
+            return
         if lead.contact_status in REMINDER_ENDING_STATUSES and action != "reject":
             await callback.answer(REMIND_IMPOSSIBLE_TOAST, show_alert=True)
             return
+        days = settings.LEAD_OWNERSHIP_DAYS
         if action == "reject":
-            await set_contact_status(session, lead_id, CONTACT_REJECTED, user.id, changed_by)
+            await set_contact_status(session, lead_id, CONTACT_REJECTED, user.id, changed_by, ownership_days=days)
             mark = DIGEST_REJECT_MARK
         elif action == "done":
-            # Written to once more: the days without an answer count from now.
-            await set_contact_status(session, lead_id, CONTACT_CONTACTED, user.id, changed_by)
+            # Written to once more: the days without an answer count from now, and the lead is theirs again for longer.
+            await set_contact_status(session, lead_id, CONTACT_CONTACTED, user.id, changed_by, ownership_days=days)
             await set_remind_at(session, lead_id, None)
             mark = DIGEST_DONE_MARK.format(date=format_msk_date(now))
         else:
@@ -116,10 +133,23 @@ async def handle_followup(callback: CallbackQuery) -> None:
             logger.warning("Could not update the plan message of lead %s: %s", lead_id, exc)
 
 
+async def _refuse_if_not_theirs(callback: CallbackQuery, lead: Lead) -> bool:
+    """Someone else's lead: say whose, and change nothing. The owner of the bot may act on any."""
+    if can_act(lead, callback.from_user.id, settings.ADMIN_TG_ID):
+        return False
+    await callback.answer(NOT_YOUR_LEAD_TEXT.format(name=lead.owner_name or "другого человека"), show_alert=True)
+    return True
+
+
 @router.message(Command("today"))
 async def handle_today(message: Message, daily_digest: DailyDigest) -> None:
-    """The plan of the day on request: the same as in the morning, it does not count as the morning one."""
-    messages = await daily_digest.build()
+    """
+    The plan of the day of whoever asked: the same as their morning one, and it does not count as it.
+
+    The pool is everybody's; reminders are theirs; the owner of the bot also sees each person's leads.
+    """
+    user_id = message.from_user.id if message.from_user is not None else None
+    messages = await daily_digest.build(user_id=user_id)
     pause = _GROUP_MESSAGE_PAUSE_SECONDS if is_group_chat(message) else _MESSAGE_PAUSE_SECONDS
     for index, (text, markup) in enumerate(messages):
         if index:
@@ -128,4 +158,29 @@ async def handle_today(message: Message, daily_digest: DailyDigest) -> None:
             await message.answer(text, reply_markup=markup, parse_mode="HTML", link_preview_options=_NO_PREVIEW)
         except TelegramAPIError as exc:
             logger.warning("Could not send the plan of the day to chat %s: %s", message.chat.id, exc)
+            return
+
+
+@router.message(Command("team"), flags={OWNER_ONLY_FLAG: True})
+async def handle_team(message: Message) -> None:
+    """The owner of the bot: each person's leads in work, and buttons to give them back to the pool."""
+    async with async_session_maker() as session:
+        team = await get_team_leads(session)
+        names = {person.user_id: person.name for person in await get_people_stats(session)}
+    if not team:
+        await message.answer(TEAM_EMPTY_TEXT)
+        return
+    pause = _GROUP_MESSAGE_PAUSE_SECONDS if is_group_chat(message) else _MESSAGE_PAUSE_SECONDS
+    for index, (user_id, leads) in enumerate(team.items()):
+        if index:
+            await asyncio.sleep(pause)
+        try:
+            await message.answer(
+                format_team_person(user_id, names.get(user_id), leads),
+                reply_markup=get_team_keyboard(leads),
+                parse_mode="HTML",
+                link_preview_options=_NO_PREVIEW,
+            )
+        except TelegramAPIError as exc:
+            logger.warning("Could not send the team to chat %s: %s", message.chat.id, exc)
             return

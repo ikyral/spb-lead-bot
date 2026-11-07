@@ -45,8 +45,16 @@ class AdminNotifier:
 
     def _targets(self) -> list[int]:
         """Chats, then admins. Without chats admins are always told: otherwise nobody would be."""
-        admins = self._admin_ids if self._notify_admins or not self._chat_ids else []
-        return list(dict.fromkeys([*self._chat_ids, *admins]))
+        return list(dict.fromkeys([*self.chat_targets(), *self.admin_targets()]))
+
+    def chat_targets(self) -> list[int]:
+        return list(self._chat_ids)
+
+    def admin_targets(self) -> list[int]:
+        """The admins told in private: as NOTIFY_ADMINS_PRIVATE says, and always if there are no chats."""
+        if not (self._notify_admins or not self._chat_ids):
+            return []
+        return [admin for admin in self._admin_ids if admin not in self._chat_ids]
 
     async def send(
         self, text: str, silent: bool = False, exclude_chat: int | None = None, link_preview: bool = True
@@ -61,9 +69,10 @@ class AdminNotifier:
         A chat that refuses one message (the bot was blocked, the chat is gone) gets none of the rest;
         the other chats are not affected.
         """
-        await asyncio.gather(*(self._send_sequence_to(target, messages, silent) for target in self._targets()))
+        await asyncio.gather(*(self.send_sequence_to(target, messages, silent) for target in self._targets()))
 
-    async def _send_sequence_to(self, target: int, messages: list[Outgoing], silent: bool) -> None:
+    async def send_sequence_to(self, target: int, messages: list[Outgoing], silent: bool = False) -> None:
+        """Several messages to one chat, in order. Never raises; a chat that refuses one gets none of the rest."""
         pause = _GROUP_SEQUENCE_PAUSE_SECONDS if target < 0 else _SEQUENCE_PAUSE_SECONDS
         for index, (text, markup) in enumerate(messages):
             if index:

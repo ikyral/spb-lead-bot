@@ -4,7 +4,7 @@ import html
 import io
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
@@ -13,13 +13,18 @@ from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, LinkPreviewOp
 
 from src.bot.formatters import format_import_messages, format_niche_table, format_unknown_niche
 from src.bot.keyboards import get_after_enrichment_keyboard
-from src.bot.texts import EXPORT_CAPTION_STEPS, EXPORT_WRONG_NUMBER_TEXT
+from src.bot.middlewares import is_owner
+from src.bot.texts import EXPORT_CAPTION_STEPS, EXPORT_WRONG_NUMBER_TEXT, NOT_ENRICHMENT_FILE_TEXT
+from src.config import settings
+from src.database.ownership import reserve_for_export
 from src.database.repo import async_session_maker
 from src.services.lead_file import (
     ENRICH_REQUEST_MAX_LEADS,
     KIND_ENRICH_REQUEST,
+    LeadFileError,
     build_enrich_document,
     enrich_request_record,
+    file_kind,
 )
 from src.services.lead_import import SOURCE_TELEGRAM, ImportService
 from src.services.niche_priority import (
@@ -89,11 +94,22 @@ async def handle_export_unknown(message: Message, command: CommandObject) -> Non
         await message.answer(EXPORT_WRONG_NUMBER_TEXT.format(max=ENRICH_REQUEST_MAX_LEADS), parse_mode="HTML")
         return
     limit = min(number, ENRICH_REQUEST_MAX_LEADS) if number else EXPORT_UNKNOWN_DEFAULT
-    await send_enrich_request(message, limit, niche_text)
+    await send_enrich_request(message, limit, niche_text, _user_id(getattr(message, "from_user", None)))
 
 
-async def send_enrich_request(message: Message, limit: int, niche_text: str | None = None) -> None:
-    """Send the file for a collector to the chat of this message: from /export_unknown and from the buttons."""
+def _user_id(user: object) -> int | None:
+    user_id = getattr(user, "id", None)
+    return user_id if isinstance(user_id, int) else None
+
+
+async def send_enrich_request(
+    message: Message, limit: int, niche_text: str | None = None, user_id: int | None = None
+) -> None:
+    """
+    Send the file for a collector to the chat of this message: from /export_unknown and from the buttons.
+
+    Its leads are kept for `user_id` for EXPORT_RESERVE_HOURS: other people's files leave them out meanwhile.
+    """
     niche: str | None = None
     async with async_session_maker() as session:
         if niche_text is not None:
@@ -102,7 +118,13 @@ async def send_enrich_request(message: Message, limit: int, niche_text: str | No
             if niche is None:
                 await _answer_all(message, format_unknown_niche(niche_text, niches))
                 return
-        plan = await choose_export(session, limit, niche)
+        plan = await choose_export(session, limit, niche, user_id=user_id)
+        if user_id is not None and plan.leads:
+            now = datetime.now(UTC)
+            until = now + timedelta(hours=settings.EXPORT_RESERVE_HOURS)
+            # Someone may have taken a few of them a moment ago: only what is really kept goes into the file.
+            kept = await reserve_for_export(session, [lead.id for lead in plan.leads], user_id, until, now)
+            plan.leads = [lead for lead in plan.leads if lead.id in kept]
     if not plan.leads:
         where = f" в нише {html.escape(niche_title(niche))}" if niche is not None else ""
         await message.answer(f"Лидов с неизвестным статусом сайта и ссылкой на карточку 2ГИС{where} в запасе нет.")
@@ -130,6 +152,14 @@ async def handle_niches(message: Message) -> None:
     await _answer_all(message, format_niche_table(stats))
 
 
+def _is_plain_lead_file(data: bytes, import_service: ImportService) -> bool:
+    """A file of new leads, not of the enrichment. A broken file is left to the import, which says what is wrong."""
+    try:
+        return file_kind(data, import_service.max_bytes) is None
+    except LeadFileError:
+        return False
+
+
 @router.message(F.document, F.document.file_name.lower().endswith(".json"))
 async def handle_lead_file(message: Message, bot: Bot, import_service: ImportService) -> None:
     """Download a lead file and import it."""
@@ -148,6 +178,12 @@ async def handle_lead_file(message: Message, bot: Bot, import_service: ImportSer
     except TelegramAPIError as exc:
         logger.warning("Could not download the lead file: %s", exc)
         await _say(message, status, "⚠️ Не удалось скачать файл из Telegram. Отправьте его ещё раз.")
+        return
+
+    # An operator brings results of enrichment; new leads for everybody come from the owner of the bot.
+    sender = _user_id(getattr(message, "from_user", None))
+    if not is_owner(sender) and _is_plain_lead_file(buffer.getvalue(), import_service):
+        await _say(message, status, NOT_ENRICHMENT_FILE_TEXT)
         return
 
     # This chat gets the result as an edit of the note, the others as a notification.

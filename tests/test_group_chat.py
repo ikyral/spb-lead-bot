@@ -309,7 +309,7 @@ async def _feed(telegram: MagicMock, update: Update, bot: MagicMock | None = Non
     [
         (ADMIN, ADMIN, True),  # admin in private
         (GROUP, ADMIN, True),  # admin in a group
-        (GROUP, SECOND_ADMIN, True),  # a second admin in a group
+        (GROUP, SECOND_ADMIN, False),  # an operator (ADMIN_TG_IDS) may not start a collection: it is the owner's
         (STRANGER, STRANGER, False),  # stranger in private
         (GROUP, STRANGER, False),  # ordinary member of a group
     ],
@@ -589,7 +589,8 @@ async def test_closing_message_in_a_group_offers_the_next_batch(batch_env) -> No
 
 async def test_presses_from_different_chats_at_once_do_not_overlap(batch_env) -> None:
     await _add_leads(batch_env, 9)
-    messages = [_group_message(GROUP), _group_message(OTHER_GROUP, SECOND_ADMIN), _group_message(ADMIN)]
+    # Three people at once; one person pressing in two chats is a double tap (see the tests of ownership).
+    messages = [_group_message(GROUP), _group_message(OTHER_GROUP, SECOND_ADMIN), _group_message(ADMIN, ADMIN + 1)]
 
     await asyncio.gather(*(issue.handle_next_batch(message, _runner()) for message in messages))
 
@@ -755,16 +756,18 @@ async def test_changing_the_status_updates_who_and_same_status_does_not(batch_en
     anna = User(id=ADMIN, is_bot=False, first_name="Анна", username="anna")
     boris = User(id=SECOND_ADMIN, is_bot=False, first_name="Борис", username="boris")
 
-    await issue.handle_lead_status(_status_callback(lead_id, CONTACT_CONTACTED, anna))
+    # Boris is an operator and writes first; Anna owns the bot and may change any lead.
     await issue.handle_lead_status(_status_callback(lead_id, CONTACT_CONTACTED, boris))
+    await issue.handle_lead_status(_status_callback(lead_id, CONTACT_CONTACTED, anna))
     async with batch_env() as session:
-        assert (await session.get(Lead, lead_id)).contact_status_by == "@anna"
+        assert (await session.get(Lead, lead_id)).contact_status_by == "@boris"
 
-    await issue.handle_lead_status(_status_callback(lead_id, "replied", boris))
+    await issue.handle_lead_status(_status_callback(lead_id, "replied", anna))
     async with batch_env() as session:
         lead = await session.get(Lead, lead_id)
-    assert (lead.contact_status, lead.contact_status_by) == ("replied", "@boris")
-    assert lead.contact_status_by_id == SECOND_ADMIN
+    assert (lead.contact_status, lead.contact_status_by) == ("replied", "@anna")
+    assert lead.contact_status_by_id == ADMIN
+    assert lead.owner_user_id == SECOND_ADMIN  # the lead stays the one of whoever wrote
 
 
 def test_card_before_any_status_names_nobody() -> None:
@@ -807,7 +810,7 @@ async def test_button_is_answered_before_the_batch_and_the_handler_does_not_wait
     order: list[str] = []
     release = asyncio.Event()
 
-    async def slow_batch(message, runner) -> None:
+    async def slow_batch(message, runner, user_id=None) -> None:
         order.append("batch started")
         await release.wait()
         order.append("batch done")

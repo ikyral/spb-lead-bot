@@ -21,6 +21,8 @@ NO_ACCESS_TEXT: str = "⛔ Нет доступа"
 BATCH_BUSY_TEXT: str = "⏳ Предыдущая пачка ещё отправляется."
 BATCH_BUSY_TOAST: str = "Предыдущая пачка ещё отправляется"
 BATCH_STARTED_TOAST: str = "⏳ Выдаю лиды…"
+OWNER_ONLY_TEXT: str = "👑 Это может только владелец бота: оно меняет общие данные."
+NOT_YOUR_LEAD_TEXT: str = "Этот лид в работе у {name}"
 ADMIN_ONLY_TEXT: str = "🔒 Эта команда доступна только администраторам бота. Что можно: /help"
 
 # Run on the computer with the collector, in the project folder with .venv active.
@@ -83,6 +85,22 @@ UNKNOWN_PROVIDER_TEXT: str = (
 )
 
 HELP_HIDDEN_TEXT: str = "Остальные команды доступны только администраторам бота."
+OWNER_ONLY_MARK: str = " (только владелец)"
+
+# ---------- several people ----------
+OWNED_LINE: str = "👤 <b>В работе у</b> {name} до {date}"
+OWNED_NO_END_LINE: str = "👤 <b>В работе у</b> {name}"
+RELEASE_AT_LINE: str = "↩️ Вернётся в пул {date}"
+RELEASE_BUTTON_TEXT: str = "↩️ Вернуть в пул"
+RELEASE_BUTTON_TEAM_TEXT: str = "↩️ {name}"
+RELEASED_TOAST: str = "Лид вернулся в пул"
+RELEASE_IMPOSSIBLE_TOAST: str = "Лид уже не в работе: вернуть нельзя"
+NOT_ENRICHMENT_FILE_TEXT: str = "👑 Файлы с новыми лидами загружает владелец бота. Операторам доступен файл обогащения."
+PEOPLE_TITLE: str = "<b>Люди:</b>"
+PERSON_LINE: str = "• {name}: в работе <b>{in_work}</b>, ответили <b>{replied}</b>, отказ <b>{rejected}</b>"
+TEAM_EMPTY_TEXT: str = "Ни у кого нет лидов в работе."
+TEAM_PERSON_TITLE: str = "👤 <b>{name}</b>: в работе {count}"
+TEAM_LEAD_LINE: str = "• {name} — {status}{until}"
 
 # ---------- the first message to a lead ----------
 # {название}, {ниша}, {предложение} and {подпись} are replaced; the result is shown in <code> and escaped there.
@@ -139,6 +157,8 @@ class CommandHelp:
     help: str
     example: str
     admin: bool = True
+    # Changes what everybody shares: the owner of the bot only (ADMIN_TG_ID), not the operators (ADMIN_TG_IDS).
+    owner_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -165,7 +185,9 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
                 f"Выдать следующие {settings.LEADS_BATCH_SIZE} лидов, как кнопка «{BATCH_BUTTON_TEXT}»",
                 "/next_leads",
             ),
-            CommandHelp("rescore", "Пересчитать оценки", "Пересчитать оценку лидов в запасе", "/rescore"),
+            CommandHelp(
+                "rescore", "Пересчитать оценки", "Пересчитать оценку лидов в запасе", "/rescore", owner_only=True
+            ),
             CommandHelp(
                 "today",
                 "План на день",
@@ -199,16 +221,30 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
     HelpSection(
         "Настройки",
         (
-            CommandHelp("collect_now", "Запустить сбор", "Запустить сбор сейчас, в фоне", "/collect_now"),
-            CommandHelp("collect_on", "Включить автосбор", "Включить сбор по расписанию", "/collect_on"),
-            CommandHelp("collect_off", "Выключить автосбор", "Выключить сбор по расписанию", "/collect_off"),
+            CommandHelp(
+                "collect_now", "Запустить сбор", "Запустить сбор сейчас, в фоне", "/collect_now", owner_only=True
+            ),
+            CommandHelp(
+                "collect_on", "Включить автосбор", "Включить сбор по расписанию", "/collect_on", owner_only=True
+            ),
+            CommandHelp(
+                "collect_off", "Выключить автосбор", "Выключить сбор по расписанию", "/collect_off", owner_only=True
+            ),
             CommandHelp(
                 "provider_on",
                 "Включить источник",
                 "Включить источник после блокировок: [источник]",
                 "/provider_on 2gis_scraper",
+                owner_only=True,
             ),
             CommandHelp("chat_id", "ID этого чата", "ID этого чата, для NOTIFY_CHAT_IDS", "/chat_id"),
+            CommandHelp(
+                "team",
+                "Люди и их лиды",
+                "Кто сколько лидов в работе, их лиды и возврат в пул",
+                "/team",
+                owner_only=True,
+            ),
         ),
     ),
 )

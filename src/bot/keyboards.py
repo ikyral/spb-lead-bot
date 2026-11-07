@@ -19,6 +19,8 @@ from src.bot.texts import (
     IN_WORK_BUTTON_TEXT,
     MORE_ENRICH_BUTTON_TEXT,
     NEW_LEADS_BUTTON_TEXT,
+    RELEASE_BUTTON_TEAM_TEXT,
+    RELEASE_BUTTON_TEXT,
     REMIND_BUTTON_TEXT,
     REMIND_DAYS,
     REQUEST_FILE_BUTTON_TEXT,
@@ -27,6 +29,7 @@ from src.bot.texts import (
 )
 from src.config import settings
 from src.database.models import CONTACT_CONTACTED, CONTACT_NO_ANSWER, CONTACT_REJECTED, CONTACT_REPLIED, Lead
+from src.database.ownership import can_release
 from src.services.providers.base import SPB_DISTRICTS, TARGET_CATEGORIES
 from src.services.site_status import (
     NO_SITE_STATUSES,
@@ -42,6 +45,7 @@ DISTRICT_NAMES: list[str] = list(SPB_DISTRICTS.keys())
 CATEGORY_KEYS: list[str] = list(TARGET_CATEGORIES.keys())
 
 ENRICH_REQUEST_CALLBACK: str = "enrich:request"
+_TEAM_BUTTON_NAME_LIMIT: int = 40
 # Shown when callback data is malformed, forged, or from a keyboard of an older bot version.
 STALE_BUTTON_TEXT: str = "Кнопка устарела. Откройте меню заново."
 OPEN_CARD_BUTTON_TEXT: str = "🔎 Открыть в 2ГИС"
@@ -197,6 +201,7 @@ def get_lead_status_keyboard(
     current_status: str | None,
     card_url: str | None = None,
     can_add_phone: bool = False,
+    can_release: bool = False,
     search_url: str | None = None,
     site_verdict: bool | None = None,
     twogis_search: str | None = None,
@@ -231,6 +236,9 @@ def get_lead_status_keyboard(
     if can_add_phone:
         builder.button(text=ADD_PHONE_BUTTON_TEXT, callback_data=f"lp:{lead_id}")
         rows.append(1)
+    if can_release:
+        builder.button(text=RELEASE_BUTTON_TEXT, callback_data=f"rp:{lead_id}")
+        rows.append(1)
     builder.adjust(*rows)
     return builder.as_markup()
 
@@ -244,10 +252,21 @@ def get_issued_lead_keyboard(lead: Lead) -> InlineKeyboardMarkup:
         lead.contact_status,
         card_url=twogis_card_url(lead.source_url),
         can_add_phone=not lead.phone,
+        can_release=can_release(lead),
         search_url=yandex_search_url(lead.name, lead.address),
         site_verdict=manual_site_verdict(lead),
         twogis_search=twogis_search_url(lead.name, lead.address, settings.SCRAPER_CITY_SLUG) if needs_a_look else None,
     )
+
+
+def get_team_keyboard(leads: list[Lead]) -> InlineKeyboardMarkup:
+    """/team: give each lead of a person back to the pool."""
+    builder = InlineKeyboardBuilder()
+    for lead in leads:
+        title = RELEASE_BUTTON_TEAM_TEXT.format(name=" ".join(lead.name.split())[:_TEAM_BUTTON_NAME_LIMIT])
+        builder.button(text=title, callback_data=f"rp:{lead.id}")
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 def get_followup_keyboard(lead_id: int) -> InlineKeyboardMarkup:

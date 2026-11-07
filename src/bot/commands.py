@@ -21,21 +21,25 @@ def public_commands() -> list[BotCommand]:
     ]
 
 
-def admin_commands() -> list[BotCommand]:
+def admin_commands(owner: bool = True) -> list[BotCommand]:
+    """Everything for the owner of the bot; without what changes shared data for an operator."""
     return [
         BotCommand(command=item.command, description=item.menu)
         for section in HELP_SECTIONS
         for item in section.commands
+        if owner or not item.owner_only
     ]
 
 
-async def register_bot_commands(bot: Bot, admin_ids: Iterable[int]) -> None:
-    """Set both menus. A failure is only logged: the bot works without a menu, and a chat may not exist yet."""
+async def register_bot_commands(bot: Bot, owner_id: int, operator_ids: Iterable[int] = ()) -> None:
+    """Set the menus. A failure is only logged: the bot works without a menu, and a chat may not exist yet."""
     await _set_commands(bot, public_commands(), BotCommandScopeDefault(), "everyone")
-    full = admin_commands()
-    for admin_id in sorted(admin_ids):
-        # 'chat not found' until the admin has pressed /start: the menu appears after the next restart.
-        await _set_commands(bot, full, BotCommandScopeChat(chat_id=admin_id), f"admin {admin_id}")
+    # 'chat not found' until an admin has pressed /start: the menu appears after the next restart.
+    await _set_commands(bot, admin_commands(), BotCommandScopeChat(chat_id=owner_id), f"owner {owner_id}")
+    for operator_id in sorted(set(operator_ids) - {owner_id}):
+        await _set_commands(
+            bot, admin_commands(owner=False), BotCommandScopeChat(chat_id=operator_id), f"operator {operator_id}"
+        )
 
 
 async def _set_commands(

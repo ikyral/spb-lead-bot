@@ -18,7 +18,7 @@ from src.bot.keyboards import (
     get_group_panel_keyboard,
     get_main_menu_keyboard,
 )
-from src.bot.middlewares import PUBLIC_FLAG, is_admin
+from src.bot.middlewares import OWNER_ONLY_FLAG, PUBLIC_FLAG, is_admin
 from src.bot.texts import SEARCH_MENU_BUTTON_TEXT, START_ADMIN_TEXT, START_USER_TEXT
 from src.config import settings
 from src.database.repo import async_session_maker
@@ -183,7 +183,8 @@ async def handle_category_chosen(callback: CallbackQuery) -> None:
         await _edit_or_send(callback, report)
 
 
-@router.message(F.document, F.document.file_name.lower().endswith(".csv"))
+# New leads in the shared pool: the owner's.
+@router.message(F.document, F.document.file_name.lower().endswith(".csv"), flags={OWNER_ONLY_FLAG: True})
 async def handle_csv_upload(message: Message, bot: Bot) -> None:
     """Download and process uploaded CSV file with raw places."""
     if not message.document:

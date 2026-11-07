@@ -109,9 +109,15 @@ def plan_export(candidates: list[Lead], stats: list[NicheStats], limit: int) -> 
     return ExportPlan(leads=explored + rest, explored=len(explored))
 
 
-async def choose_export(session: AsyncSession, limit: int, niche: str | None = None) -> ExportPlan:
-    """The leads for a request file: of one niche if it is named, otherwise by the priority of niches."""
-    candidates = await get_unknown_site_candidates(session, niche)
+async def choose_export(
+    session: AsyncSession, limit: int, niche: str | None = None, user_id: int | None = None
+) -> ExportPlan:
+    """
+    The leads for a request file: of one niche if it is named, otherwise by the priority of niches.
+
+    Leads in a request file of someone else that is still being read are left out.
+    """
+    candidates = await get_unknown_site_candidates(session, niche, user_id=user_id)
     if niche is not None:
         return ExportPlan(leads=candidates[:limit])
     return plan_export(candidates, await load_niche_stats(session), limit)

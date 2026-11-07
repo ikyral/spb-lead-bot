@@ -864,7 +864,8 @@ def guarded_dispatcher(monkeypatch: pytest.MonkeyPatch) -> Dispatcher:
     dp.sub_routers.clear()
 
 
-@pytest.mark.parametrize(("user_id", "allowed"), [(100, True), (200, True), (999, False)])
+# 200 is an operator (ADMIN_TG_IDS): starting a collection is the owner's.
+@pytest.mark.parametrize(("user_id", "allowed"), [(100, True), (200, False), (999, False)])
 async def test_commands_reach_only_admins_through_the_real_dispatcher(guarded_dispatcher, user_id, allowed) -> None:
     runner = MagicMock()
     runner.external_mode = False
@@ -895,7 +896,7 @@ async def test_batch_button_with_any_size_reaches_the_handler(guarded_dispatcher
     """A keyboard sent before LEADS_BATCH_SIZE was changed must keep working."""
     calls = []
 
-    async def fake_issue(message, runner):
+    async def fake_issue(message, runner, user_id=None):
         calls.append(message.text)
 
     monkeypatch.setattr(issue, "_issue_batch", fake_issue)
@@ -974,6 +975,12 @@ ROLLBACK_SCHEMA = [
     "ALTER TABLE leads DROP COLUMN is_chain",
     "ALTER TABLE leads DROP COLUMN contact_links",
     "ALTER TABLE leads DROP COLUMN remind_at",
+    "ALTER TABLE leads DROP COLUMN issued_to_user_id",
+    "ALTER TABLE leads DROP COLUMN owner_user_id",
+    "ALTER TABLE leads DROP COLUMN owner_name",
+    "ALTER TABLE leads DROP COLUMN owned_until",
+    "ALTER TABLE leads DROP COLUMN reserved_by",
+    "ALTER TABLE leads DROP COLUMN reserved_until",
     "DROP TABLE import_log",
     "DROP TABLE collector_state",
     "DROP TABLE provider_state",

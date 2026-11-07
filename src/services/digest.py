@@ -1,13 +1,14 @@
 """The morning plan for admins: what is in the pool and whom to remind. Only reads; never writes to businesses."""
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.database.models import Lead
+from src.database.ownership import PersonStats, get_people_stats
 from src.database.repo import DigestCounts, get_digest_counts, get_followups
 from src.services.scheduler import RequestUsage
 
@@ -28,6 +29,10 @@ class DigestData:
     followups: list[Lead]
     followup_after_days: int
     usage: RequestUsage | None
+    # Each person's leads: in the plan of the owner of the bot and of a group, not of an operator.
+    people: list[PersonStats] = field(default_factory=list)
+    # The plan of one person: their reminders and leads to remind about. A group gets only what is shared.
+    personal: bool = True
 
 
 def digest_bounds(now: datetime, timezone: ZoneInfo, followup_after_days: int) -> tuple[datetime, datetime]:
@@ -54,15 +59,28 @@ async def load_digest(
     timezone: ZoneInfo,
     followup_after_days: int,
     usage: UsageSource | None = None,
+    user_id: int | None = None,
+    with_people: bool = False,
+    personal: bool = True,
 ) -> DigestData:
+    """
+    The plan of `user_id`: the pool is everybody's, reminders and leads to remind about are theirs (of all for None).
+
+    Not `personal`: the plan of a group, the pool and the people without anybody's reminders.
+    """
     due_before, stale_before = digest_bounds(now, timezone, followup_after_days)
     async with session_maker() as session:
-        counts = await get_digest_counts(session, due_before, stale_before)
-        followups = await get_followups(session, due_before, stale_before, FOLLOWUPS_SHOWN)
+        counts = await get_digest_counts(session, due_before, stale_before, user_id=user_id)
+        followups = (
+            await get_followups(session, due_before, stale_before, FOLLOWUPS_SHOWN, user_id=user_id) if personal else []
+        )
+        people = await get_people_stats(session) if with_people else []
     return DigestData(
         day=now.astimezone(timezone).date(),
         counts=counts,
         followups=followups,
         followup_after_days=followup_after_days,
         usage=await usage() if usage is not None else None,
+        people=people,
+        personal=personal,
     )

@@ -28,8 +28,16 @@ from src.bot.texts import (
     OUTREACH_OFFER_FALLBACK,
     OUTREACH_SIGNATURE_FALLBACK,
     OUTREACH_TITLE,
+    OWNED_LINE,
+    OWNED_NO_END_LINE,
+    OWNER_ONLY_MARK,
+    PEOPLE_TITLE,
+    PERSON_LINE,
+    RELEASE_AT_LINE,
     REMIND_LINE,
     REQUEST_FILE_HINT,
+    TEAM_LEAD_LINE,
+    TEAM_PERSON_TITLE,
     UNKNOWN_NICHE_TEXT,
     HelpSection,
 )
@@ -90,6 +98,8 @@ _CARD_VARIANTS: tuple[tuple[int, int, bool], ...] = (
 )
 _CONTACT_TITLE_LIMIT: int = 60
 _OUTREACH_FIELD_LIMIT: int = 100
+_PERSON_NAME_LIMIT: int = 64
+_TEAM_NAME_LIMIT: int = 80
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 _MSK = timezone(timedelta(hours=3), "MSK")
 _REPORT_FIELD_LIMIT: int = 300
@@ -264,12 +274,34 @@ def _issued_card(lead: Lead, field_limit: int, max_links: int, with_outreach: bo
     if lead.contact_status and lead.contact_status_by:
         status += f" — {field(lead.contact_status_by)}"
     lines.append(f"📌 <b>Статус:</b> {status}")
+    owned = _owned_line(lead)
+    if owned:
+        lines.append(owned)
     if lead.remind_at is not None and lead.contact_status not in (CONTACT_REPLIED, CONTACT_REJECTED):
         lines.append(REMIND_LINE.format(date=format_msk_date(lead.remind_at)))
     outreach = outreach_text(lead) if with_outreach else None
     if outreach:
         lines += ["", OUTREACH_TITLE, f"<code>{html.escape(outreach)}</code>"]
     return "\n".join(lines)
+
+
+def person_label(user_id: int | None, name: str | None) -> str:
+    """How to name a person of the team: as they called themselves, or by the ID if nothing else is known."""
+    if name:
+        return html.escape(name[:_PERSON_NAME_LIMIT])
+    return f"ID {user_id}" if user_id is not None else "—"
+
+
+def _owned_line(lead: Lead) -> str | None:
+    """Whose the lead is and until when; or when it goes back to the pool after 'Нет ответа'."""
+    if lead.owner_user_id is not None:
+        name = person_label(lead.owner_user_id, lead.owner_name)
+        if lead.owned_until is None:
+            return OWNED_NO_END_LINE.format(name=name)
+        return OWNED_LINE.format(name=name, date=format_msk_date(lead.owned_until))
+    if lead.owned_until is not None and lead.contact_status == CONTACT_NO_ANSWER:
+        return RELEASE_AT_LINE.format(date=format_msk_date(lead.owned_until))
+    return None
 
 
 def format_issued_lead(lead: Lead) -> str:
@@ -343,16 +375,43 @@ def format_digest_summary(data: DigestData) -> str:
         "",
         DIGEST_USEFUL_LINE.format(count=counts.useful_in_pool),
         DIGEST_UNKNOWN_LINE.format(count=counts.waiting_for_enrichment),
-        DIGEST_DUE_LINE.format(count=counts.reminders_due),
-        DIGEST_STALE_LINE.format(days=data.followup_after_days, count=counts.written_no_answer),
     ]
+    if data.personal:
+        lines += [
+            DIGEST_DUE_LINE.format(count=counts.reminders_due),
+            DIGEST_STALE_LINE.format(days=data.followup_after_days, count=counts.written_no_answer),
+        ]
     key = data.usage.dgis_key if data.usage is not None else None
     if key is not None and key.limit:
         lines.append(DIGEST_API_LEFT_LINE.format(left=max(0, key.limit - key.used), limit=key.limit))
     elif key is not None:
         lines.append(DIGEST_API_USED_LINE.format(used=key.used))
-    lines.append("")
-    lines.append(DIGEST_FOLLOWUPS_TITLE.format(count=len(data.followups)) if data.followups else DIGEST_NO_FOLLOWUPS)
+    if data.people:
+        lines += ["", PEOPLE_TITLE]
+        lines += [
+            PERSON_LINE.format(
+                name=person_label(person.user_id, person.name),
+                in_work=person.in_work,
+                replied=person.replied,
+                rejected=person.rejected,
+            )
+            for person in data.people
+        ]
+    if data.personal:
+        lines.append("")
+        lines.append(
+            DIGEST_FOLLOWUPS_TITLE.format(count=len(data.followups)) if data.followups else DIGEST_NO_FOLLOWUPS
+        )
+    return "\n".join(lines)
+
+
+def format_team_person(user_id: int, name: str | None, leads: list[Lead]) -> str:
+    """/team: one person's leads in work, whose status and until when; buttons under it give them back."""
+    lines = [TEAM_PERSON_TITLE.format(name=person_label(user_id, name), count=len(leads))]
+    for lead in leads:
+        status = _CONTACT_STATUS_TITLES.get(lead.contact_status or "", "📤 Выдан, ждёт действия")
+        until = f", до {format_msk_date(lead.owned_until)}" if lead.owned_until is not None else ""
+        lines.append(TEAM_LEAD_LINE.format(name=html.escape(lead.name[:_TEAM_NAME_LIMIT]), status=status, until=until))
     return "\n".join(lines)
 
 
@@ -593,20 +652,29 @@ def format_unknown_niche(text: str, niches: list[str]) -> list[str]:
     return split_messages([header, *lines], separator="\n")
 
 
-def format_help(is_admin: bool, sections: tuple[HelpSection, ...] = HELP_SECTIONS) -> list[str]:
-    """/help in as many messages as it takes. Admin commands are marked 🔒 and shown to admins only."""
+def format_help(is_admin: bool, sections: tuple[HelpSection, ...] = HELP_SECTIONS, is_owner: bool = True) -> list[str]:
+    """
+    /help in as many messages as it takes. Admin commands are marked 🔒 and shown to admins only.
+
+    Commands that change shared data are left out for an operator and marked for the owner.
+    """
     blocks = ["❓ <b>Команды бота</b>"]
     hidden = False
     for section in sections:
-        commands = [command for command in section.commands if is_admin or not command.admin]
+        commands = [
+            command
+            for command in section.commands
+            if (is_admin or not command.admin) and (is_owner or not command.owner_only)
+        ]
         hidden = hidden or len(commands) < len(section.commands)
         if not commands:
             continue
         blocks.append(f"\n<b>{html.escape(section.title)}</b>")
         for command in commands:
             mark = "🔒 " if command.admin else ""
+            owner_mark = OWNER_ONLY_MARK if command.owner_only else ""
             blocks.append(
-                f"{mark}/{command.command} — {html.escape(command.help)}\n"
+                f"{mark}/{command.command} — {html.escape(command.help)}{owner_mark}\n"
                 f"   Пример: <code>{html.escape(command.example)}</code>"
             )
         if section.note:

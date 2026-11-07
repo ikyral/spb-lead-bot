@@ -103,6 +103,15 @@ class Lead(Base):
     contact_links: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # When to remind the owner about a lead they wrote to; cleared by 'replied' and 'rejected'.
     remind_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    # Several people, see src/database/ownership.py. Whom the batch went to; whose the lead is after 'Написал'
+    # and until when (no date after 'Ответили'; after 'Нет ответа' no owner, and the date is when it goes back).
+    issued_to_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    owner_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    owner_name: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
+    owned_until: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    # Put into a request file by this person: other request files leave it out until then.
+    reserved_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    reserved_until: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
 
     @property
     def has_contacts(self) -> bool:

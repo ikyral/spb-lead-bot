@@ -297,7 +297,7 @@
 
 ### Обновление схемы базы и откат
 
-Новые колонки `leads.email`, `leads.source_url`, `leads.issued_at`, `leads.contact_status`, `leads.contact_status_by_id`, `leads.contact_status_by`, `leads.contact_status_at`, `leads.exported_at`, `leads.imported_at`, `leads.rubric`, `leads.site_url`, `leads.site_confidence`, `leads.site_source`, `leads.site_checked_at`, `leads.is_chain`, `leads.contact_links`, `leads.remind_at`, `collector_state.key_warning_mark`, `collector_state.scraper_check_runs`, `collector_state.digest_sent_on`, `provider_state.requests_total`, `provider_state.key_fingerprint`, индекс и таблицы `collector_state`, `provider_state`, `import_log`, `search_progress` появляются сами при запуске бота, существующие лиды не меняются и попадают в очередь выдачи. Перед обновлением сделайте копию файла базы.
+Новые колонки `leads.email`, `leads.source_url`, `leads.issued_at`, `leads.contact_status`, `leads.contact_status_by_id`, `leads.contact_status_by`, `leads.contact_status_at`, `leads.exported_at`, `leads.imported_at`, `leads.rubric`, `leads.site_url`, `leads.site_confidence`, `leads.site_source`, `leads.site_checked_at`, `leads.is_chain`, `leads.contact_links`, `leads.remind_at`, `leads.issued_to_user_id`, `leads.owner_user_id`, `leads.owner_name`, `leads.owned_until`, `leads.reserved_by`, `leads.reserved_until`, `collector_state.key_warning_mark`, `collector_state.scraper_check_runs`, `collector_state.digest_sent_on`, `provider_state.requests_total`, `provider_state.key_fingerprint`, индекс и таблицы `collector_state`, `provider_state`, `import_log`, `search_progress` появляются сами при запуске бота, существующие лиды не меняются и попадают в очередь выдачи. Перед обновлением сделайте копию файла базы.
 
 Старая версия бота работает с обновлённой базой без изменений, но не покажет новые статусы в своих счётчиках. Чтобы полностью убрать изменения (SQLite 3.35+), остановите бота и выполните. Первые две строки нужны потому, что старая версия показала бы новые статусы сайта как «Есть сайт»:
 
@@ -323,6 +323,12 @@
     ALTER TABLE leads DROP COLUMN is_chain;
     ALTER TABLE leads DROP COLUMN contact_links;
     ALTER TABLE leads DROP COLUMN remind_at;
+    ALTER TABLE leads DROP COLUMN issued_to_user_id;
+    ALTER TABLE leads DROP COLUMN owner_user_id;
+    ALTER TABLE leads DROP COLUMN owner_name;
+    ALTER TABLE leads DROP COLUMN owned_until;
+    ALTER TABLE leads DROP COLUMN reserved_by;
+    ALTER TABLE leads DROP COLUMN reserved_until;
     DROP TABLE import_log;
     DROP TABLE collector_state;
     DROP TABLE provider_state;
