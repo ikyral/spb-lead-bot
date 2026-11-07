@@ -22,6 +22,17 @@ from src.database.models import CONTACT_REJECTED, STATUS_NEW, STATUS_REJECTED, L
 from src.database.repo import get_leads_by_external_ids
 from src.services.chains import load_chain_index
 from src.services.checker import analyze_website, create_check_client
+from src.services.contact_links import (
+    SOURCE_2GIS,
+    ContactLink,
+    contact_link,
+    lead_contacts,
+    link_key,
+    merge_contact_links,
+)
+from src.services.contact_links import (
+    SOURCE_GOOGLE as CONTACT_SOURCE_GOOGLE,
+)
 from src.services.dedup import normalize_phones
 from src.services.lead_file import FOUND_BY_GOOGLE, EnrichRecord, EnrichResult
 from src.services.normalize import normalize_email, normalize_phone_list, normalize_website
@@ -72,6 +83,7 @@ class UsefulLead:
     phone: str | None = None
     website: str | None = None
     source_url: str | None = None
+    contacts: list[ContactLink] = field(default_factory=list)
 
 
 @dataclass
@@ -148,9 +160,26 @@ def _merged_phones(lead: Lead, record: EnrichRecord) -> str | None:
     return _joined((normalized or "").split(_SEPARATOR), _PHONE_COLUMN_MAX)
 
 
+def _record_links(record: EnrichRecord) -> list[str]:
+    """The email and the networks of a record as links, in one form whichever collector wrote them."""
+    links = [contact_link(None, record.email)] + [contact_link(None, social) for social in record.socials]
+    return [link for link in links if link is not None]
+
+
+def _social_key(social: str) -> str:
+    return link_key(contact_link(None, social) or social)
+
+
 def _merged_socials(lead: Lead, record: EnrichRecord) -> str | None:
-    known = [part.strip() for part in (lead.socials or "").split(",") if part.strip()]
-    return _joined(list(dict.fromkeys([*known, *record.socials])), _SOCIALS_COLUMN_MAX)
+    """Saved networks keep their spelling; a new one comes in the stored form, unless it is a saved one spelt anew."""
+    merged: dict[str, str] = {}
+    for social in (part.strip() for part in (lead.socials or "").split(",")):
+        if social:
+            merged.setdefault(_social_key(social), social)
+    for social in record.socials:
+        link = contact_link(None, social) or social
+        merged.setdefault(_social_key(link), link)
+    return _joined(list(merged.values()), _SOCIALS_COLUMN_MAX)
 
 
 async def _check_sites(records: list[EnrichRecord]) -> dict[str, tuple[str, str | None]]:
@@ -178,14 +207,14 @@ def _update_values(lead: Lead, record: EnrichRecord, check: tuple[str, str | Non
     if site_status == SITE_HAS_SITE:
         site_status = SITE_FOUND
     phone = _merged_phones(lead, record)
-    socials = _merged_socials(lead, record)
+    contacts = _contact_values(lead, record)
+    socials = contacts["socials"]
     if site_status == SITE_SOCIAL_ONLY and not socials:
         socials = (details or website or "")[:_SOCIALS_COLUMN_MAX] or None
-    email = lead.email or normalize_email(record.email)
     return {
+        **contacts,
         "phone": phone,
         "socials": socials,
-        "email": email[:_EMAIL_COLUMN_MAX] if email else None,
         "raw_website": website[:_URL_COLUMN_MAX] if website else None,
         "site_url": website[:_URL_COLUMN_MAX] if website and site_status in (SITE_FOUND, SITE_DEAD) else None,
         "site_status": site_status,
@@ -194,6 +223,39 @@ def _update_values(lead: Lead, record: EnrichRecord, check: tuple[str, str | Non
         "site_checked_at": datetime.now(UTC),
         "score": calculate_lead_score(lead.category, site_status, phone, socials, small_chain=branches == 2),
     }
+
+
+def _contact_values(lead: Lead, record: EnrichRecord) -> dict[str, Any]:
+    """Networks, the email and the links with their source: only ever added to, never emptied."""
+    email = lead.email or normalize_email(record.email)
+    contact_source = CONTACT_SOURCE_GOOGLE if record.found_by == FOUND_BY_GOOGLE else SOURCE_2GIS
+    return {
+        "socials": _merged_socials(lead, record),
+        "email": email[:_EMAIL_COLUMN_MAX] if email else None,
+        "contact_links": merge_contact_links(lead.contact_links, _record_links(record), contact_source),
+    }
+
+
+async def _add_contacts_only(session: AsyncSession, lead: Lead, record: EnrichRecord) -> None:
+    """
+    Google found no site where more is known already: the verdict about the site stays, its contacts are kept.
+
+    Phones are left out: a new number goes through the check for duplicates, which only a full update does.
+    """
+    values = _contact_values(lead, record)
+    if values["contact_links"] == lead.contact_links:
+        return
+    await session.execute(
+        update(Lead)
+        .where(
+            Lead.id == lead.id,
+            Lead.crm_status == STATUS_NEW,
+            Lead.issued_at.is_(None),
+            func.coalesce(Lead.site_source, "") != SOURCE_MANUAL,
+        )
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
 
 
 async def _phone_owners(session: AsyncSession) -> dict[str, int]:
@@ -232,6 +294,8 @@ async def _apply_records(
     for record in records:
         lead = leads.get(record.external_id)
         reason = _why_not_updated(lead, record)
+        if lead is not None and reason == REASON_KNOWN_BETTER:
+            await _add_contacts_only(session, lead, record)
         if lead is None or reason is not None:
             # A person may have given a verdict while the sites were being checked.
             stats.ignored[reason or REASON_UNKNOWN_LEAD] += 1
@@ -282,6 +346,7 @@ async def _apply_records(
                     phone=values["phone"],
                     website=values["raw_website"],
                     source_url=lead.source_url,
+                    contacts=lead_contacts(values["contact_links"], values["email"], values["socials"]),
                 )
             )
     await session.commit()

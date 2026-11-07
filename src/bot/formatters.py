@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 import html
+import re
 from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from src.bot.texts import HELP_HIDDEN_TEXT, HELP_SECTIONS, REQUEST_FILE_HINT, UNKNOWN_NICHE_TEXT, HelpSection
+from src.bot.texts import (
+    CONTACT_SOURCE_TITLES,
+    CONTACTS_TITLE,
+    HELP_HIDDEN_TEXT,
+    HELP_SECTIONS,
+    OUTREACH_DEAD_SITE_TEMPLATE,
+    OUTREACH_NO_SITE_TEMPLATE,
+    OUTREACH_OFFER_FALLBACK,
+    OUTREACH_SIGNATURE_FALLBACK,
+    OUTREACH_TITLE,
+    REQUEST_FILE_HINT,
+    UNKNOWN_NICHE_TEXT,
+    HelpSection,
+)
 from src.config import settings
 from src.database.models import (
     CONTACT_CONTACTED,
@@ -17,9 +31,19 @@ from src.database.models import (
     STATUS_NEW,
     Lead,
 )
+from src.services.contact_links import (
+    KIND_EMAIL,
+    KIND_INSTAGRAM,
+    KIND_TELEGRAM,
+    KIND_VK,
+    KIND_WHATSAPP,
+    ContactLink,
+    lead_contacts,
+)
 from src.services.lead_file import REQUEST_FILE_ERROR
 from src.services.providers.base import TARGET_CATEGORIES, niche_title
 from src.services.site_status import (
+    NO_SITE_STATUSES,
     SITE_DEAD,
     SITE_FOUND,
     SITE_NO_SITE,
@@ -42,10 +66,21 @@ if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this modul
 
 # Telegram's limit for one message.
 MAX_MESSAGE_LENGTH: int = 4096
-# Field limits for a lead card: normally the first one fits, the second is for pathological data.
-_CARD_FIELD_LIMITS: tuple[int, ...] = (300, 100)
+_CARD_FIELD_LIMIT: int = 300
+# A lead card as (field length, links shown, with the first message), tried in this order until it fits.
+# Normally the first one does; the others are for pathological data.
+_CARD_VARIANTS: tuple[tuple[int, int, bool], ...] = (
+    (_CARD_FIELD_LIMIT, 8, True),
+    (100, 8, True),
+    (100, 8, False),
+    (100, 3, False),
+)
+_CONTACT_TITLE_LIMIT: int = 60
+_OUTREACH_FIELD_LIMIT: int = 100
+_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 _MSK = timezone(timedelta(hours=3), "MSK")
 _REPORT_FIELD_LIMIT: int = 300
+_REPORT_LINKS: int = 5
 _NICHE_NAME_LIMIT: int = 60
 _PHONE_IN_CARD_LINE: str = "📞 <b>Телефон:</b> смотри в карточке"
 
@@ -132,7 +167,7 @@ def format_lead_card(lead: Lead) -> str:
     safe_name = html.escape(lead.name)
     safe_category = html.escape(category_title)
 
-    site_line = _site_verdict_line(lead, _CARD_FIELD_LIMITS[0])
+    site_line = _site_verdict_line(lead, _CARD_FIELD_LIMIT)
     if site_line is None:
         if lead.site_status == SITE_DEAD:
             safe_site = html.escape(lead.raw_website or "не указан")
@@ -184,7 +219,7 @@ def _card_link_line(lead: Lead) -> str | None:
     return None
 
 
-def _issued_card(lead: Lead, field_limit: int) -> str:
+def _issued_card(lead: Lead, field_limit: int, max_links: int, with_outreach: bool) -> str:
     def field(value: str) -> str:
         return html.escape(value[:field_limit])
 
@@ -198,11 +233,10 @@ def _issued_card(lead: Lead, field_limit: int) -> str:
         lines.append(f"📞 <b>Телефон:</b> {field(lead.phone)}")
     elif on_button:
         lines.append(_PHONE_IN_CARD_LINE)
-    if lead.email:
-        lines.append(f"✉️ <b>Email:</b> {field(lead.email)}")
     lines.append(_site_line(lead, field_limit))
-    if lead.socials:
-        lines.append(f"🔗 <b>Соцсети:</b> {field(lead.socials)}")
+    contacts = format_contacts_line(lead_contacts(lead.contact_links, lead.email, lead.socials)[:max_links])
+    if contacts:
+        lines.append(contacts)
     link = None if on_button else _card_link_line(lead)
     if link:
         lines.append(link)
@@ -210,17 +244,73 @@ def _issued_card(lead: Lead, field_limit: int) -> str:
     if lead.contact_status and lead.contact_status_by:
         status += f" — {field(lead.contact_status_by)}"
     lines.append(f"📌 <b>Статус:</b> {status}")
+    outreach = outreach_text(lead) if with_outreach else None
+    if outreach:
+        lines += ["", OUTREACH_TITLE, f"<code>{html.escape(outreach)}</code>"]
     return "\n".join(lines)
 
 
 def format_issued_lead(lead: Lead) -> str:
     """Format a handed-out lead: everything needed to contact the organization, within Telegram's limit."""
     text = ""
-    for limit in _CARD_FIELD_LIMITS:
-        text = _issued_card(lead, limit)
+    # Shorter fields first, then fewer links, then no ready message: the contacts matter more than the text.
+    for field_limit, max_links, with_outreach in _CARD_VARIANTS:
+        text = _issued_card(lead, field_limit, max_links, with_outreach)
         if len(text) <= MAX_MESSAGE_LENGTH:
             break
     return text
+
+
+def _contact_title(link: ContactLink) -> str:
+    """What the owner reads on a link: the address, the number or the nickname; the host for anything else."""
+    tail = link.url.rstrip("/").rsplit("/", 1)[-1]
+    if link.kind == KIND_EMAIL:
+        return link.url.removeprefix("mailto:")
+    if link.kind == KIND_WHATSAPP:
+        return f"WhatsApp +{tail}"
+    if link.kind == KIND_TELEGRAM:
+        return f"Telegram @{tail}"
+    if link.kind == KIND_INSTAGRAM:
+        return f"Instagram @{tail}"
+    if link.kind == KIND_VK:
+        return f"ВКонтакте {tail}"
+    return link.url.removeprefix("https://")
+
+
+def format_contacts_line(links: list[ContactLink]) -> str | None:
+    """The contacts as links: mailto:, t.me, wa.me, vk.com. Each source in brackets; nothing for no contacts."""
+    parts = []
+    for link in links:
+        title = html.escape(_contact_title(link)[:_CONTACT_TITLE_LIMIT])
+        sources = ", ".join(CONTACT_SOURCE_TITLES[source] for source in link.sources)
+        suffix = f" ({sources})" if sources else ""
+        parts.append(f'<a href="{html.escape(link.url, quote=True)}">{title}</a>{suffix}')
+    return f"{CONTACTS_TITLE} " + " · ".join(parts) if parts else None
+
+
+def _niche_for_text(lead: Lead) -> str:
+    """The niche in words, without the emoji of its title: the rubric of 2GIS if known."""
+    title = lead.rubric or niche_title(lead.category)
+    return "".join(char for char in title if char.isalnum() or char in " ,-«»").strip()[:_OUTREACH_FIELD_LIMIT]
+
+
+def outreach_text(lead: Lead) -> str | None:
+    """A ready first message for a lead without a site or with a site that does not open; None for the rest."""
+    if lead.site_status == SITE_DEAD:
+        template = OUTREACH_DEAD_SITE_TEMPLATE
+    elif lead.site_status in NO_SITE_STATUSES:
+        template = OUTREACH_NO_SITE_TEMPLATE
+    else:
+        return None
+    values = {
+        "название": " ".join(lead.name.split())[:_OUTREACH_FIELD_LIMIT],
+        "ниша": _niche_for_text(lead) or "вашей",
+        "предложение": settings.OUTREACH_OFFER or OUTREACH_OFFER_FALLBACK,
+        "подпись": settings.OUTREACH_SIGNATURE or OUTREACH_SIGNATURE_FALLBACK,
+    }
+    # One pass over the template: braces in a name or in the settings stay text, an unknown placeholder stays too.
+    text = _PLACEHOLDER_RE.sub(lambda match: values.get(match.group(1), match.group(0)), template)
+    return " ".join(text.split())
 
 
 def _pool_stats_lines(stats: PoolStats) -> list[str]:
@@ -377,6 +467,9 @@ def _useful_lead_block(lead: UsefulLead) -> str:
         lines.append("📱 только соцсеть вместо сайта")
     if lead.site_status == SITE_DEAD and lead.website:
         lines.append(f"🌐 {field(lead.website)}")
+    contacts = format_contacts_line(lead.contacts[:_REPORT_LINKS])
+    if contacts:
+        lines.append(contacts)
     url = twogis_card_url(lead.source_url) or twogis_search_url(lead.name, lead.address, settings.SCRAPER_CITY_SLUG)
     title = "Открыть в 2ГИС" if twogis_card_url(lead.source_url) else "Найти в 2ГИС"
     lines.append(f'🗺 <a href="{html.escape(url, quote=True)}">{title}</a>')

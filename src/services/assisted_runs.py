@@ -35,6 +35,7 @@ from src.services.api_client import (
     ProviderTemporaryError,
 )
 from src.services.collector import REST_REASON, SearchTarget, interval_ends_at, unavailable_reason
+from src.services.contact_links import links_from_card, unique_links
 from src.services.lead_export import write_enrich_result
 from src.services.lead_file import (
     EnrichRequest,
@@ -302,7 +303,9 @@ def _result_record(item: EnrichRequestItem, card: dict[str, Any] | None, now: da
     contacts = read_card_contacts(card) if card is not None else None
     if contacts is None:
         return empty
-    phones, socials = fit_result_lists(contacts.phones, [_without_query(url) for url in contacts.socials])
+    # Links from the card in one form ('@name' of Telegram becomes t.me/name), then anything the old reading kept.
+    socials = unique_links([*links_from_card(card or {}), *(_without_query(url) for url in contacts.socials)])
+    phones, socials = fit_result_lists(contacts.phones, socials)
     record = enrich_result_record(
         item.source,
         item.source_id,

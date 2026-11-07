@@ -129,6 +129,8 @@
 | `LEADS_MAX_NICHE_SHARE` | `0.5` | Наибольшая доля одной ниши в пачке; `1` снимает ограничение. Если в запасе одна ниша, пачка будет неполной |
 | `LEADS_CHAIN_MIN_BRANCHES` | `3` | С какого числа разных адресов с одним названием организация считается сетью |
 | `LEADS_CHAIN_BLOCKLIST` | список в коде | Бренды через запятую, заменяют список из `src/services/chains.py` |
+| `OUTREACH_OFFER` | нейтральный текст | Одна фраза для первого сообщения: что вы предлагаете. Длиннее 300 символов обрезается |
+| `OUTREACH_SIGNATURE` | «Хорошего дня!» | Подпись и способ связи в конце первого сообщения, например `Иван, веб-разработчик. Telegram: @ivan_dev` |
 | `COLLECT_ENABLED` | `true` | `false` или пустой `COLLECT_PROVIDERS`: сервер сам не собирает, см. раздел «Сбор на домашнем компьютере» |
 | `COLLECT_CRON` | `0 4 * * *` | Расписание в формате crontab: минута, час, день, месяц, день недели (0 и 7 — воскресенье) |
 | `COLLECT_INTERVAL_MINUTES` | не задан | Интервал в минутах; если задан, заменяет `COLLECT_CRON`. Отсчёт идёт от запуска бота |
@@ -281,7 +283,7 @@
 
 ### Обновление схемы базы и откат
 
-Новые колонки `leads.email`, `leads.source_url`, `leads.issued_at`, `leads.contact_status`, `leads.contact_status_by_id`, `leads.contact_status_by`, `leads.contact_status_at`, `leads.exported_at`, `leads.imported_at`, `leads.rubric`, `leads.site_url`, `leads.site_confidence`, `leads.site_source`, `leads.site_checked_at`, `leads.is_chain`, `collector_state.key_warning_mark`, `collector_state.scraper_check_runs`, `provider_state.requests_total`, `provider_state.key_fingerprint`, индекс и таблицы `collector_state`, `provider_state`, `import_log`, `search_progress` появляются сами при запуске бота, существующие лиды не меняются и попадают в очередь выдачи. Перед обновлением сделайте копию файла базы.
+Новые колонки `leads.email`, `leads.source_url`, `leads.issued_at`, `leads.contact_status`, `leads.contact_status_by_id`, `leads.contact_status_by`, `leads.contact_status_at`, `leads.exported_at`, `leads.imported_at`, `leads.rubric`, `leads.site_url`, `leads.site_confidence`, `leads.site_source`, `leads.site_checked_at`, `leads.is_chain`, `leads.contact_links`, `collector_state.key_warning_mark`, `collector_state.scraper_check_runs`, `provider_state.requests_total`, `provider_state.key_fingerprint`, индекс и таблицы `collector_state`, `provider_state`, `import_log`, `search_progress` появляются сами при запуске бота, существующие лиды не меняются и попадают в очередь выдачи. Перед обновлением сделайте копию файла базы.
 
 Старая версия бота работает с обновлённой базой без изменений, но не покажет новые статусы в своих счётчиках. Чтобы полностью убрать изменения (SQLite 3.35+), остановите бота и выполните. Первые две строки нужны потому, что старая версия показала бы новые статусы сайта как «Есть сайт»:
 
@@ -305,6 +307,7 @@
     ALTER TABLE leads DROP COLUMN site_source;
     ALTER TABLE leads DROP COLUMN site_checked_at;
     ALTER TABLE leads DROP COLUMN is_chain;
+    ALTER TABLE leads DROP COLUMN contact_links;
     DROP TABLE import_log;
     DROP TABLE collector_state;
     DROP TABLE provider_state;
@@ -551,6 +554,14 @@ Cookies сохраняются в `data/browser_profile`, как в обычно
 **Условия 2ГИС.** Всё сказанное в «Парсер 2ГИС: ограничения» относится и к этим режимам: чтение карточек программой может нарушать п. 5.1.8 лицензионного соглашения, даже если капчу проходит человек, а нагрузка низкая. Ответственность остаётся на владельце проекта, а блокироваться будет ваш домашний IP. Держите объём небольшим и не запускайте чаще, чем разрешают лимиты. Законный путь получить контакты в объёме — платный API. Режимы работают только в сборщике на компьютере, на сервере их нет.
 
 **Что считается нераспознанным.** Карточка без поля `contact_groups` и карточка, где сайт указан только ссылкой через 2ГИС без адреса рядом: сборщик не примет непонятный ответ за отсутствие сайта и не отправит боту ссылку на 2ГИС. Если настоящие карточки организаций без контактов не содержат этого поля, такие лиды останутся `unknown`.
+
+### Контакты и первое сообщение
+
+Из карточки 2ГИС сборщик берёт, кроме телефона и сайта, почту, ВКонтакте, Telegram, WhatsApp, Instagram и другие соцсети. Ник `@name` в Telegram или Instagram и номер в WhatsApp становятся ссылками (`t.me/name`, `wa.me/7921…`), готовый текст в ссылке WhatsApp отбрасывается. Формат файла `enrich_*.json` не меняется: всё это лежит в прежних полях `email` и `socials`, старые файлы и старые сборщики работают как раньше.
+
+Бот хранит контакты в колонке `leads.contact_links` с источником каждого (2ГИС или Google). Одна и та же ссылка, записанная по-разному (`www.`, `vk.ru`, слэш в конце), хранится один раз с обоими источниками. Импорт только добавляет контакты, сохранённые не стираются. Если Google не нашёл сайта у лида, о котором уже известно больше, статус сайта не меняется, но найденные Google соцсети и почта сохраняются.
+
+В карточке «📦 Следующие 30» и в итоге «Карточки 2ГИС обработаны» контакты идут одной строкой «🔗 Контакты» со ссылками: почта открывается через `mailto:`, Telegram, WhatsApp и ВКонтакте открываются сразу. В скобках указан источник. Под карточкой лида без сайта или с неработающим сайтом бот показывает готовое первое сообщение: нажатие копирует текст. Шаблоны лежат в `src/bot/texts.py`, по одному на статус. Фраза с предложением и подпись берутся из `OUTREACH_OFFER` и `OUTREACH_SIGNATURE`.
 
 ### Поиск сайта в Google
 
