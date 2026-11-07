@@ -2,8 +2,11 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from src.config import Settings
 from src.database.models import CollectorState, Lead
@@ -433,3 +436,137 @@ async def test_status_shows_sources_and_schedule(session_maker) -> None:
     assert status.disabled_providers == {"2gis": "не задан TWOGIS_API_KEY"}
     assert "0 4 * * *" in status.schedule_text
     assert "Europe/Moscow" in status.schedule_text
+
+
+# ---------- collection at start ----------
+
+MSK_CRON = CronTrigger.from_crontab("0 4 * * *", timezone=ZoneInfo("Europe/Moscow"))
+# 10:00 in Moscow: today's 04:00 run is in the past.
+NOW = datetime(2026, 11, 8, 7, 0, tzinfo=UTC)
+
+
+def _last_run(**values) -> CollectorState:
+    return CollectorState(id=1, **values)
+
+
+@pytest.mark.parametrize("status", [scheduler.STATUS_OK, scheduler.STATUS_PARTIAL])
+def test_a_recent_success_means_no_collection_at_start(status: str) -> None:
+    state = _last_run(
+        last_status=status,
+        last_trigger=TRIGGER_MANUAL,
+        last_started_at=NOW - timedelta(hours=3),
+        last_finished_at=NOW - timedelta(hours=2),
+    )
+
+    decision = scheduler.decide_startup_run(state, NOW, True, MSK_CRON)
+
+    assert decision.run is False
+    assert "successful" in decision.reason
+
+
+def test_a_scheduled_run_today_is_not_repeated_even_if_it_failed() -> None:
+    state = _last_run(
+        last_status=scheduler.STATUS_FAILED,
+        last_trigger=TRIGGER_SCHEDULE,
+        last_started_at=NOW - timedelta(hours=3),
+        last_finished_at=NOW - timedelta(hours=3),
+    )
+
+    decision = scheduler.decide_startup_run(state, NOW, True, MSK_CRON)
+
+    assert decision.run is False
+    assert "scheduled collection already started" in decision.reason
+
+
+def test_an_old_success_lets_run_on_start_collect() -> None:
+    state = _last_run(
+        last_status=scheduler.STATUS_OK,
+        last_trigger=TRIGGER_SCHEDULE,
+        last_started_at=NOW - timedelta(hours=21),
+        last_finished_at=NOW - timedelta(hours=21),
+    )
+
+    assert scheduler.decide_startup_run(state, NOW, True, MSK_CRON).run is True
+
+
+def test_a_missed_scheduled_run_is_caught_up_without_run_on_start() -> None:
+    """The bot was off at 04:00 today: the last run started the day before yesterday."""
+    state = _last_run(
+        last_status=scheduler.STATUS_OK,
+        last_trigger=TRIGGER_SCHEDULE,
+        last_started_at=NOW - timedelta(hours=27),
+        last_finished_at=NOW - timedelta(hours=27),
+    )
+
+    decision = scheduler.decide_startup_run(state, NOW, False, MSK_CRON)
+
+    assert decision.run is True
+    assert "missed" in decision.reason
+
+
+def test_nothing_missed_means_waiting_for_the_schedule() -> None:
+    """A failed extra run after today's 04:00: the next scheduled one is tomorrow."""
+    state = _last_run(
+        last_status=scheduler.STATUS_FAILED,
+        last_trigger=TRIGGER_LOW_POOL,
+        last_started_at=NOW - timedelta(hours=1),
+        last_finished_at=NOW - timedelta(hours=1),
+    )
+
+    assert scheduler.decide_startup_run(state, NOW, False, MSK_CRON).run is False
+
+
+def test_an_interval_schedule_is_never_caught_up() -> None:
+    state = _last_run(last_status=scheduler.STATUS_OK, last_started_at=NOW - timedelta(days=3))
+
+    assert scheduler.decide_startup_run(state, NOW, False, IntervalTrigger(minutes=60)).run is False
+
+
+def test_a_new_database_collects_at_start_only_with_run_on_start() -> None:
+    assert scheduler.decide_startup_run(_last_run(), NOW, False, MSK_CRON).run is False
+    assert scheduler.decide_startup_run(_last_run(), NOW, True, MSK_CRON).run is True
+
+
+async def test_restart_soon_after_a_collection_does_not_collect(session_maker, caplog) -> None:
+    now = datetime.now(UTC)
+    await _set_state(
+        session_maker,
+        last_status=scheduler.STATUS_OK,
+        last_trigger=TRIGGER_SCHEDULE,
+        last_started_at=now - timedelta(hours=2),
+        last_finished_at=now - timedelta(hours=2),
+    )
+    provider = Provider()
+    runner = _runner(session_maker, provider, Reports(), run_on_start=True)
+
+    with caplog.at_level("INFO", logger="src.services.scheduler"):
+        await runner.start()
+        await asyncio.sleep(0.05)
+        await runner.shutdown()
+
+    assert provider.calls == 0
+    assert "Collection at start skipped: the last successful collection finished at" in caplog.text
+
+
+async def test_restart_long_after_the_last_collection_collects(session_maker, caplog) -> None:
+    now = datetime.now(UTC)
+    await _set_state(
+        session_maker,
+        last_status=scheduler.STATUS_OK,
+        last_trigger=TRIGGER_SCHEDULE,
+        last_started_at=now - timedelta(hours=21),
+        last_finished_at=now - timedelta(hours=21),
+    )
+    provider = Provider()
+    reports = Reports()
+    runner = _runner(session_maker, provider, reports, run_on_start=True)
+
+    with caplog.at_level("INFO", logger="src.services.scheduler"):
+        await runner.start()
+        try:
+            await asyncio.wait_for(reports.received.wait(), timeout=5)
+        finally:
+            await runner.shutdown()
+
+    assert provider.calls == 1
+    assert "Collection at start: COLLECT_RUN_ON_START" in caplog.text

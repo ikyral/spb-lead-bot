@@ -38,7 +38,7 @@ if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this modul
     from src.services.lead_enrich import EnrichStats, UsefulLead
     from src.services.lead_import import ImportResult
     from src.services.niche_priority import NicheStats
-    from src.services.scheduler import CollectorStatus, DgisKeyStatus, RunReport
+    from src.services.scheduler import CollectorStatus, DgisKeyStatus, RequestUsage, RunReport
 
 # Telegram's limit for one message.
 MAX_MESSAGE_LENGTH: int = 4096
@@ -273,6 +273,28 @@ def format_funnel_stats(
         lines.append(f"• 💼 В работе: <b>{counts[STATUS_IN_WORK]}</b>")
     if pool_stats is not None:
         lines += _pool_stats_lines(pool_stats)
+    return "\n".join(lines)
+
+
+def format_request_usage(usage: RequestUsage) -> str:
+    """API requests for /leads_stats. The daily counter of the collector covers 2GIS and OSM together."""
+    lines = [
+        "\n🔌 <b>Запросы к API:</b>",
+        f"• Сбор за сутки (2ГИС и OSM): <b>{usage.collector_today}</b> из {usage.collector_day_limit}",
+    ]
+    key = usage.dgis_key
+    if key is None:
+        lines.append("• 2ГИС: ключ не задан, запросов нет")
+        return "\n".join(lines)
+    lines.append(f"• 2ГИС всего с этим ключом: <b>{key.used}</b>")
+    if key.limit:
+        left = max(0, key.limit - key.used)
+        lines.append(
+            f"• Осталось по лимиту ключа: <b>{left}</b> из {key.limit} "
+            f"(сбор остановится, когда останется резерв {key.reserve})"
+        )
+    else:
+        lines.append("• Лимит ключа не задан (DGIS_REQUEST_LIMIT)")
     return "\n".join(lines)
 
 

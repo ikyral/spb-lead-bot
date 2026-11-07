@@ -21,6 +21,7 @@ from src.bot.formatters import (
     format_funnel_stats,
     format_issued_lead,
     format_msk_time,
+    format_request_usage,
     format_user_label,
     site_verdict_text,
 )
@@ -31,6 +32,7 @@ from src.bot.keyboards import (
     get_issued_lead_keyboard,
     get_next_batch_keyboard,
 )
+from src.bot.texts import BATCH_BUSY_TEXT, BATCH_BUSY_TOAST, BATCH_STARTED_TOAST
 from src.config import settings
 from src.database.models import Lead
 from src.database.repo import (
@@ -65,6 +67,8 @@ MAX_SEND_ATTEMPTS: int = 3
 # Chats receiving a batch right now: a double tap must not hand out a second batch, and two
 # batches at once would break the limit of a group. Leads never overlap in any case: see issue_next_leads.
 _issuing_to: set[int] = set()
+# Batches being sent in the background; the set keeps a strong reference to each task.
+_background_batches: set[asyncio.Task[None]] = set()
 # Starts the question 'which phone?': a reply to such a message is the answer to it.
 PHONE_PROMPT_PREFIX: str = "✏️ Телефон для лида"
 _PHONE_PROMPT_TTL_SECONDS: float = 3600.0
@@ -219,32 +223,77 @@ async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> N
     await _answer_safely(message, "\n".join(lines), get_next_batch_keyboard() if in_group else None)
 
 
-@router.message(F.text.regexp(NEXT_BATCH_BUTTON_RE))
-@router.message(Command("next_leads"))
 async def handle_next_batch(message: Message, collector_runner: CollectorRunner) -> None:
-    """Hand out the next batch of leads."""
+    """Hand out the next batch of leads and wait until it is sent."""
     chat_id = message.chat.id
-    if chat_id in _issuing_to:
-        await _answer_safely(message, "⏳ Предыдущая пачка ещё отправляется.")
+    if not _reserve_chat(chat_id):
+        await _answer_safely(message, BATCH_BUSY_TEXT)
         return
-    _issuing_to.add(chat_id)
     try:
         await _issue_batch(message, collector_runner)
     finally:
         _issuing_to.discard(chat_id)
 
 
+def _reserve_chat(chat_id: int) -> bool:
+    """Take the chat for one batch. No await between the check and the mark: a double tap finds it taken."""
+    if chat_id in _issuing_to:
+        return False
+    _issuing_to.add(chat_id)
+    return True
+
+
+def _start_reserved_batch(message: Message, collector_runner: CollectorRunner) -> None:
+    """Send a batch to a chat already reserved, without waiting: about a second per card is Telegram's limit."""
+
+    async def run() -> None:
+        try:
+            await _issue_batch(message, collector_runner)
+        except Exception:
+            # The leads that did not go out are back in the pool already (see _issue_batch).
+            logger.exception("Handing out a batch to chat %s failed", message.chat.id)
+        finally:
+            _issuing_to.discard(message.chat.id)
+
+    task = asyncio.create_task(run())
+    _background_batches.add(task)
+    task.add_done_callback(_background_batches.discard)
+
+
+async def stop_background_batches() -> None:
+    """On shutdown: stop sending, so the leads not yet sent go back to the pool before the database closes."""
+    tasks = list(_background_batches)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        logger.info("Stopping %d batch(es) being sent", len(tasks))
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@router.message(F.text.regexp(NEXT_BATCH_BUTTON_RE))
+@router.message(Command("next_leads"))
+async def handle_next_batch_request(message: Message, collector_runner: CollectorRunner) -> None:
+    """The bottom button or /next_leads: the batch goes out in the background, updates keep coming."""
+    if not _reserve_chat(message.chat.id):
+        await _answer_safely(message, BATCH_BUSY_TEXT)
+        return
+    _start_reserved_batch(message, collector_runner)
+
+
 @router.callback_query(F.data == "panel:next")
 async def handle_next_batch_button(callback: CallbackQuery, collector_runner: CollectorRunner) -> None:
-    """The same from an inline button: it reaches the bot even with privacy mode on."""
+    """The same from an inline button: answered at once, the batch goes out in the background."""
     if not isinstance(callback.message, Message):
         await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
         return
-    if callback.message.chat.id in _issuing_to:
-        await callback.answer("Предыдущая пачка ещё отправляется")
-        return
-    await callback.answer()
-    await handle_next_batch(callback.message, collector_runner)
+    reserved = _reserve_chat(callback.message.chat.id)
+    try:
+        await callback.answer(BATCH_STARTED_TOAST if reserved else BATCH_BUSY_TOAST)
+    except TelegramAPIError as exc:
+        # 'query is too old' and the like: the batch is still sent, only the spinner on the button stays.
+        logger.warning("Could not answer the 'next batch' button: %s", exc)
+    if reserved:
+        _start_reserved_batch(callback.message, collector_runner)
 
 
 @router.callback_query(F.data.startswith("ls:"))
@@ -412,25 +461,28 @@ async def handle_rescore(message: Message) -> None:
 
 
 @router.callback_query(F.data == "panel:stats")
-async def handle_stats_button(callback: CallbackQuery) -> None:
+async def handle_stats_button(callback: CallbackQuery, collector_runner: CollectorRunner) -> None:
     """The same as /leads_stats from an inline button."""
     if not isinstance(callback.message, Message):
         await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
         return
     await callback.answer()
-    await handle_leads_stats(callback.message)
+    await handle_leads_stats(callback.message, collector_runner)
 
 
 @router.message(Command("leads_stats"))
-async def handle_leads_stats(message: Message) -> None:
-    """Show how many leads are in the pool and what happened to the handed-out ones."""
+async def handle_leads_stats(message: Message, collector_runner: CollectorRunner | None = None) -> None:
+    """Show how many leads are in the pool, what happened to the handed-out ones and the API requests spent."""
     async with async_session_maker() as session:
         counts = await get_status_counts(session)
         contact_counts = await get_contact_status_counts(session)
         issued_total = await count_issued_leads(session)
         pool_stats = await get_pool_stats(session)
+    text = format_funnel_stats(counts, contact_counts, issued_total, pool_stats)
+    if collector_runner is not None:
+        text += "\n" + format_request_usage(await collector_runner.get_request_usage())
     await message.answer(
-        format_funnel_stats(counts, contact_counts, issued_total, pool_stats),
+        text,
         reply_markup=get_full_export_keyboard(),
         parse_mode="HTML",
     )

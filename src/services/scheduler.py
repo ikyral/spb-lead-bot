@@ -9,6 +9,8 @@ from datetime import UTC, date, datetime, timedelta
 from enum import Enum
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.base import BaseTrigger
+from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.database.models import CollectorState, ImportLog, ProviderState
@@ -40,6 +42,8 @@ TOPUP_COOLDOWN: timedelta = timedelta(hours=1)
 POOL_REMINDER_INTERVAL: timedelta = timedelta(days=1)
 # A run missed by up to this much (bot busy or just restarted) still starts.
 MISFIRE_GRACE_SECONDS: int = 3600
+# A restart (each deployment is one) does not collect again this soon after a success or a scheduled start.
+STARTUP_RECENT_RUN: timedelta = timedelta(hours=20)
 # Docker gives a container 10 s to stop; a run cancelled after this wait is safe,
 # because leads are saved in one transaction and the next run finds the same places.
 SHUTDOWN_WAIT_SECONDS: float = 5.0
@@ -57,6 +61,7 @@ STATUS_PARTIAL = "partial"
 STATUS_FAILED = "failed"
 STATUS_INTERRUPTED = "interrupted"
 STATUS_DAILY_LIMIT = "daily_limit"
+_SUCCESS_STATUSES: frozenset[str] = frozenset({STATUS_OK, STATUS_PARTIAL})
 
 
 class TopupOutcome(Enum):
@@ -101,6 +106,15 @@ class DgisKeyStatus:
     request_contacts: bool
 
 
+@dataclass(frozen=True)
+class RequestUsage:
+    """API requests from the counters in the database, for the statistics."""
+
+    collector_today: int  # all providers of the collector, 2GIS and OSM together
+    collector_day_limit: int
+    dgis_key: DgisKeyStatus | None  # None without a 2GIS key
+
+
 @dataclass
 class CollectorStatus:
     """Snapshot for the status command."""
@@ -123,6 +137,41 @@ class CollectorStatus:
     batch_size: int = 0
     dgis_key: DgisKeyStatus | None = None
     pool_stats: PoolStats | None = None
+
+
+@dataclass(frozen=True)
+class StartupDecision:
+    """Whether to collect right after the bot starts, and why: the reason goes to the log."""
+
+    run: bool
+    reason: str
+
+
+def _ago(moment: datetime, now: datetime) -> str:
+    hours = (now - moment).total_seconds() / 3600
+    return f"{moment.isoformat(timespec='minutes')} ({hours:.1f} h ago)"
+
+
+def decide_startup_run(
+    state: CollectorState, now: datetime, run_on_start: bool, trigger: BaseTrigger
+) -> StartupDecision:
+    """
+    Collect at start only if nothing collected lately: by the last run stored in the database.
+
+    A scheduled run missed while the bot was off (cron only) is caught up, at most once in STARTUP_RECENT_RUN.
+    """
+    finished, started = state.last_finished_at, state.last_started_at
+    if state.last_status in _SUCCESS_STATUSES and finished is not None and now - finished < STARTUP_RECENT_RUN:
+        return StartupDecision(False, f"the last successful collection finished at {_ago(finished, now)}")
+    if state.last_trigger == TRIGGER_SCHEDULE and started is not None and now - started < STARTUP_RECENT_RUN:
+        return StartupDecision(False, f"a scheduled collection already started at {_ago(started, now)}")
+    if run_on_start:
+        return StartupDecision(True, "COLLECT_RUN_ON_START is on and nothing was collected lately")
+    if isinstance(trigger, CronTrigger) and started is not None:
+        missed = trigger.get_next_fire_time(None, started)
+        if missed is not None and missed <= now:
+            return StartupDecision(True, f"the scheduled run of {missed.isoformat(timespec='minutes')} was missed")
+    return StartupDecision(False, "nothing was missed, the next run is by the schedule")
 
 
 ReportCallback = Callable[[RunReport], Awaitable[None]]
@@ -180,6 +229,7 @@ class CollectorRunner:
                 state.last_status = STATUS_INTERRUPTED
             if state.auto_enabled is not None:
                 self._auto_enabled = state.auto_enabled
+            startup = decide_startup_run(state, datetime.now(UTC), self._run_on_start, self._config.trigger)
             await session.commit()
         if self._dgis_quota is not None:
             await self._dgis_quota.sync_key()
@@ -187,8 +237,12 @@ class CollectorRunner:
         schedule_args: dict[str, datetime | None] = {}
         if not self._auto_enabled:
             schedule_args["next_run_time"] = None  # added paused
-        elif self._run_on_start:
-            schedule_args["next_run_time"] = datetime.now(self._config.timezone)
+        elif not self.external_mode:
+            if startup.run:
+                schedule_args["next_run_time"] = datetime.now(self._config.timezone)
+                logger.info("Collection at start: %s", startup.reason)
+            else:
+                logger.info("Collection at start skipped: %s", startup.reason)
         if not self.external_mode:
             self._scheduler.add_job(
                 self._run_scheduled,
@@ -401,6 +455,18 @@ class CollectorRunner:
             batch_size=self._batch_size,
             dgis_key=self._dgis_key_status(provider_states.get(DGIS_PROVIDER_NAME)),
             pool_stats=pool_stats,
+        )
+
+    async def get_request_usage(self) -> RequestUsage:
+        """Requests spent today and with the key: two reads, light enough for every /leads_stats."""
+        async with self._session_maker() as session:
+            state = await get_collector_state(session)
+            provider_states = await get_provider_states(session)
+            await session.commit()
+        return RequestUsage(
+            collector_today=self._requests_used_today(state),
+            collector_day_limit=self._config.max_requests_per_day,
+            dgis_key=self._dgis_key_status(provider_states.get(DGIS_PROVIDER_NAME)),
         )
 
     def _dgis_key_status(self, state: ProviderState | None) -> DgisKeyStatus | None:
