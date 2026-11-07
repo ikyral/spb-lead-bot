@@ -8,6 +8,14 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from src.bot.texts import (
+    BATCH_BUTTON_TEXT,
+    ENRICH_BUTTON_TEXT,
+    HELP_BUTTON_TEXT,
+    MORE_ENRICH_BUTTON_TEXT,
+    REQUEST_FILE_BUTTON_TEXT,
+    STATS_BUTTON_TEXT,
+)
 from src.config import settings
 from src.database.models import CONTACT_CONTACTED, CONTACT_NO_ANSWER, CONTACT_REJECTED, CONTACT_REPLIED, Lead
 from src.services.providers.base import SPB_DISTRICTS, TARGET_CATEGORIES
@@ -24,6 +32,7 @@ from src.services.twogis_links import twogis_card_url, twogis_search_url
 DISTRICT_NAMES: list[str] = list(SPB_DISTRICTS.keys())
 CATEGORY_KEYS: list[str] = list(TARGET_CATEGORIES.keys())
 
+ENRICH_REQUEST_CALLBACK: str = "enrich:request"
 # Shown when callback data is malformed, forged, or from a keyboard of an older bot version.
 STALE_BUTTON_TEXT: str = "Кнопка устарела. Откройте меню заново."
 OPEN_CARD_BUTTON_TEXT: str = "🔎 Открыть в 2ГИС"
@@ -43,21 +52,32 @@ LEAD_OUTCOMES: dict[str, str] = {
 
 
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
-    """Return the persistent bottom reply keyboard."""
+    """Return the persistent bottom reply keyboard, for private chats only."""
+    # The buttons of the older menu ('🔍 Поиск по СПб' and others) still work when typed or left on a screen.
     return ReplyKeyboardMarkup(
         keyboard=[
-            [
-                KeyboardButton(text="🔍 Поиск по СПб"),
-                KeyboardButton(text="📋 Новые лиды"),
-            ],
-            [
-                KeyboardButton(text="💼 В работе"),
-                KeyboardButton(text="📊 Статистика и CSV"),
-            ],
-            [KeyboardButton(text=f"📦 Следующие {settings.LEADS_BATCH_SIZE}")],
+            [KeyboardButton(text=BATCH_BUTTON_TEXT), KeyboardButton(text=ENRICH_BUTTON_TEXT)],
+            [KeyboardButton(text=STATS_BUTTON_TEXT), KeyboardButton(text=HELP_BUTTON_TEXT)],
         ],
         resize_keyboard=True,
+        is_persistent=True,
     )
+
+
+def get_enrich_request_keyboard() -> InlineKeyboardMarkup:
+    """Under the instruction on enrichment: the same as /export_unknown 30."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text=REQUEST_FILE_BUTTON_TEXT, callback_data=ENRICH_REQUEST_CALLBACK)
+    return builder.as_markup()
+
+
+def get_after_enrichment_keyboard() -> InlineKeyboardMarkup:
+    """Under the result of an enrichment: look at the leads, or take the next file to check."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text=BATCH_BUTTON_TEXT, callback_data="panel:next")
+    builder.button(text=MORE_ENRICH_BUTTON_TEXT, callback_data=ENRICH_REQUEST_CALLBACK)
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 def get_districts_keyboard() -> InlineKeyboardMarkup:

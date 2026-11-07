@@ -21,10 +21,11 @@ from src.bot import notifier as notifier_module
 from src.bot.chats import is_group_chat
 from src.bot.formatters import format_issued_lead, format_user_label
 from src.bot.handlers import collector as collector_handlers
-from src.bot.handlers import issue, leads, search
+from src.bot.handlers import fallback, issue, leads, menu, search
 from src.bot.keyboards import get_group_panel_keyboard
 from src.bot.middlewares import NO_ACCESS_TEXT, AdminOnlyMiddleware
 from src.bot.notifier import AdminNotifier
+from src.bot.texts import ADMIN_ONLY_TEXT
 from src.config import Settings
 from src.database.models import CONTACT_CONTACTED, STATUS_ISSUED, STATUS_NEW, Lead
 from src.database.repo import count_issued_leads, count_new_leads, issue_next_leads
@@ -282,7 +283,8 @@ def telegram(monkeypatch: pytest.MonkeyPatch) -> Iterator[MagicMock]:
     guard = AdminOnlyMiddleware()
     dp.message.middleware(guard)
     dp.callback_query.middleware(guard)
-    routers = (search.router, leads.router, issue.router, collector_handlers.router)
+    # The hint on unclear text is last, as in main.py: the group tests check that it stays out of groups.
+    routers = (search.router, leads.router, issue.router, collector_handlers.router, menu.router, fallback.router)
     for router in routers:
         dp.include_router(router)
     calls.dp = dp
@@ -355,10 +357,12 @@ async def test_each_member_is_answered_separately(telegram) -> None:
     assert telegram.reply.await_count == 2
 
 
-async def test_stranger_in_private_gets_no_answer_as_before(telegram) -> None:
-    await _feed(telegram, _message_update(1, STRANGER, STRANGER, "/collect_now"))
+async def test_stranger_in_private_is_told_once_that_the_command_is_not_available(telegram) -> None:
+    for update_id in range(1, 4):
+        await _feed(telegram, _message_update(update_id, STRANGER, STRANGER, "/collect_now"))
+    telegram.answer.assert_awaited_once_with(ADMIN_ONLY_TEXT)
     telegram.reply.assert_not_awaited()
-    telegram.answer.assert_not_awaited()
+    assert not telegram.runner.start_in_background.called
 
 
 async def test_ordinary_group_messages_are_ignored_completely(telegram) -> None:

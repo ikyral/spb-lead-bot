@@ -6,6 +6,7 @@ import html
 from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+from src.bot.texts import HELP_HIDDEN_TEXT, HELP_SECTIONS, REQUEST_FILE_HINT, UNKNOWN_NICHE_TEXT, HelpSection
 from src.config import settings
 from src.database.models import (
     CONTACT_CONTACTED,
@@ -16,6 +17,7 @@ from src.database.models import (
     STATUS_NEW,
     Lead,
 )
+from src.services.lead_file import REQUEST_FILE_ERROR
 from src.services.providers.base import TARGET_CATEGORIES, niche_title
 from src.services.site_status import (
     SITE_DEAD,
@@ -307,7 +309,8 @@ def format_import_report(result: ImportResult) -> str:
     """Format the outcome of an imported file. The file name comes from outside and is escaped."""
     name = html.escape(result.file_name)
     if not result.ok:
-        return f"⚠️ <b>Импорт не выполнен</b>: {name}\n\nПричина: {html.escape(result.error or 'неизвестна')}"
+        text = f"⚠️ <b>Импорт не выполнен</b>: {name}\n\nПричина: {html.escape(result.error or 'неизвестна')}"
+        return f"{text}\n\n{REQUEST_FILE_HINT}" if result.error == REQUEST_FILE_ERROR else text
     if result.enrichment is not None:
         return _enrichment_messages(name, result.total, result.enrichment, result.pool_size)[0]
     lines = [
@@ -393,12 +396,34 @@ def _enrichment_messages(name: str, total: int, stats: EnrichStats, pool_size: i
 
 def format_unknown_niche(text: str, niches: list[str]) -> list[str]:
     """What to say about a niche that does not exist, with the list of those that do."""
-    header = (
-        f"Неизвестная ниша: {html.escape(text[:_NICHE_NAME_LIMIT])}\n"
-        "Использование: /export_unknown [N] [ниша]\n\n<b>Ниши:</b>"
-    )
+    example = html.escape(niches[0] if niches else next(iter(TARGET_CATEGORIES)))
+    header = UNKNOWN_NICHE_TEXT.format(niche=html.escape(text[:_NICHE_NAME_LIMIT]), example=example)
+    header += "\n\n<b>Ниши:</b>"
     lines = [f"• <code>{html.escape(niche)}</code> — {html.escape(niche_title(niche))}" for niche in niches]
     return split_messages([header, *lines], separator="\n")
+
+
+def format_help(is_admin: bool, sections: tuple[HelpSection, ...] = HELP_SECTIONS) -> list[str]:
+    """/help in as many messages as it takes. Admin commands are marked 🔒 and shown to admins only."""
+    blocks = ["❓ <b>Команды бота</b>"]
+    hidden = False
+    for section in sections:
+        commands = [command for command in section.commands if is_admin or not command.admin]
+        hidden = hidden or len(commands) < len(section.commands)
+        if not commands:
+            continue
+        blocks.append(f"\n<b>{html.escape(section.title)}</b>")
+        for command in commands:
+            mark = "🔒 " if command.admin else ""
+            blocks.append(
+                f"{mark}/{command.command} — {html.escape(command.help)}\n"
+                f"   Пример: <code>{html.escape(command.example)}</code>"
+            )
+        if section.note:
+            blocks.append(html.escape(section.note))
+    if hidden:
+        blocks.append(f"\n{HELP_HIDDEN_TEXT}")
+    return split_messages(blocks, separator="\n")
 
 
 def format_niche_table(stats: list[NicheStats]) -> list[str]:

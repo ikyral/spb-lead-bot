@@ -19,6 +19,7 @@ from src import collector_cli
 from src.bot.formatters import format_import_report, format_issued_lead
 from src.bot.handlers import imports
 from src.bot.middlewares import AdminOnlyMiddleware
+from src.bot.texts import ADMIN_ONLY_TEXT
 from src.config import PROJECT_ROOT, Settings
 from src.database.models import (
     CONTACT_REJECTED,
@@ -1198,7 +1199,7 @@ async def test_export_command_keeps_to_the_limits(session_maker, monkeypatch, ar
 async def test_export_command_explains_a_wrong_number(session_maker, monkeypatch, args: str) -> None:
     message = await _export_command(session_maker, monkeypatch, args)
 
-    assert "Использование" in message.answer.await_args.args[0]
+    assert "Пример: <code>/export_unknown 30" in message.answer.await_args.args[0]
     message.answer_document.assert_not_awaited()
 
 
@@ -1217,7 +1218,9 @@ async def test_export_command_goes_through_the_bot_and_only_for_admins(
     monkeypatch.setattr(imports, "async_session_maker", session_maker)
     monkeypatch.setattr("src.bot.middlewares.settings", Settings(_env_file=None, ADMIN_TG_ID=100))
     send = AsyncMock()
+    answer = AsyncMock()
     monkeypatch.setattr(Message, "answer_document", send)
+    monkeypatch.setattr(Message, "answer", answer)
     dp = Dispatcher()
     dp.message.middleware(AdminOnlyMiddleware())
     dp.include_router(imports.router)
@@ -1236,6 +1239,8 @@ async def test_export_command_goes_through_the_bot_and_only_for_admins(
         dp.sub_routers.clear()
 
     assert send.await_count == (1 if answered else 0)
+    if not answered:
+        answer.assert_awaited_once_with(ADMIN_ONLY_TEXT)
     if answered:
         assert json.loads(send.await_args.args[0].data.decode("utf-8"))["count"] == 1
 
