@@ -414,7 +414,15 @@ async def test_the_file_still_has_only_the_agreed_fields(session_maker, monkeypa
 
     message = await _export(session_maker, monkeypatch, None)
 
-    assert set(_sent(message)["records"][0]) == {"source", "source_id", "source_url", "name", "district"}
+    assert set(_sent(message)["records"][0]) == {
+        "source",
+        "source_id",
+        "source_url",
+        "name",
+        "district",
+        "address",
+        "category",
+    }
 
 
 # ---------- /niches ----------

@@ -370,13 +370,19 @@ def _useful_leads_blocks(useful: list[UsefulLead]) -> list[str]:
 
 
 def _enrichment_messages(name: str, total: int, stats: EnrichStats, pool_size: int) -> list[str]:
+    title = "Поиск в Google обработан" if stats.from_google else "Карточки 2ГИС обработаны"
     lines = [
-        f"🔎 <b>Карточки 2ГИС обработаны</b>: {name}\n",
+        f"🔎 <b>{title}</b>: {name}\n",
         f"• В файле: <b>{total}</b>",
         f"• Обновлено лидов: <b>{stats.updated}</b>",
         f"• Сайтов найдено: <b>{stats.sites_found}</b> (рабочих: {stats.sites_working}, "
         f"не открываются: {stats.sites_dead}, соцсеть или агрегатор: {stats.sites_social})",
-        f"• Без сайта в карточке: <b>{stats.no_site}</b>",
+    ]
+    if stats.from_google:
+        lines.append(f"• Сайт и соцсети в поиске не найдены: <b>{stats.not_found}</b>")
+    if stats.no_site or not stats.from_google:
+        lines.append(f"• Без сайта в карточке: <b>{stats.no_site}</b>")
+    lines += [
         f"• Не распознано: <b>{stats.not_recognized}</b>",
         f"• Проигнорировано: <b>{stats.ignored_total}</b>",
     ]

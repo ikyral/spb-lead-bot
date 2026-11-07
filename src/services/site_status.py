@@ -34,6 +34,8 @@ SOURCE_SEARCH: str = "search"
 SOURCE_MANUAL: str = "manual"
 # A person let the collector read the card of the organization on 2GIS.
 SOURCE_2GIS_CARD: str = "2gis_card"
+# A person let the collector look for the organization on Google and on the site it found there.
+SOURCE_GOOGLE: str = "google"
 
 # The order of handing out: every later group goes only after the earlier ones.
 ISSUE_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -68,7 +70,10 @@ def confidence_of_check(site_status: str, source: str) -> str | None:
     How far to trust a status from a source or from checking the listed address.
 
     A listed address was really opened. The absence of a site is weaker: OSM often just lacks the tag.
+    A search engine is weaker still: a page it found is only similar by name, and not finding one proves little.
     """
+    if source == SOURCE_GOOGLE:
+        return CONFIDENCE_LOW if site_status == SITE_NOT_FOUND else CONFIDENCE_MEDIUM
     if site_status in (SITE_DEAD, SITE_SOCIAL_ONLY, SITE_FOUND):
         return CONFIDENCE_HIGH
     if site_status == SITE_NO_SITE:

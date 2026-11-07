@@ -1151,7 +1151,7 @@ def _sent_document(message: MagicMock) -> dict:
 async def test_export_command_sends_a_versioned_file_without_personal_data(session_maker, monkeypatch) -> None:
     await _add(
         session_maker,
-        _lead(1, phone="+79210000000", email="owner@example.com", contact_status_by="Иван", address="секретный адрес"),
+        _lead(1, phone="+79210000000", email="owner@example.com", contact_status_by="Иван", address="Невский пр., 1"),
     )
 
     message = await _export_command(session_maker, monkeypatch, None)
@@ -1162,9 +1162,19 @@ async def test_export_command_sends_a_versioned_file_without_personal_data(sessi
     assert document["count"] == 1
     assert document["checksum"] == compute_checksum(document["records"])
     assert document["exported_at"]
-    assert set(document["records"][0]) == {"source", "source_id", "source_url", "name", "district"}
+    assert set(document["records"][0]) == {
+        "source",
+        "source_id",
+        "source_url",
+        "name",
+        "district",
+        "address",
+        "category",
+    }
+    # The public address of the organization is there for a search on Google; contacts and who worked on it are not.
+    assert document["records"][0]["address"] == "Невский пр., 1"
     text = json.dumps(document, ensure_ascii=False)
-    for secret in ("+7921", "owner@", "Иван", "секретный"):
+    for secret in ("+7921", "owner@", "Иван"):
         assert secret not in text
     # What the bot gives away, a collector accepts.
     assert parse_enrich_request(json.dumps(document).encode(), MAX_BYTES).items[0].firm_number == "70001"

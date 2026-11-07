@@ -12,7 +12,13 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.database.repo import get_unexported_leads, mark_leads_exported
-from src.services.lead_file import KIND_ENRICH_RESULT, build_document, build_enrich_document, lead_to_record
+from src.services.lead_file import (
+    ENRICH_SCHEMA_VERSION,
+    KIND_ENRICH_RESULT,
+    build_document,
+    build_enrich_document,
+    lead_to_record,
+)
 
 
 @dataclass
@@ -44,10 +50,16 @@ def _write_file(export_dir: Path, now: datetime, document: dict[str, Any], prefi
     return path
 
 
-def write_enrich_result(export_dir: Path, records: list[dict[str, Any]]) -> Path:
+def write_enrich_result(
+    export_dir: Path,
+    records: list[dict[str, Any]],
+    prefix: str = "enrich",
+    schema_version: int = ENRICH_SCHEMA_VERSION,
+) -> Path:
     """Write a result of reading cards. Not async on purpose: it also runs while the run is being cancelled."""
     now = datetime.now().astimezone()
-    return _write_file(export_dir, now, build_enrich_document(KIND_ENRICH_RESULT, records, now), prefix="enrich")
+    document = build_enrich_document(KIND_ENRICH_RESULT, records, now, schema_version)
+    return _write_file(export_dir, now, document, prefix=prefix)
 
 
 async def export_new_leads(
