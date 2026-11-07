@@ -11,11 +11,16 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from src.bot.texts import (
     BATCH_BUTTON_TEXT,
     CRM_STATS_BUTTON_TEXT,
+    DIGEST_DONE_BUTTON_TEXT,
+    DIGEST_LATER_BUTTON_TEXT,
+    DIGEST_REJECT_BUTTON_TEXT,
     ENRICH_BUTTON_TEXT,
     HELP_BUTTON_TEXT,
     IN_WORK_BUTTON_TEXT,
     MORE_ENRICH_BUTTON_TEXT,
     NEW_LEADS_BUTTON_TEXT,
+    REMIND_BUTTON_TEXT,
+    REMIND_DAYS,
     REQUEST_FILE_BUTTON_TEXT,
     SEARCH_MENU_BUTTON_TEXT,
     STATS_BUTTON_TEXT,
@@ -196,7 +201,11 @@ def get_lead_status_keyboard(
     site_verdict: bool | None = None,
     twogis_search: str | None = None,
 ) -> InlineKeyboardMarkup:
-    """Buttons of a handed-out lead: its card or a search, statuses with the current one marked, its site, a phone."""
+    """
+    Buttons of a handed-out lead: its card or a search, statuses with the current one marked, its site, a phone.
+
+    After 'Написал' a row of reminders: in 1, 3 or 7 days.
+    """
     builder = InlineKeyboardBuilder()
     rows: list[int] = []
     if card_url:
@@ -209,6 +218,10 @@ def get_lead_status_keyboard(
         text = f"✅ {title}" if status == current_status else title
         builder.button(text=text, callback_data=f"ls:{lead_id}:{status}")
     rows += [2, 2]
+    if current_status == CONTACT_CONTACTED:
+        for days in REMIND_DAYS:
+            builder.button(text=REMIND_BUTTON_TEXT.format(days=days), callback_data=f"rm:{lead_id}:{days}")
+        rows.append(len(REMIND_DAYS))
     if search_url:
         yes_text, no_text = _site_verdict_titles(site_verdict)
         builder.button(text=yes_text, callback_data=f"sv:{lead_id}:yes")
@@ -235,6 +248,16 @@ def get_issued_lead_keyboard(lead: Lead) -> InlineKeyboardMarkup:
         site_verdict=manual_site_verdict(lead),
         twogis_search=twogis_search_url(lead.name, lead.address, settings.SCRAPER_CITY_SLUG) if needs_a_look else None,
     )
+
+
+def get_followup_keyboard(lead_id: int) -> InlineKeyboardMarkup:
+    """Under a lead of the morning plan: reminded, refused, or later."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text=DIGEST_DONE_BUTTON_TEXT, callback_data=f"dg:{lead_id}:done")
+    builder.button(text=DIGEST_REJECT_BUTTON_TEXT, callback_data=f"dg:{lead_id}:reject")
+    builder.button(text=DIGEST_LATER_BUTTON_TEXT, callback_data=f"dg:{lead_id}:later")
+    builder.adjust(2, 1)
+    return builder.as_markup()
 
 
 def get_next_batch_keyboard() -> InlineKeyboardMarkup:

@@ -10,6 +10,17 @@ from typing import TYPE_CHECKING
 from src.bot.texts import (
     CONTACT_SOURCE_TITLES,
     CONTACTS_TITLE,
+    DIGEST_API_LEFT_LINE,
+    DIGEST_API_USED_LINE,
+    DIGEST_DUE_LINE,
+    DIGEST_FOLLOWUPS_TITLE,
+    DIGEST_NO_FOLLOWUPS,
+    DIGEST_STALE_LINE,
+    DIGEST_TITLE,
+    DIGEST_UNKNOWN_LINE,
+    DIGEST_USEFUL_LINE,
+    FOLLOWUP_DUE_LINE,
+    FOLLOWUP_WRITTEN_LINE,
     HELP_HIDDEN_TEXT,
     HELP_SECTIONS,
     OUTREACH_DEAD_SITE_TEMPLATE,
@@ -17,6 +28,7 @@ from src.bot.texts import (
     OUTREACH_OFFER_FALLBACK,
     OUTREACH_SIGNATURE_FALLBACK,
     OUTREACH_TITLE,
+    REMIND_LINE,
     REQUEST_FILE_HINT,
     UNKNOWN_NICHE_TEXT,
     HelpSection,
@@ -59,6 +71,7 @@ from src.services.twogis_links import twogis_card_url, twogis_search_url
 if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this module must not import
     from src.database.models import ImportLog, ProviderState
     from src.database.repo import PoolStats
+    from src.services.digest import DigestData
     from src.services.lead_enrich import EnrichStats, UsefulLead
     from src.services.lead_import import ImportResult
     from src.services.niche_priority import NicheStats
@@ -121,6 +134,13 @@ _TRIGGER_TITLES: dict[str, str] = {
 def format_user_label(username: str | None, full_name: str) -> str:
     """How to name a person in a chat: @username if there is one, otherwise the name."""
     return f"@{username}" if username else full_name
+
+
+def format_msk_date(value: datetime) -> str:
+    """DD.MM in Moscow time: the day of a reminder."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(_MSK).strftime("%d.%m")
 
 
 def format_msk_time(value: datetime | None) -> str:
@@ -244,6 +264,8 @@ def _issued_card(lead: Lead, field_limit: int, max_links: int, with_outreach: bo
     if lead.contact_status and lead.contact_status_by:
         status += f" — {field(lead.contact_status_by)}"
     lines.append(f"📌 <b>Статус:</b> {status}")
+    if lead.remind_at is not None and lead.contact_status not in (CONTACT_REPLIED, CONTACT_REJECTED):
+        lines.append(REMIND_LINE.format(date=format_msk_date(lead.remind_at)))
     outreach = outreach_text(lead) if with_outreach else None
     if outreach:
         lines += ["", OUTREACH_TITLE, f"<code>{html.escape(outreach)}</code>"]
@@ -311,6 +333,59 @@ def outreach_text(lead: Lead) -> str | None:
     # One pass over the template: braces in a name or in the settings stay text, an unknown placeholder stays too.
     text = _PLACEHOLDER_RE.sub(lambda match: values.get(match.group(1), match.group(0)), template)
     return " ".join(text.split())
+
+
+def format_digest_summary(data: DigestData) -> str:
+    """The numbers of the morning plan. Short by itself: the leads to remind about go in messages of their own."""
+    counts = data.counts
+    lines = [
+        DIGEST_TITLE.format(date=data.day.strftime("%d.%m")),
+        "",
+        DIGEST_USEFUL_LINE.format(count=counts.useful_in_pool),
+        DIGEST_UNKNOWN_LINE.format(count=counts.waiting_for_enrichment),
+        DIGEST_DUE_LINE.format(count=counts.reminders_due),
+        DIGEST_STALE_LINE.format(days=data.followup_after_days, count=counts.written_no_answer),
+    ]
+    key = data.usage.dgis_key if data.usage is not None else None
+    if key is not None and key.limit:
+        lines.append(DIGEST_API_LEFT_LINE.format(left=max(0, key.limit - key.used), limit=key.limit))
+    elif key is not None:
+        lines.append(DIGEST_API_USED_LINE.format(used=key.used))
+    lines.append("")
+    lines.append(DIGEST_FOLLOWUPS_TITLE.format(count=len(data.followups)) if data.followups else DIGEST_NO_FOLLOWUPS)
+    return "\n".join(lines)
+
+
+def _followup(lead: Lead, mark: str | None, max_links: int, field_limit: int) -> str:
+    def field(value: str) -> str:
+        return html.escape(value[:field_limit])
+
+    lines = [f"🏢 <b>{field(lead.name)}</b>", f"🏷 {field(lead.rubric or niche_title(lead.category))}"]
+    if lead.phone:
+        lines.append(f"📞 {field(lead.phone)}")
+    contacts = format_contacts_line(lead_contacts(lead.contact_links, lead.email, lead.socials)[:max_links])
+    if contacts:
+        lines.append(contacts)
+    if lead.contact_status == CONTACT_CONTACTED and lead.contact_status_at is not None:
+        lines.append(FOLLOWUP_WRITTEN_LINE.format(date=format_msk_date(lead.contact_status_at)))
+    if lead.remind_at is not None:
+        lines.append(FOLLOWUP_DUE_LINE.format(date=format_msk_date(lead.remind_at)))
+    url = twogis_card_url(lead.source_url) or twogis_search_url(lead.name, lead.address, settings.SCRAPER_CITY_SLUG)
+    title = "Открыть в 2ГИС" if twogis_card_url(lead.source_url) else "Найти в 2ГИС"
+    lines.append(f'🗺 <a href="{html.escape(url, quote=True)}">{title}</a>')
+    if mark:
+        lines.append(mark)
+    return "\n".join(lines)
+
+
+def format_followup(lead: Lead, mark: str | None = None) -> str:
+    """A lead to remind about, in a message of its own under which go its buttons. `mark` says what was done."""
+    text = ""
+    for max_links, field_limit in ((5, _REPORT_FIELD_LIMIT), (2, 100), (0, 100)):
+        text = _followup(lead, mark, max_links, field_limit)
+        if len(text) <= MAX_MESSAGE_LENGTH:
+            break
+    return text
 
 
 def _pool_stats_lines(stats: PoolStats) -> list[str]:

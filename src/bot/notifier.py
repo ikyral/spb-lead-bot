@@ -7,7 +7,7 @@ from collections.abc import Iterable
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramMigrateToChat, TelegramRetryAfter
-from aiogram.types import LinkPreviewOptions
+from aiogram.types import InlineKeyboardMarkup, LinkPreviewOptions
 
 from src.bot.formatters import format_collection_report, format_import_messages
 from src.services.lead_import import ImportResult
@@ -21,6 +21,11 @@ _SILENT_TRIGGERS: frozenset[str] = frozenset({TRIGGER_SCHEDULE, TRIGGER_LOW_POOL
 _MAX_ATTEMPTS: int = 3
 # A longer wait is not worth holding up the end of a collection run: the message is dropped.
 _MAX_FLOOD_WAIT_SECONDS: float = 60.0
+# Several messages to one chat: Telegram asks for about one a second, and no more than 20 a minute to a group.
+_SEQUENCE_PAUSE_SECONDS: float = 1.0
+_GROUP_SEQUENCE_PAUSE_SECONDS: float = 3.1
+
+Outgoing = tuple[str, InlineKeyboardMarkup | None]
 
 
 class AdminNotifier:
@@ -49,8 +54,32 @@ class AdminNotifier:
         targets = [target for target in self._targets() if target != exclude_chat]
         await asyncio.gather(*(self._send_to(target, text, silent, link_preview) for target in targets))
 
-    async def _send_to(self, target: int, text: str, silent: bool, link_preview: bool = True) -> None:
-        """Never raises: a problem with one chat must not reach other chats or the collection."""
+    async def send_sequence(self, messages: list[Outgoing], silent: bool = False) -> None:
+        """
+        Several messages with their buttons, in order, to every target at once.
+
+        A chat that refuses one message (the bot was blocked, the chat is gone) gets none of the rest;
+        the other chats are not affected.
+        """
+        await asyncio.gather(*(self._send_sequence_to(target, messages, silent) for target in self._targets()))
+
+    async def _send_sequence_to(self, target: int, messages: list[Outgoing], silent: bool) -> None:
+        pause = _GROUP_SEQUENCE_PAUSE_SECONDS if target < 0 else _SEQUENCE_PAUSE_SECONDS
+        for index, (text, markup) in enumerate(messages):
+            if index:
+                await asyncio.sleep(pause)
+            if not await self._send_to(target, text, silent, link_preview=False, reply_markup=markup):
+                return
+
+    async def _send_to(
+        self,
+        target: int,
+        text: str,
+        silent: bool,
+        link_preview: bool = True,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> bool:
+        """Never raises: a problem with one chat must not reach other chats or the collection. True if sent."""
         migrated = False
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
@@ -60,28 +89,30 @@ class AdminNotifier:
                     parse_mode="HTML",
                     disable_notification=silent,
                     link_preview_options=None if link_preview else LinkPreviewOptions(is_disabled=True),
+                    reply_markup=reply_markup,
                 )
             except TelegramMigrateToChat as exc:
                 new_target = exc.migrate_to_chat_id
                 if not self._remember_migration(target, new_target):
-                    return
+                    return False
                 target, migrated = new_target, True
             except TelegramRetryAfter as exc:
                 if attempt == _MAX_ATTEMPTS or exc.retry_after > _MAX_FLOOD_WAIT_SECONDS:
                     logger.warning("Message to chat %s dropped: Telegram asks to wait %s s", target, exc.retry_after)
-                    return
+                    return False
                 await asyncio.sleep(exc.retry_after + 1)
             except TelegramAPIError as exc:
                 logger.warning("Failed to notify chat %s: %s", target, exc)
-                return
+                return False
             except Exception:
                 logger.exception("Failed to notify chat %s", target)
-                return
+                return False
             else:
                 if migrated:
                     await self._tell_about_migration(target)
-                return
+                return True
         logger.warning("Message to chat %s dropped after %d attempts", target, _MAX_ATTEMPTS)
+        return False
 
     def _remember_migration(self, old_id: int, new_id: int) -> bool:
         """

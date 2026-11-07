@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     # Empty = a neutral text from src/bot/texts.py. Longer values are cut, so a card stays within Telegram's limit.
     OUTREACH_OFFER: str = ""
     OUTREACH_SIGNATURE: str = ""
+    # The morning plan for admins: reminders, the pool, what waits for enrichment. Time in COLLECT_TIMEZONE.
+    DIGEST_ENABLED: bool = True
+    DIGEST_TIME: str = "09:30"
+    # 'Wrote to them' with no answer for this many days counts as time to remind, without a reminder set.
+    FOLLOWUP_AFTER_DAYS: int = Field(default=3, ge=1, le=60)
 
     # Automatic collection. Search targets and the schedule are validated by src.services.collector.
     # false, or an empty COLLECT_PROVIDERS, means leads come from an external collector as files.
@@ -149,6 +154,19 @@ class Settings(BaseSettings):
         if value == "" and info.field_name and info.field_name != "COLLECT_PROVIDERS":
             return cls.model_fields[info.field_name].get_default(call_default_factory=True)
         return value
+
+    @field_validator("DIGEST_TIME")
+    @classmethod
+    def _check_digest_time(cls, value: str) -> str:
+        hours, _, minutes = value.strip().partition(":")
+        if not (hours.isdecimal() and minutes.isdecimal() and int(hours) < 24 and int(minutes) < 60):
+            raise ValueError(f"DIGEST_TIME must be HH:MM, for example 09:30, got {value!r}")
+        return f"{int(hours):02d}:{int(minutes):02d}"
+
+    @property
+    def digest_hour_minute(self) -> tuple[int, int]:
+        hours, minutes = self.DIGEST_TIME.split(":")
+        return int(hours), int(minutes)
 
     @field_validator("OUTREACH_OFFER", "OUTREACH_SIGNATURE")
     @classmethod

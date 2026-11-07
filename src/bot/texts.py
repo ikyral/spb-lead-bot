@@ -104,6 +104,31 @@ OUTREACH_TITLE: str = "✉️ <b>Первое сообщение</b> (нажми
 CONTACTS_TITLE: str = "🔗 <b>Контакты:</b>"
 CONTACT_SOURCE_TITLES: dict[str, str] = {"2gis": "2ГИС", "google": "Google"}
 
+# ---------- reminders and the morning plan ----------
+REMIND_DAYS: tuple[int, ...] = (1, 3, 7)
+REMIND_BUTTON_TEXT: str = "⏰ {days} д"
+REMIND_SET_TOAST: str = "Напомню {date}"
+REMIND_LINE: str = "⏰ <b>Напомню:</b> {date}"
+REMIND_IMPOSSIBLE_TOAST: str = "Напоминание не нужно: лид ответил или отказал"
+DIGEST_LATER_DAYS: int = 3
+DIGEST_DONE_BUTTON_TEXT: str = "✅ Напомнил"
+DIGEST_REJECT_BUTTON_TEXT: str = "❌ Отказ"
+DIGEST_LATER_BUTTON_TEXT: str = f"⏰ Отложить на {DIGEST_LATER_DAYS} дня"
+DIGEST_DONE_MARK: str = "✅ Напомнили {date}"
+DIGEST_REJECT_MARK: str = "❌ Отказ"
+DIGEST_LATER_MARK: str = "⏰ Отложено до {date}"
+DIGEST_TITLE: str = "☀️ <b>План на {date}</b>"
+DIGEST_USEFUL_LINE: str = "• 📦 Полезных лидов в запасе (без сайта и сайт не открывается): <b>{count}</b>"
+DIGEST_UNKNOWN_LINE: str = "• 🔎 Ждут обогащения (о сайте ничего не известно): <b>{count}</b>"
+DIGEST_DUE_LINE: str = "• ⏰ Напоминаний на сегодня: <b>{count}</b>"
+DIGEST_STALE_LINE: str = "• ✍️ «Написал» без ответа дольше {days} дн.: <b>{count}</b>"
+DIGEST_API_LEFT_LINE: str = "• 🔌 Запросов к API 2ГИС осталось: <b>{left}</b> из {limit}"
+DIGEST_API_USED_LINE: str = "• 🔌 Запросов к API 2ГИС израсходовано: <b>{used}</b>, лимит не задан"
+DIGEST_FOLLOWUPS_TITLE: str = "<b>Пора напомнить ({count}):</b> ниже по сообщению на каждого."
+DIGEST_NO_FOLLOWUPS: str = "Напоминать сегодня некому."
+FOLLOWUP_WRITTEN_LINE: str = "✍️ Написали {date}"
+FOLLOWUP_DUE_LINE: str = "⏰ Напомнить было {date}"
+
 
 @dataclass(frozen=True)
 class CommandHelp:
@@ -141,6 +166,12 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
                 "/next_leads",
             ),
             CommandHelp("rescore", "Пересчитать оценки", "Пересчитать оценку лидов в запасе", "/rescore"),
+            CommandHelp(
+                "today",
+                "План на день",
+                "План на день: запас, напоминания и кому пора напомнить, как утренняя сводка",
+                "/today",
+            ),
         ),
     ),
     HelpSection(

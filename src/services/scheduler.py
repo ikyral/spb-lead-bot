@@ -285,6 +285,26 @@ class CollectorRunner:
         """Run another periodic task of the bot here. Call before start()."""
         self._scheduler.add_job(job, "interval", seconds=seconds, id=job_id, max_instances=1, coalesce=True)
 
+    def add_daily_job(self, job: Callable[[], Awaitable[object]], hour: int, minute: int, job_id: str) -> None:
+        """
+        Run a task of the bot every day at this time of COLLECT_TIMEZONE, and once right after the start.
+
+        The run at start lets a task catch up on a day the bot was off at that time: the task itself
+        decides whether it is too late or already done. Call before start().
+        """
+        self._scheduler.add_job(
+            job,
+            "cron",
+            hour=hour,
+            minute=minute,
+            timezone=self._config.timezone,
+            id=job_id,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=MISFIRE_GRACE_SECONDS,
+        )
+        self._scheduler.add_job(job, "date", id=f"{job_id}_at_start", max_instances=1)
+
     async def shutdown(self, wait_seconds: float = SHUTDOWN_WAIT_SECONDS) -> None:
         """Stop with the bot: give a running collection a moment to finish, then cancel it."""
         if self._scheduler.running:
