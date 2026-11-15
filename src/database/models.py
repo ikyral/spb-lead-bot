@@ -55,6 +55,8 @@ class Lead(Base):
         Index("ix_leads_crm_status_score", "crm_status", "score"),
         # Handing out batches: WHERE crm_status = 'new' ORDER BY created_at, id.
         Index("ix_leads_crm_status_created_at", "crm_status", "created_at"),
+        # Returning expired leads to the pool: WHERE owner_user_id IS NOT NULL AND owned_until <= ?.
+        Index("ix_leads_owner_owned_until", "owner_user_id", "owned_until"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -103,6 +105,16 @@ class Lead(Base):
     contact_links: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # When to remind the owner about a lead they wrote to; cleared by 'replied' and 'rejected'.
     remind_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    # Ownership (see README, «Закрепление лидов»). Telegram IDs do not fit 32 bits.
+    # Who got the lead in a batch.
+    issued_to_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    # Who works the lead and until when; owned_until NULL with an owner = no expiry ('replied', 'rejected').
+    owner_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    owner_name: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
+    owned_until: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    # An enrichment request file keeps its leads for that person until reserved_until; compared at read time.
+    reserved_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    reserved_until: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
 
     @property
     def has_contacts(self) -> bool:

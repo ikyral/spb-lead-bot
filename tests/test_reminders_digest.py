@@ -455,9 +455,16 @@ async def test_a_plan_button_of_a_lead_that_answered_meanwhile_changes_nothing(d
 
 async def test_today_sends_the_plan_to_the_chat_it_was_asked_in(session_maker, monkeypatch) -> None:
     monkeypatch.setattr(reminders.asyncio, "sleep", AsyncMock())
-    await _add(session_maker, _issued(1, remind_at=NOW - timedelta(hours=1)), _issued(2, written_days_ago=6))
+    # /today shows the leads of the person who asked; a lead of someone else stays out.
+    await _add(
+        session_maker,
+        _issued(1, remind_at=NOW - timedelta(hours=1), owner_user_id=ADMIN),
+        _issued(2, written_days_ago=6, owner_user_id=ADMIN),
+        _issued(3, written_days_ago=6, owner_user_id=ADMIN + 1),
+    )
     message = MagicMock(spec=Message)
     message.chat = Chat(id=ADMIN, type="private")
+    message.from_user = User(id=ADMIN, is_bot=False, first_name="Admin")
     message.answer = AsyncMock()
     digest = _digest(session_maker, MagicMock(), NOW)
 

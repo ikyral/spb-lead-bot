@@ -58,7 +58,8 @@ async def handle_enrich_request_button(callback: CallbackQuery) -> None:
         await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
         return
     await callback.answer("Готовлю файл запроса…")
-    await send_enrich_request(callback.message, EXPORT_UNKNOWN_DEFAULT)
+    # The message of the button is the bot's own: the file is reserved for the person who pressed.
+    await send_enrich_request(callback.message, EXPORT_UNKNOWN_DEFAULT, user_id=callback.from_user.id)
 
 
 @router.message(F.text == STATS_BUTTON_TEXT)

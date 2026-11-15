@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     DIGEST_TIME: str = "09:30"
     # 'Wrote to them' with no answer for this many days counts as time to remind, without a reminder set.
     FOLLOWUP_AFTER_DAYS: int = Field(default=3, ge=1, le=60)
+    # 'Wrote to them' keeps a lead with that person for this many days; then it goes back to the pool.
+    LEAD_OWNERSHIP_DAYS: int = Field(default=30, ge=1)
+    # Leads of an enrichment request file (/export_unknown) stay with that person, hidden from others, this many hours.
+    EXPORT_RESERVE_HOURS: int = Field(default=6, ge=1)
 
     # Automatic collection. Search targets and the schedule are validated by src.services.collector.
     # false, or an empty COLLECT_PROVIDERS, means leads come from an external collector as files.
@@ -207,6 +211,19 @@ class Settings(BaseSettings):
     def admin_ids(self) -> frozenset[int]:
         """Telegram IDs allowed to use the bot."""
         return frozenset({self.ADMIN_TG_ID, *(int(part) for part in self.ADMIN_TG_IDS.split(",") if part.strip())})
+
+    @property
+    def owner_id(self) -> int:
+        """The owner of the bot (ADMIN_TG_ID): may do everything, including what operators may not."""
+        return self.ADMIN_TG_ID
+
+    @property
+    def operator_ids(self) -> frozenset[int]:
+        """The other admins (ADMIN_TG_IDS): they take and work leads, but do not manage the bot."""
+        return self.admin_ids - {self.ADMIN_TG_ID}
+
+    def is_owner(self, user_id: int | None) -> bool:
+        return user_id is not None and self.ADMIN_TG_ID > 0 and user_id == self.ADMIN_TG_ID
 
     @field_validator("DB_URL")
     @classmethod

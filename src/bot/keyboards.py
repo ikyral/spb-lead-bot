@@ -22,6 +22,7 @@ from src.bot.texts import (
     REMIND_BUTTON_TEXT,
     REMIND_DAYS,
     REQUEST_FILE_BUTTON_TEXT,
+    RETURN_TO_POOL_BUTTON_TEXT,
     SEARCH_MENU_BUTTON_TEXT,
     STATS_BUTTON_TEXT,
 )
@@ -204,7 +205,7 @@ def get_lead_status_keyboard(
     """
     Buttons of a handed-out lead: its card or a search, statuses with the current one marked, its site, a phone.
 
-    After 'Написал' a row of reminders: in 1, 3 or 7 days.
+    After 'Написал' a row of reminders: in 1, 3 or 7 days. Last, '↩️ Вернуть в пул'.
     """
     builder = InlineKeyboardBuilder()
     rows: list[int] = []
@@ -231,6 +232,9 @@ def get_lead_status_keyboard(
     if can_add_phone:
         builder.button(text=ADD_PHONE_BUTTON_TEXT, callback_data=f"lp:{lead_id}")
         rows.append(1)
+    # The owner gives the lead back; otherwise it returns by itself when the ownership runs out.
+    builder.button(text=RETURN_TO_POOL_BUTTON_TEXT, callback_data=f"lr:{lead_id}")
+    rows.append(1)
     builder.adjust(*rows)
     return builder.as_markup()
 

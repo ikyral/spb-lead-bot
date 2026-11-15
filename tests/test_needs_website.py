@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, User
 
 from src.bot.formatters import format_funnel_stats, format_issued_lead, format_lead_card, generate_pitch_text
 from src.bot.handlers import issue, leads
@@ -163,6 +163,7 @@ async def _save(session_maker, **overrides) -> int:
 
 def _callback(data: str) -> MagicMock:
     callback = MagicMock(spec=CallbackQuery)
+    callback.from_user = User(id=1, is_bot=False, first_name="Admin")
     callback.data = data
     callback.answer = AsyncMock()
     callback.message = MagicMock(spec=Message)

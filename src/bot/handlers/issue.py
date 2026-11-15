@@ -23,6 +23,7 @@ from src.bot.formatters import (
     format_msk_time,
     format_request_usage,
     format_user_label,
+    owned_by_text,
     site_verdict_text,
 )
 from src.bot.keyboards import (
@@ -32,21 +33,36 @@ from src.bot.keyboards import (
     get_issued_lead_keyboard,
     get_next_batch_keyboard,
 )
-from src.bot.texts import BATCH_BUSY_TEXT, BATCH_BUSY_TOAST, BATCH_STARTED_TOAST
+from src.bot.texts import (
+    BATCH_BUSY_TEXT,
+    BATCH_BUSY_TOAST,
+    BATCH_STARTED_TOAST,
+    NOT_YOUR_LEAD_TEXT,
+    RESERVED_BY_OTHERS_LINE,
+    RETURN_NOT_ALLOWED_TEXT,
+    RETURNED_MARK,
+    RETURNED_TOAST,
+)
 from src.config import settings
 from src.database.models import Lead
 from src.database.repo import (
+    OUTCOME_MISSING,
+    OUTCOME_OK,
+    OUTCOME_OWNED,
+    OUTCOME_SAME,
     IssueRules,
     async_session_maker,
+    change_contact_status,
     count_issued_leads,
     count_new_leads,
+    count_reserved_for_others,
     count_unknown_site_leads,
     get_contact_status_counts,
     get_pool_stats,
     get_status_counts,
     issue_next_leads,
+    release_lead,
     return_undelivered_leads,
-    set_contact_status,
     set_lead_phone,
     set_site_verdict,
 )
@@ -67,6 +83,8 @@ MAX_SEND_ATTEMPTS: int = 3
 # Chats receiving a batch right now: a double tap must not hand out a second batch, and two
 # batches at once would break the limit of a group. Leads never overlap in any case: see issue_next_leads.
 _issuing_to: set[int] = set()
+# People receiving a batch right now: one person in two chats must not run two batches at once either.
+_issuing_users: set[int] = set()
 # Batches being sent in the background; the set keeps a strong reference to each task.
 _background_batches: set[asyncio.Task[None]] = set()
 # Starts the question 'which phone?': a reply to such a message is the answer to it.
@@ -156,11 +174,12 @@ def _describe_held_back(held_back: int, unknown: int, rules: IssueRules, size: i
     return lines
 
 
-async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> None:
+async def _issue_batch(message: Message, collector_runner: CollectorRunner, user_id: int | None = None) -> None:
+    """Hand out a batch to `user_id`: the person who pressed (from a callback, not the bot's own message)."""
     size = settings.LEADS_BATCH_SIZE
     rules = IssueRules(issue_unknown=settings.LEADS_ISSUE_UNKNOWN, max_niche_share=settings.LEADS_MAX_NICHE_SHARE)
     async with async_session_maker() as session:
-        leads = await issue_next_leads(session, size, rules)
+        leads = await issue_next_leads(session, size, rules, user_id=user_id)
 
     in_group = is_group_chat(message)
     pause = GROUP_MESSAGE_PAUSE_SECONDS if in_group else MESSAGE_PAUSE_SECONDS
@@ -194,6 +213,7 @@ async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> N
     async with async_session_maker() as session:
         pool_size = await count_new_leads(session)
         unknown = await count_unknown_site_leads(session)
+        reserved = await count_reserved_for_others(session, user_id)
 
     delivered = len(leads) - len(undelivered)
     lines: list[str] = []
@@ -202,7 +222,9 @@ async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> N
     if undelivered:
         lines.append(f"⚠️ Не удалось отправить: <b>{len(undelivered)}</b>, они остались в запасе.")
     # What was held back by the rules: leads that failed to be delivered are reported above.
-    held_back = pool_size - len(undelivered) if len(leads) < size else 0
+    held_back = max(0, pool_size - len(undelivered) - reserved) if len(leads) < size else 0
+    if reserved and len(leads) < size:
+        lines.append(RESERVED_BY_OTHERS_LINE.format(count=reserved))
     if len(leads) < size:
         if not leads:
             lines.append("📭 Подходящих лидов сейчас нет." if held_back else "📭 Новых лидов в запасе нет.")
@@ -223,37 +245,53 @@ async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> N
     await _answer_safely(message, "\n".join(lines), get_next_batch_keyboard() if in_group else None)
 
 
+def _user_id(message: Message) -> int | None:
+    return message.from_user.id if message.from_user is not None else None
+
+
 async def handle_next_batch(message: Message, collector_runner: CollectorRunner) -> None:
     """Hand out the next batch of leads and wait until it is sent."""
-    chat_id = message.chat.id
-    if not _reserve_chat(chat_id):
+    chat_id, user_id = message.chat.id, _user_id(message)
+    if not _reserve_chat(chat_id, user_id):
         await _answer_safely(message, BATCH_BUSY_TEXT)
         return
     try:
-        await _issue_batch(message, collector_runner)
+        await _issue_batch(message, collector_runner, user_id=user_id)
     finally:
-        _issuing_to.discard(chat_id)
+        _release_chat(chat_id, user_id)
 
 
-def _reserve_chat(chat_id: int) -> bool:
-    """Take the chat for one batch. No await between the check and the mark: a double tap finds it taken."""
-    if chat_id in _issuing_to:
+def _reserve_chat(chat_id: int, user_id: int | None = None) -> bool:
+    """
+    Take the chat and the person for one batch. No await between the check and the mark: a double tap finds them taken.
+
+    Leads never overlap anyway (see issue_next_leads); this keeps one batch per chat and per person at a time.
+    """
+    if chat_id in _issuing_to or (user_id is not None and user_id in _issuing_users):
         return False
     _issuing_to.add(chat_id)
+    if user_id is not None:
+        _issuing_users.add(user_id)
     return True
 
 
-def _start_reserved_batch(message: Message, collector_runner: CollectorRunner) -> None:
+def _release_chat(chat_id: int, user_id: int | None) -> None:
+    _issuing_to.discard(chat_id)
+    if user_id is not None:
+        _issuing_users.discard(user_id)
+
+
+def _start_reserved_batch(message: Message, collector_runner: CollectorRunner, user_id: int | None) -> None:
     """Send a batch to a chat already reserved, without waiting: about a second per card is Telegram's limit."""
 
     async def run() -> None:
         try:
-            await _issue_batch(message, collector_runner)
+            await _issue_batch(message, collector_runner, user_id=user_id)
         except Exception:
             # The leads that did not go out are back in the pool already (see _issue_batch).
             logger.exception("Handing out a batch to chat %s failed", message.chat.id)
         finally:
-            _issuing_to.discard(message.chat.id)
+            _release_chat(message.chat.id, user_id)
 
     task = asyncio.create_task(run())
     _background_batches.add(task)
@@ -274,10 +312,11 @@ async def stop_background_batches() -> None:
 @router.message(Command("next_leads"))
 async def handle_next_batch_request(message: Message, collector_runner: CollectorRunner) -> None:
     """The bottom button or /next_leads: the batch goes out in the background, updates keep coming."""
-    if not _reserve_chat(message.chat.id):
+    user_id = _user_id(message)
+    if not _reserve_chat(message.chat.id, user_id):
         await _answer_safely(message, BATCH_BUSY_TEXT)
         return
-    _start_reserved_batch(message, collector_runner)
+    _start_reserved_batch(message, collector_runner, user_id)
 
 
 @router.callback_query(F.data == "panel:next")
@@ -286,14 +325,16 @@ async def handle_next_batch_button(callback: CallbackQuery, collector_runner: Co
     if not isinstance(callback.message, Message):
         await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
         return
-    reserved = _reserve_chat(callback.message.chat.id)
+    # The person who pressed, not the author of the message with the button (the bot).
+    user_id = callback.from_user.id
+    reserved = _reserve_chat(callback.message.chat.id, user_id)
     try:
         await callback.answer(BATCH_STARTED_TOAST if reserved else BATCH_BUSY_TOAST)
     except TelegramAPIError as exc:
         # 'query is too old' and the like: the batch is still sent, only the spinner on the button stays.
         logger.warning("Could not answer the 'next batch' button: %s", exc)
     if reserved:
-        _start_reserved_batch(callback.message, collector_runner)
+        _start_reserved_batch(callback.message, collector_runner, user_id)
 
 
 @router.callback_query(F.data.startswith("ls:"))
@@ -304,20 +345,27 @@ async def handle_lead_status(callback: CallbackQuery) -> None:
         await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
         return
     lead_id, status = int(parts[1]), parts[2]
+    user = callback.from_user
+    changed_by = format_user_label(user.username, user.full_name)
 
     async with async_session_maker() as session:
-        lead = await session.get(Lead, lead_id)
-        # Status buttons exist only on leads that were handed out.
-        if lead is None or lead.issued_at is None:
-            await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
-            return
-        if lead.contact_status == status:
-            await callback.answer("Этот статус уже стоит")
-            return
-        user = callback.from_user
-        changed_by = format_user_label(user.username, user.full_name)
-        await set_contact_status(session, lead_id, status, user.id, changed_by)
-        lead.contact_status, lead.contact_status_by = status, changed_by
+        change = await change_contact_status(
+            session, lead_id, status, user.id, changed_by, owner_role=settings.is_owner(user.id)
+        )
+    lead = change.lead
+    # Status buttons exist only on leads that were handed out; an old card may outlive that.
+    if change.outcome == OUTCOME_MISSING or lead is None:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    if change.outcome == OUTCOME_SAME:
+        await callback.answer("Этот статус уже стоит")
+        return
+    if change.outcome == OUTCOME_OWNED:
+        await callback.answer(owned_by_text(lead), show_alert=True)
+        return
+    if change.outcome != OUTCOME_OK:
+        await callback.answer(NOT_YOUR_LEAD_TEXT, show_alert=True)
+        return
 
     await callback.answer(f"Статус: {LEAD_OUTCOMES[status]}")
     if isinstance(callback.message, Message):
@@ -330,6 +378,40 @@ async def handle_lead_status(callback: CallbackQuery) -> None:
             )
         except TelegramAPIError as exc:
             # The status is saved; only the card on the screen is out of date.
+            logger.warning("Could not update the card of lead %s: %s", lead_id, exc)
+
+
+@router.callback_query(F.data.startswith("lr:"))
+async def handle_return_to_pool(callback: CallbackQuery) -> None:
+    """'↩️ Вернуть в пул': the owner of a lead gives it back; the owner of the bot may return anyone's."""
+    parts = (callback.data or "").split(":")
+    if len(parts) != 2 or not parts[1].isdigit():
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    lead_id = int(parts[1])
+    user_id = callback.from_user.id
+    async with async_session_maker() as session:
+        change = await release_lead(session, lead_id, user_id, owner_role=settings.is_owner(user_id))
+    if change.outcome == OUTCOME_MISSING or change.lead is None:
+        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
+        return
+    if change.outcome == OUTCOME_OWNED:
+        await callback.answer(owned_by_text(change.lead), show_alert=True)
+        return
+    if change.outcome != OUTCOME_OK:
+        await callback.answer(RETURN_NOT_ALLOWED_TEXT, show_alert=True)
+        return
+
+    await callback.answer(RETURNED_TOAST)
+    if isinstance(callback.message, Message):
+        try:
+            await callback.message.edit_text(
+                f"🏢 <b>{html.escape(change.lead.name[:300])}</b>\n{RETURNED_MARK}",
+                reply_markup=None,
+                parse_mode="HTML",
+            )
+        except TelegramAPIError as exc:
+            # The lead is back in the pool; only the card on the screen is out of date.
             logger.warning("Could not update the card of lead %s: %s", lead_id, exc)
 
 
@@ -467,12 +549,21 @@ async def handle_stats_button(callback: CallbackQuery, collector_runner: Collect
         await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
         return
     await callback.answer()
-    await handle_leads_stats(callback.message, collector_runner)
+    # The message of the button is the bot's own: who may export is decided by the person who pressed.
+    await handle_leads_stats(callback.message, collector_runner, viewer_id=callback.from_user.id)
 
 
 @router.message(Command("leads_stats"))
-async def handle_leads_stats(message: Message, collector_runner: CollectorRunner | None = None) -> None:
-    """Show how many leads are in the pool, what happened to the handed-out ones and the API requests spent."""
+async def handle_leads_stats(
+    message: Message, collector_runner: CollectorRunner | None = None, viewer_id: int | None = None
+) -> None:
+    """
+    Show how many leads are in the pool, what happened to the handed-out ones and the API requests spent.
+
+    The CSV export under it is for the owner of the bot only (see src/bot/roles.py).
+    """
+    if viewer_id is None and message.from_user is not None:
+        viewer_id = message.from_user.id
     async with async_session_maker() as session:
         counts = await get_status_counts(session)
         contact_counts = await get_contact_status_counts(session)
@@ -483,6 +574,6 @@ async def handle_leads_stats(message: Message, collector_runner: CollectorRunner
         text += "\n" + format_request_usage(await collector_runner.get_request_usage())
     await message.answer(
         text,
-        reply_markup=get_full_export_keyboard(),
+        reply_markup=get_full_export_keyboard() if settings.is_owner(viewer_id) else None,
         parse_mode="HTML",
     )

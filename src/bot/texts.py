@@ -129,6 +129,32 @@ DIGEST_NO_FOLLOWUPS: str = "Напоминать сегодня некому."
 FOLLOWUP_WRITTEN_LINE: str = "✍️ Написали {date}"
 FOLLOWUP_DUE_LINE: str = "⏰ Напомнить было {date}"
 
+# ---------- ownership of leads ----------
+RETURN_TO_POOL_BUTTON_TEXT: str = "↩️ Вернуть в пул"
+# {name} and {until} are escaped by the caller where HTML is used; alerts are plain text.
+OWNED_BY_OTHER_TEXT: str = "Лид в работе у {name}"
+OWNED_UNTIL_SUFFIX: str = " до {until}"
+NOT_YOUR_LEAD_TEXT: str = "Этот лид выдан другому человеку"
+RETURN_NOT_ALLOWED_TEXT: str = "Вернуть в пул может только тот, у кого лид в работе"
+RETURNED_TOAST: str = "Лид возвращён в пул"
+RETURNED_MARK: str = "↩️ <b>Возвращён в пул</b>"
+OWNER_LINE: str = "🔒 <b>В работе у</b> {name}{until}"
+OWNER_NO_EXPIRY: str = " (без срока)"
+RESERVED_BY_OTHERS_LINE: str = "🔒 Ещё <b>{count}</b> лидов зарезервированы выгрузкой другого человека."
+TODAY_OWN_TITLE: str = "<b>Ваши лиды:</b>"
+TODAY_OWN_LINE: str = (
+    "• 🔒 В работе: <b>{active}</b>, 💬 ответили: <b>{replied}</b>, ⌛ истекают за сутки: <b>{expiring}</b>"
+)
+PLAN_TITLE: str = "🗂 <b>Мои лиды</b>"
+PLAN_EMPTY: str = "У вас нет лидов в работе. Нажмите «{button}», чтобы получить новые."
+PLAN_EXPIRING_TITLE: str = "<b>Истекают в ближайшие сутки ({count}):</b>"
+PLAN_EXPIRING_LINE: str = "• {name} — до {until}"
+TEAM_TITLE: str = "👥 <b>Команда</b>"
+TEAM_EMPTY: str = "Ни у кого нет лидов в работе."
+TEAM_LINE: str = "• <b>{name}</b>: в работе {active}, ответили {replied}, истекают за сутки {expiring}"
+AREA_OWNED_LINE: str = "🔒 В работе в этом районе и нише: <b>{count}</b> — {owners}"
+AREA_OWNER_ITEM: str = "{name} ({count}{until})"
+
 
 @dataclass(frozen=True)
 class CommandHelp:
@@ -172,6 +198,8 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
                 "План на день: запас, напоминания и кому пора напомнить, как утренняя сводка",
                 "/today",
             ),
+            CommandHelp("plan", "Мои лиды", "Ваши лиды по статусам и те, что скоро вернутся в пул", "/plan"),
+            CommandHelp("team", "Лиды команды", "Кто сколько лидов ведёт (только владелец бота)", "/team"),
         ),
     ),
     HelpSection(

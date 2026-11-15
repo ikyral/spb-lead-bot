@@ -57,6 +57,8 @@ ADMIN_ONLY_COMMANDS = {
     "next_leads",
     "rescore",
     "today",
+    "plan",
+    "team",
     "export_unknown",
     "leads_stats",
     "niches",
@@ -286,17 +288,18 @@ async def test_a_failed_import_has_no_buttons() -> None:
 async def test_the_button_for_a_request_is_answered_before_the_file_is_built(monkeypatch) -> None:
     order: list[str] = []
 
-    async def send(message, limit, niche_text=None):
-        order.append(f"file {limit}")
+    async def send(message, limit, niche_text=None, user_id=None):
+        order.append(f"file {limit} for {user_id}")
 
     monkeypatch.setattr(menu, "send_enrich_request", send)
     callback = MagicMock(spec=CallbackQuery)
+    callback.from_user = User(id=7, is_bot=False, first_name="U")
     callback.message = MagicMock(spec=Message)
     callback.answer = AsyncMock(side_effect=lambda *args, **kwargs: order.append("answered"))
 
     await menu.handle_enrich_request_button(callback)
 
-    assert order == ["answered", "file 30"]
+    assert order == ["answered", "file 30 for 7"]  # reserved for the person who pressed
 
 
 # ---------- through the dispatcher ----------

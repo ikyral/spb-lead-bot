@@ -41,10 +41,19 @@ class DailyDigest:
         self.enabled = enabled
         self._clock = clock
 
-    async def build(self, now: datetime | None = None) -> list[Outgoing]:
-        """The summary with the 'next batch' button, then a message with buttons for each lead to remind about."""
+    async def build(self, now: datetime | None = None, owner_id: int | None = None) -> list[Outgoing]:
+        """
+        The summary with the 'next batch' button, then a message with buttons for each lead to remind about.
+
+        With owner_id (/today) only the leads of that person; the morning plan is common to everyone.
+        """
         data = await load_digest(
-            self._session_maker, now or self._clock(), self._timezone, self._followup_after_days, self._usage
+            self._session_maker,
+            now or self._clock(),
+            self._timezone,
+            self._followup_after_days,
+            self._usage,
+            owner_id=owner_id,
         )
         messages: list[Outgoing] = [(format_digest_summary(data), get_next_batch_keyboard())]
         messages += [(format_followup(lead), get_followup_keyboard(lead.id)) for lead in data.followups]

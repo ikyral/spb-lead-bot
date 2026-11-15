@@ -467,7 +467,8 @@ def test_card_never_exceeds_the_telegram_limit() -> None:
 def test_status_keyboard_marks_the_current_status_and_fits_telegram_limits() -> None:
     keyboard = get_lead_status_keyboard(12345678, CONTACT_REPLIED)
     buttons = [button for row in keyboard.inline_keyboard for button in row]
-    assert [button.text for button in buttons] == ["Написал", "✅ Ответили", "Отказ", "Нет ответа"]
+    assert [button.text for button in buttons] == ["Написал", "✅ Ответили", "Отказ", "Нет ответа", "↩️ Вернуть в пул"]
+    assert buttons[-1].callback_data == "lr:12345678"
     assert all(len(button.callback_data.encode()) <= 64 for button in buttons)
     assert set(LEAD_OUTCOMES) == {CONTACT_CONTACTED, CONTACT_REPLIED, CONTACT_REJECTED, CONTACT_NO_ANSWER}
 
@@ -864,7 +865,7 @@ def guarded_dispatcher(monkeypatch: pytest.MonkeyPatch) -> Dispatcher:
     dp.sub_routers.clear()
 
 
-@pytest.mark.parametrize(("user_id", "allowed"), [(100, True), (200, True), (999, False)])
+@pytest.mark.parametrize(("user_id", "allowed"), [(100, True), (200, False), (999, False)])
 async def test_commands_reach_only_admins_through_the_real_dispatcher(guarded_dispatcher, user_id, allowed) -> None:
     runner = MagicMock()
     runner.external_mode = False
@@ -895,7 +896,7 @@ async def test_batch_button_with_any_size_reaches_the_handler(guarded_dispatcher
     """A keyboard sent before LEADS_BATCH_SIZE was changed must keep working."""
     calls = []
 
-    async def fake_issue(message, runner):
+    async def fake_issue(message, runner, user_id=None):
         calls.append(message.text)
 
     monkeypatch.setattr(issue, "_issue_batch", fake_issue)
@@ -974,6 +975,13 @@ ROLLBACK_SCHEMA = [
     "ALTER TABLE leads DROP COLUMN is_chain",
     "ALTER TABLE leads DROP COLUMN contact_links",
     "ALTER TABLE leads DROP COLUMN remind_at",
+    "DROP INDEX ix_leads_owner_owned_until",
+    "ALTER TABLE leads DROP COLUMN issued_to_user_id",
+    "ALTER TABLE leads DROP COLUMN owner_user_id",
+    "ALTER TABLE leads DROP COLUMN owner_name",
+    "ALTER TABLE leads DROP COLUMN owned_until",
+    "ALTER TABLE leads DROP COLUMN reserved_by",
+    "ALTER TABLE leads DROP COLUMN reserved_until",
     "DROP TABLE import_log",
     "DROP TABLE collector_state",
     "DROP TABLE provider_state",

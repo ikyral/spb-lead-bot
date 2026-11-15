@@ -22,11 +22,12 @@ from src.bot.handlers.search import router as search_router
 from src.bot.middlewares import AdminOnlyMiddleware
 from src.bot.notifier import AdminNotifier
 from src.config import resolve_path, settings, settings_error
-from src.database.repo import async_session_maker, engine, init_db
+from src.database.repo import async_session_maker, engine, init_db, migrate_legacy_ownership
 from src.services.chains import load_chain_index, refresh_chain_flags
 from src.services.collector import load_collector_config
 from src.services.dgis_key import DgisKeyPolicy, DgisQuota
 from src.services.lead_import import ImportService
+from src.services.ownership import RELEASE_INTERVAL_SECONDS, RELEASE_JOB_ID, release_expired_job
 from src.services.providers.registry import build_providers
 from src.services.providers.twogis import TwoGisOptions
 from src.services.providers.twogis_scraper import ScraperOptions
@@ -57,6 +58,11 @@ async def main() -> None:
         raise SystemExit(f"Invalid configuration in .env / environment: {exc}") from exc
 
     await init_db()
+    # Leads marked 'contacted'/'replied' before ownership existed go to the owner; a no-op on later starts.
+    async with async_session_maker() as session:
+        migrated = await migrate_legacy_ownership(session, settings.ADMIN_TG_ID)
+    if migrated:
+        logger.info("Leads given to the owner (ADMIN_TG_ID) as worked before ownership existed: %d", migrated)
     # Applies a changed list of brands, and marks chains in a database from an older version.
     async with async_session_maker() as session:
         await refresh_chain_flags(session, await load_chain_index(session, settings))
@@ -139,6 +145,12 @@ async def main() -> None:
     dp["daily_digest"] = daily_digest
     if settings.DIGEST_ENABLED:
         collector_runner.add_daily_job(daily_digest.send_scheduled, hour, minute, DIGEST_JOB_ID)
+
+    # The scheduler runs whatever COLLECT_ENABLED is and with an external collector too (CollectorRunner.start).
+    async def release_expired() -> None:
+        await release_expired_job(async_session_maker)
+
+    collector_runner.add_interval_job(release_expired, RELEASE_INTERVAL_SECONDS, RELEASE_JOB_ID)
     if settings.IMPORT_INBOX_INTERVAL_SECONDS > 0:
         collector_runner.add_interval_job(
             import_service.scan_inbox, settings.IMPORT_INBOX_INTERVAL_SECONDS, "import_inbox"

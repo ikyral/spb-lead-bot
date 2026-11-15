@@ -27,7 +27,7 @@ from src.bot.middlewares import NO_ACCESS_TEXT, AdminOnlyMiddleware
 from src.bot.notifier import AdminNotifier
 from src.bot.texts import ADMIN_ONLY_TEXT, BATCH_BUSY_TEXT, BATCH_BUSY_TOAST, BATCH_STARTED_TOAST
 from src.config import Settings
-from src.database.models import CONTACT_CONTACTED, STATUS_ISSUED, STATUS_NEW, Lead
+from src.database.models import CONTACT_CONTACTED, CONTACT_REJECTED, STATUS_ISSUED, STATUS_NEW, Lead
 from src.database.repo import count_issued_leads, count_new_leads, issue_next_leads
 from src.services.collector import CollectResult
 from src.services.scheduler import TopupDecision, TopupOutcome
@@ -309,7 +309,7 @@ async def _feed(telegram: MagicMock, update: Update, bot: MagicMock | None = Non
     [
         (ADMIN, ADMIN, True),  # admin in private
         (GROUP, ADMIN, True),  # admin in a group
-        (GROUP, SECOND_ADMIN, True),  # a second admin in a group
+        (GROUP, SECOND_ADMIN, False),  # an operator (ADMIN_TG_IDS) in a group: collection is for the owner
         (STRANGER, STRANGER, False),  # stranger in private
         (GROUP, STRANGER, False),  # ordinary member of a group
     ],
@@ -589,7 +589,8 @@ async def test_closing_message_in_a_group_offers_the_next_batch(batch_env) -> No
 
 async def test_presses_from_different_chats_at_once_do_not_overlap(batch_env) -> None:
     await _add_leads(batch_env, 9)
-    messages = [_group_message(GROUP), _group_message(OTHER_GROUP, SECOND_ADMIN), _group_message(ADMIN)]
+    # Three people: one person in two chats gets one batch at a time (see the next test).
+    messages = [_group_message(GROUP), _group_message(OTHER_GROUP, SECOND_ADMIN), _group_message(300, 300)]
 
     await asyncio.gather(*(issue.handle_next_batch(message, _runner()) for message in messages))
 
@@ -632,6 +633,7 @@ async def test_two_admins_in_one_group_get_one_batch_at_a_time(batch_env) -> Non
 async def test_inline_button_hands_out_a_batch(batch_env) -> None:
     await _add_leads(batch_env, 3)
     callback = MagicMock(spec=CallbackQuery)
+    callback.from_user = User(id=ADMIN, is_bot=False, first_name="Admin")
     callback.answer = AsyncMock()
     callback.message = _group_message()
 
@@ -644,6 +646,7 @@ async def test_inline_button_hands_out_a_batch(batch_env) -> None:
 
 async def test_inline_button_during_a_batch_only_says_so(batch_env) -> None:
     callback = MagicMock(spec=CallbackQuery)
+    callback.from_user = User(id=ADMIN, is_bot=False, first_name="Admin")
     callback.answer = AsyncMock()
     callback.message = _group_message()
     issue._issuing_to.add(GROUP)
@@ -656,6 +659,7 @@ async def test_inline_button_during_a_batch_only_says_so(batch_env) -> None:
 
 async def test_inline_button_on_an_inaccessible_message_is_stale(batch_env) -> None:
     callback = MagicMock(spec=CallbackQuery)
+    callback.from_user = User(id=ADMIN, is_bot=False, first_name="Admin")
     callback.answer = AsyncMock()
     callback.message = None
     await issue.handle_next_batch_button(callback, _runner())
@@ -756,15 +760,22 @@ async def test_changing_the_status_updates_who_and_same_status_does_not(batch_en
     boris = User(id=SECOND_ADMIN, is_bot=False, first_name="Борис", username="boris")
 
     await issue.handle_lead_status(_status_callback(lead_id, CONTACT_CONTACTED, anna))
-    await issue.handle_lead_status(_status_callback(lead_id, CONTACT_CONTACTED, boris))
-    async with batch_env() as session:
-        assert (await session.get(Lead, lead_id)).contact_status_by == "@anna"
+    again = _status_callback(lead_id, CONTACT_CONTACTED, anna)
+    await issue.handle_lead_status(again)
+    again.answer.assert_awaited_once_with("Этот статус уже стоит")
 
-    await issue.handle_lead_status(_status_callback(lead_id, "replied", boris))
+    await issue.handle_lead_status(_status_callback(lead_id, "replied", anna))
     async with batch_env() as session:
         lead = await session.get(Lead, lead_id)
-    assert (lead.contact_status, lead.contact_status_by) == ("replied", "@boris")
-    assert lead.contact_status_by_id == SECOND_ADMIN
+    assert (lead.contact_status, lead.contact_status_by) == ("replied", "@anna")
+    assert lead.contact_status_by_id == ADMIN
+
+    # Anna owns the lead now: Boris is refused and nothing changes.
+    refused = _status_callback(lead_id, CONTACT_REJECTED, boris)
+    await issue.handle_lead_status(refused)
+    assert refused.answer.await_args.args[0].startswith("Лид в работе у @anna")
+    async with batch_env() as session:
+        assert (await session.get(Lead, lead_id)).contact_status_by == "@anna"
 
 
 def test_card_before_any_status_names_nobody() -> None:
@@ -807,13 +818,14 @@ async def test_button_is_answered_before_the_batch_and_the_handler_does_not_wait
     order: list[str] = []
     release = asyncio.Event()
 
-    async def slow_batch(message, runner) -> None:
+    async def slow_batch(message, runner, user_id=None) -> None:
         order.append("batch started")
         await release.wait()
         order.append("batch done")
 
     monkeypatch.setattr(issue, "_issue_batch", slow_batch)
     callback = MagicMock(spec=CallbackQuery)
+    callback.from_user = User(id=ADMIN, is_bot=False, first_name="Admin")
     callback.answer = AsyncMock(side_effect=lambda *args, **kwargs: order.append("answered"))
     callback.message = _group_message()
 
@@ -831,6 +843,8 @@ async def test_button_is_answered_before_the_batch_and_the_handler_does_not_wait
 async def test_double_tap_hands_out_one_batch(batch_env) -> None:
     await _add_leads(batch_env, 6)  # two batches of 3 in the pool
     first, second = MagicMock(spec=CallbackQuery), MagicMock(spec=CallbackQuery)
+    first.from_user = User(id=ADMIN, is_bot=False, first_name="Admin")
+    second.from_user = User(id=ADMIN, is_bot=False, first_name="Admin")
     for callback in (first, second):
         callback.answer = AsyncMock()
         callback.message = _group_message()
@@ -863,6 +877,7 @@ async def test_double_tap_of_the_bottom_button_hands_out_one_batch(batch_env) ->
 async def test_a_button_too_old_to_answer_still_gets_its_batch(batch_env) -> None:
     await _add_leads(batch_env, 3)
     callback = MagicMock(spec=CallbackQuery)
+    callback.from_user = User(id=ADMIN, is_bot=False, first_name="Admin")
     callback.answer = AsyncMock(side_effect=TelegramBadRequest(method=METHOD, message="query is too old"))
     callback.message = _group_message()
 
