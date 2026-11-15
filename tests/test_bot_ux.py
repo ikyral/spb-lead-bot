@@ -57,6 +57,8 @@ ADMIN_ONLY_COMMANDS = {
     "next_leads",
     "rescore",
     "today",
+    "plan",
+    "team",
     "export_unknown",
     "leads_stats",
     "niches",

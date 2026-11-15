@@ -11,6 +11,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from src.bot.chats import is_group_chat
+from src.bot.formatters import format_owned_in_area
 from src.bot.keyboards import (
     STALE_BUTTON_TEXT,
     get_categories_keyboard,
@@ -21,7 +22,7 @@ from src.bot.keyboards import (
 from src.bot.middlewares import PUBLIC_FLAG, is_admin
 from src.bot.texts import SEARCH_MENU_BUTTON_TEXT, START_ADMIN_TEXT, START_USER_TEXT
 from src.config import settings
-from src.database.repo import async_session_maker
+from src.database.repo import async_session_maker, get_owned_in_area
 from src.services.pipeline import MAX_CSV_PLACES, import_csv_harvest, run_lead_harvest
 from src.services.providers.base import SPB_DISTRICTS, TARGET_CATEGORIES
 
@@ -136,6 +137,22 @@ async def handle_district_chosen(callback: CallbackQuery) -> None:
     )
 
 
+async def _owned_in_area_line(district_name: str, category_key: str) -> str:
+    """
+    '🔒 В работе ...' after a harvest: leads of this district and niche that someone works now.
+
+    The harvest does not say which duplicates it skipped, so these leads are counted instead.
+    Only a hint: a failure here must not hide the result of the harvest.
+    """
+    try:
+        async with async_session_maker() as session:
+            line = format_owned_in_area(await get_owned_in_area(session, district_name, category_key))
+    except Exception:
+        logger.warning("Could not count the leads worked in %s / %s", district_name, category_key, exc_info=True)
+        return ""
+    return f"\n\n{line}" if line else ""
+
+
 @router.callback_query(F.data.startswith("cat:"))
 async def handle_category_chosen(callback: CallbackQuery) -> None:
     """Trigger lead harvest for the selected district and category."""
@@ -173,6 +190,7 @@ async def handle_category_chosen(callback: CallbackQuery) -> None:
             f"• Новых сохранено: <b>{stats['saved_new']}</b>\n"
             f"• Дубликатов пропущено: <b>{stats['duplicates_skipped']}</b>"
         )
+        report += await _owned_in_area_line(district_name, category_key)
     except Exception as exc:
         logger.exception("Error during harvest")
         report = f"⚠️ Ошибка при выполнении сбора: <code>{html.escape(str(exc))}</code>"

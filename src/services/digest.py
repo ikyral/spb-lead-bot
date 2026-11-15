@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.database.models import Lead
-from src.database.repo import DigestCounts, get_digest_counts, get_followups
+from src.database.repo import DigestCounts, OwnerSummary, get_digest_counts, get_followups, get_owner_summary
 from src.services.scheduler import RequestUsage
 
 # Leads to remind about in one plan, each in a message of its own.
@@ -28,6 +28,8 @@ class DigestData:
     followups: list[Lead]
     followup_after_days: int
     usage: RequestUsage | None
+    # The leads of the person who asked (/today); None for the morning plan, which is common to everyone.
+    owner: OwnerSummary | None = None
 
 
 def digest_bounds(now: datetime, timezone: ZoneInfo, followup_after_days: int) -> tuple[datetime, datetime]:
@@ -54,15 +56,21 @@ async def load_digest(
     timezone: ZoneInfo,
     followup_after_days: int,
     usage: UsageSource | None = None,
+    owner_id: int | None = None,
 ) -> DigestData:
+    """The plan for everyone, or with owner_id only the reminders and leads of that person (the pool is shared)."""
     due_before, stale_before = digest_bounds(now, timezone, followup_after_days)
+    owner: OwnerSummary | None = None
     async with session_maker() as session:
-        counts = await get_digest_counts(session, due_before, stale_before)
-        followups = await get_followups(session, due_before, stale_before, FOLLOWUPS_SHOWN)
+        counts = await get_digest_counts(session, due_before, stale_before, owner_id)
+        followups = await get_followups(session, due_before, stale_before, FOLLOWUPS_SHOWN, owner_id)
+        if owner_id is not None:
+            owner = await get_owner_summary(session, owner_id, now)
     return DigestData(
         day=now.astimezone(timezone).date(),
         counts=counts,
         followups=followups,
         followup_after_days=followup_after_days,
         usage=await usage() if usage is not None else None,
+        owner=owner,
     )

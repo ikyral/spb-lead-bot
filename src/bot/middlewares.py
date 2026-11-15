@@ -11,6 +11,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from src.bot.chats import is_group_chat
+from src.bot.roles import is_owner_only
 from src.bot.texts import ADMIN_ONLY_TEXT, NO_ACCESS_TEXT
 from src.config import settings
 
@@ -52,6 +53,10 @@ class AdminOnlyMiddleware(BaseMiddleware):
             from_user = data["event_from_user"]
 
         if from_user and from_user.id in settings.admin_ids:
+            # Operators (ADMIN_TG_IDS) work leads; managing the bot is left to its owner (ADMIN_TG_ID).
+            if not settings.is_owner(from_user.id) and is_owner_only(event):
+                await self._refuse(event, from_user.id, operator=True)
+                return None
             return await handler(event, data)
         if isinstance(event, Message) and not is_group_chat(event) and get_flag(data, PUBLIC_FLAG):
             return await handler(event, data)
@@ -60,22 +65,26 @@ class AdminOnlyMiddleware(BaseMiddleware):
             await self._refuse(event, from_user.id)
         return None
 
-    async def _refuse(self, event: TelegramObject, user_id: int) -> None:
+    async def _refuse(self, event: TelegramObject, user_id: int, operator: bool = False) -> None:
         try:
             if isinstance(event, CallbackQuery):
                 # Only the person who pressed sees an alert, so it cannot flood a group.
                 await event.answer(NO_ACCESS_TEXT, show_alert=True)
-            elif isinstance(event, Message) and self._should_reply(event, user_id):
+            elif isinstance(event, Message) and self._should_reply(event, user_id, allow_files=operator):
                 if is_group_chat(event):
                     await event.reply(NO_ACCESS_TEXT)
                 else:
-                    await event.answer(ADMIN_ONLY_TEXT)
+                    await event.answer(NO_ACCESS_TEXT if operator else ADMIN_ONLY_TEXT)
         except TelegramAPIError as exc:
             logger.warning("Could not refuse access to user %s: %s", user_id, exc)
 
-    def _should_reply(self, message: Message, user_id: int) -> bool:
-        """Only commands and buttons, not files; once in a while, so a refusal cannot be used to flood a chat."""
-        if not getattr(message, "text", None):
+    def _should_reply(self, message: Message, user_id: int, allow_files: bool = False) -> bool:
+        """
+        Only commands and buttons, not files; once in a while, so a refusal cannot be used to flood a chat.
+
+        An operator is told about a refused file too: they are an admin, not a stranger.
+        """
+        if not getattr(message, "text", None) and not allow_files:
             return False
         key = (message.chat.id, user_id)
         now = self._clock()

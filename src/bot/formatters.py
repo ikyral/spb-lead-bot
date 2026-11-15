@@ -8,6 +8,9 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from src.bot.texts import (
+    AREA_OWNED_LINE,
+    AREA_OWNER_ITEM,
+    BATCH_BUTTON_TEXT,
     CONTACT_SOURCE_TITLES,
     CONTACTS_TITLE,
     DIGEST_API_LEFT_LINE,
@@ -28,8 +31,21 @@ from src.bot.texts import (
     OUTREACH_OFFER_FALLBACK,
     OUTREACH_SIGNATURE_FALLBACK,
     OUTREACH_TITLE,
+    OWNED_BY_OTHER_TEXT,
+    OWNED_UNTIL_SUFFIX,
+    OWNER_LINE,
+    OWNER_NO_EXPIRY,
+    PLAN_EMPTY,
+    PLAN_EXPIRING_LINE,
+    PLAN_EXPIRING_TITLE,
+    PLAN_TITLE,
     REMIND_LINE,
     REQUEST_FILE_HINT,
+    TEAM_EMPTY,
+    TEAM_LINE,
+    TEAM_TITLE,
+    TODAY_OWN_LINE,
+    TODAY_OWN_TITLE,
     UNKNOWN_NICHE_TEXT,
     HelpSection,
 )
@@ -70,7 +86,7 @@ from src.services.twogis_links import twogis_card_url, twogis_search_url
 
 if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this module must not import
     from src.database.models import ImportLog, ProviderState
-    from src.database.repo import PoolStats
+    from src.database.repo import OwnerSummary, PoolStats, TeamRow
     from src.services.digest import DigestData
     from src.services.lead_enrich import EnrichStats, UsefulLead
     from src.services.lead_import import ImportResult
@@ -264,6 +280,13 @@ def _issued_card(lead: Lead, field_limit: int, max_links: int, with_outreach: bo
     if lead.contact_status and lead.contact_status_by:
         status += f" — {field(lead.contact_status_by)}"
     lines.append(f"📌 <b>Статус:</b> {status}")
+    if lead.owner_user_id is not None:
+        until = (
+            OWNED_UNTIL_SUFFIX.format(until=format_msk_time(lead.owned_until))
+            if lead.owned_until is not None
+            else OWNER_NO_EXPIRY
+        )
+        lines.append(OWNER_LINE.format(name=field(lead.owner_name or str(lead.owner_user_id)), until=until))
     if lead.remind_at is not None and lead.contact_status not in (CONTACT_REPLIED, CONTACT_REJECTED):
         lines.append(REMIND_LINE.format(date=format_msk_date(lead.remind_at)))
     outreach = outreach_text(lead) if with_outreach else None
@@ -351,9 +374,76 @@ def format_digest_summary(data: DigestData) -> str:
         lines.append(DIGEST_API_LEFT_LINE.format(left=max(0, key.limit - key.used), limit=key.limit))
     elif key is not None:
         lines.append(DIGEST_API_USED_LINE.format(used=key.used))
+    if data.owner is not None:
+        lines += [
+            "",
+            TODAY_OWN_TITLE,
+            TODAY_OWN_LINE.format(
+                active=data.owner.active, replied=data.owner.replied, expiring=data.owner.expiring_total
+            ),
+        ]
     lines.append("")
     lines.append(DIGEST_FOLLOWUPS_TITLE.format(count=len(data.followups)) if data.followups else DIGEST_NO_FOLLOWUPS)
     return "\n".join(lines)
+
+
+def owned_by_text(lead: Lead) -> str:
+    """Plain text for an alert: who works the lead and until when."""
+    text = OWNED_BY_OTHER_TEXT.format(name=lead.owner_name or lead.owner_user_id)
+    if lead.owned_until is not None:
+        text += OWNED_UNTIL_SUFFIX.format(until=format_msk_time(lead.owned_until))
+    return text
+
+
+def format_plan(summary: OwnerSummary) -> str:
+    """/plan: the leads of one person by status, and those whose time runs out within a day."""
+    if not summary.by_status:
+        return f"{PLAN_TITLE}\n\n" + PLAN_EMPTY.format(button=html.escape(BATCH_BUTTON_TEXT))
+    lines = [PLAN_TITLE, ""]
+    for status, title in _CONTACT_STATUS_TITLES.items():
+        if summary.by_status.get(status):
+            lines.append(f"• {title}: <b>{summary.by_status[status]}</b>")
+    if summary.expiring:
+        lines += ["", PLAN_EXPIRING_TITLE.format(count=summary.expiring_total)]
+        lines += [
+            PLAN_EXPIRING_LINE.format(
+                name=html.escape(lead.name[:_REPORT_FIELD_LIMIT]), until=format_msk_time(lead.owned_until)
+            )
+            for lead in summary.expiring
+        ]
+    return "\n".join(lines)
+
+
+def format_team(rows: list[TeamRow]) -> str:
+    """/team: per owner, leads being worked, answered and running out within a day."""
+    if not rows:
+        return f"{TEAM_TITLE}\n\n{TEAM_EMPTY}"
+    lines = [TEAM_TITLE, ""]
+    lines += [
+        TEAM_LINE.format(
+            name=html.escape(row.owner_name[:_REPORT_FIELD_LIMIT]),
+            active=row.active,
+            replied=row.replied,
+            expiring=row.expiring,
+        )
+        for row in rows
+    ]
+    return "\n".join(lines)
+
+
+def format_owned_in_area(owners: list[tuple[str, int, datetime | None]]) -> str | None:
+    """One line after a search: how many leads of this district and niche someone works now, and who."""
+    if not owners:
+        return None
+    items = [
+        AREA_OWNER_ITEM.format(
+            name=html.escape(name[:_REPORT_FIELD_LIMIT]),
+            count=count,
+            until=OWNED_UNTIL_SUFFIX.format(until=format_msk_date(until)) if until is not None else ", без срока",
+        )
+        for name, count, until in owners
+    ]
+    return AREA_OWNED_LINE.format(count=sum(count for _, count, _ in owners), owners=", ".join(items))
 
 
 def _followup(lead: Lead, mark: str | None, max_links: int, field_limit: int) -> str:

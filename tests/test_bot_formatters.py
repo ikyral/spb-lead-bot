@@ -236,6 +236,7 @@ async def test_search_handlers_navigation():
 
     # District back button
     cb = MagicMock(spec=CallbackQuery)
+    cb.from_user = User(id=1, is_bot=False, first_name="Admin")
     cb.answer = AsyncMock()
     cb.message = MagicMock(spec=Message)
     cb.message.edit_text = AsyncMock()
@@ -275,6 +276,7 @@ async def test_category_harvest_error_text_is_html_escaped(monkeypatch: pytest.M
     monkeypatch.setattr(search, "async_session_maker", _DummySessionCtx)
 
     cb = MagicMock(spec=CallbackQuery)
+    cb.from_user = User(id=1, is_bot=False, first_name="Admin")
     cb.data = "cat:Центральный:dentist_clinic"
     cb.answer = AsyncMock()
     cb.message = MagicMock(spec=Message)
@@ -298,6 +300,7 @@ async def test_handlers_survive_inaccessible_message():
     old_msg = InaccessibleMessage(chat=Chat(id=1, type="private"), message_id=10)
 
     cb = MagicMock(spec=CallbackQuery)
+    cb.from_user = User(id=1, is_bot=False, first_name="Admin")
     cb.data = "dist:Центральный"
     cb.answer = AsyncMock()
     cb.message = old_msg
@@ -334,10 +337,16 @@ async def test_export_csv_neutralizes_formula_injection(monkeypatch: pytest.Monk
     async def fake_export(session, crm_status):
         return [evil_lead]
 
+    async def fake_reserve(session, user_id, hours):
+        return await fake_export(session, "new")
+
     monkeypatch.setattr(leads_handlers, "export_leads_by_status", fake_export)
+    # 'Новые' reserves the leads it exports (see reserve_pool_for_export).
+    monkeypatch.setattr(leads_handlers, "reserve_pool_for_export", fake_reserve)
     monkeypatch.setattr(leads_handlers, "async_session_maker", _DummySessionCtx)
 
     cb = MagicMock(spec=CallbackQuery)
+    cb.from_user = User(id=1, is_bot=False, first_name="Admin")
     cb.data = "export:new"
     cb.answer = AsyncMock()
     cb.message = MagicMock(spec=Message)
@@ -386,14 +395,15 @@ async def test_work_action_on_in_work_card_stays_in_in_work_list(monkeypatch: py
     async def fake_render(target, session, crm_status, offset, edit=False):
         rendered.append(crm_status)
 
-    async def fake_update(session, lead_id, new_status):
+    async def fake_update(session, lead_id, new_status, user_id):
         return True
 
     monkeypatch.setattr(leads_handlers, "async_session_maker", FakeSessionCtx)
     monkeypatch.setattr(leads_handlers, "render_lead_page", fake_render)
-    monkeypatch.setattr(leads_handlers, "update_crm_status", fake_update)
+    monkeypatch.setattr(leads_handlers, "update_crm_status_unless_owned", fake_update)
 
     cb = MagicMock(spec=CallbackQuery)
+    cb.from_user = User(id=1, is_bot=False, first_name="Admin")
     cb.data = "lead:7:work:2"
     cb.answer = AsyncMock()
     cb.message = MagicMock(spec=Message)
@@ -456,6 +466,7 @@ async def test_category_harvest_shows_progress_without_false_eta(monkeypatch: py
     monkeypatch.setattr(search, "PROGRESS_UPDATE_INTERVAL_SECONDS", 0)
 
     cb = MagicMock(spec=CallbackQuery)
+    cb.from_user = User(id=1, is_bot=False, first_name="Admin")
     cb.data = "cat:Центральный:dentist_clinic"
     cb.answer = AsyncMock()
     cb.message = MagicMock(spec=Message)
@@ -513,10 +524,16 @@ async def test_export_csv_shows_moscow_time(monkeypatch: pytest.MonkeyPatch):
     async def fake_export(session, crm_status):
         return [lead]
 
+    async def fake_reserve(session, user_id, hours):
+        return await fake_export(session, "new")
+
     monkeypatch.setattr(leads_handlers, "export_leads_by_status", fake_export)
+    # 'Новые' reserves the leads it exports (see reserve_pool_for_export).
+    monkeypatch.setattr(leads_handlers, "reserve_pool_for_export", fake_reserve)
     monkeypatch.setattr(leads_handlers, "async_session_maker", _DummySessionCtx)
 
     cb = MagicMock(spec=CallbackQuery)
+    cb.from_user = User(id=1, is_bot=False, first_name="Admin")
     cb.data = "export:new"
     cb.answer = AsyncMock()
     cb.message = MagicMock(spec=Message)
