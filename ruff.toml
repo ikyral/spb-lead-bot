@@ -25,5 +25,7 @@ ignore = [
 "tests/**" = ["S101", "S104", "S106", "S603", "ASYNC240"]
 # Runs pip with fixed arguments to regenerate requirements.lock.
 "scripts/lock_requirements.py" = ["S603"]
+# Verification script for 2GIS status with assertions and dynamic project path.
+"scripts/verify_2gis_status.py" = ["S101", "BLE001", "E402"]
 # Exec'ing the container CMD after dropping privileges is the purpose of the entrypoint.
 "docker_entrypoint.py" = ["S606"]

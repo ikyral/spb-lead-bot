@@ -12,5 +12,8 @@ pydantic-settings==2.16.2
 apscheduler==3.11.3
 # Time zone database for COLLECT_TIMEZONE: python:3.11-slim and Windows do not have one.
 tzdata==2026.6
-# Headless browser for public pages of 2GIS; the browser itself: playwright install chromium.
-playwright==1.64.1
+# Chrome DevTools Protocol driver for 2GIS scraper (Chrome/Chromium).
+pychrome>=0.2.4
+psutil>=5.4.8
+requests>=2.32.0
+websocket-client>=1.8.0

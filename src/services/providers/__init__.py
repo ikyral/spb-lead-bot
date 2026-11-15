@@ -9,7 +9,6 @@ from src.services.providers.base import (
     SearchPage,
     SearchQuery,
 )
-from src.services.providers.csv_loader import parse_csv_leads
 from src.services.providers.osm import (
     DEFAULT_OVERPASS_ENDPOINTS,
     OSMOverpassProvider,
@@ -34,5 +33,4 @@ __all__ = [
     "SearchQuery",
     "TwoGisProvider",
     "TwoGisScraperProvider",
-    "parse_csv_leads",
 ]

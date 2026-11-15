@@ -149,23 +149,6 @@ class SearchProgress(Base):
     exhausted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
 
 
-class ImportLog(Base):
-    """One imported file: only counts and fixed reasons, never the content of leads."""
-
-    __tablename__ = "import_log"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    finished_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=lambda: datetime.now(UTC))
-    source: Mapped[str] = mapped_column(String(32))
-    file_name: Mapped[str] = mapped_column(String(255))
-    ok: Mapped[bool] = mapped_column(Boolean)
-    error: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
-    total: Mapped[int] = mapped_column(Integer, default=0)
-    saved_new: Mapped[int] = mapped_column(Integer, default=0)
-    duplicates: Mapped[int] = mapped_column(Integer, default=0)
-    rejected: Mapped[int] = mapped_column(Integer, default=0)
-
-
 class CollectorState(Base):
     """The only row (id=1) holds the automatic collection switch and the result of the last run."""
 
@@ -191,11 +174,7 @@ class CollectorState(Base):
     # API requests spent on requests_day (date in COLLECT_TIMEZONE, ISO format).
     requests_day: Mapped[str | None] = mapped_column(String(10), nullable=True, default=None)
     requests_used: Mapped[int] = mapped_column(Integer, default=0)
-    # With an external collector: when admins were last asked to bring a new file.
-    last_pool_reminder_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
     # The last warning about the API key running out: '<expiry date>:<day of the warning or "expired">'.
     key_warning_mark: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
-    # On a collector's computer: when its diagnostics ran lately, times in ISO format separated by commas.
-    scraper_check_runs: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
     # The day (in COLLECT_TIMEZONE, ISO format) the morning plan went out: a restart must not send it again.
     digest_sent_on: Mapped[str | None] = mapped_column(String(10), nullable=True, default=None)

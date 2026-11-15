@@ -111,12 +111,12 @@ async def test_main_wires_the_collector_into_the_bot_lifetime(monkeypatch: pytes
 
     status = seen["status"]
     assert set_commands.await_count == 2  # everyone, then the admin
-    assert seen["routers"] == {"search", "leads", "issue", "collector", "imports", "reminders", "menu", "fallback"}
+    assert seen["routers"] == {"search", "leads", "issue", "collector", "reminders", "menu", "fallback"}
     assert seen["digest_job"] is not None  # DIGEST_ENABLED is on by default
     assert seen["scheduler_running"] is True
     assert seen["scheduler_running_after"] is False
     assert status.next_run_at is not None
-    assert status.active_providers == ["osm"]
+    assert set(status.active_providers) == {"2gis_scraper", "osm"}
     assert status.disabled_providers == {"2gis": "не задан DGIS_API_KEY"}  # still runs, on OSM
     assert status.dgis_key is None
     assert status.batch_size == 30
@@ -158,6 +158,7 @@ async def test_main_counts_requests_of_the_key_and_warns_about_its_end(
         DGIS_API_KEY="KEY",
         DGIS_KEY_CREATED_AT="2026-11-01",
         DGIS_REQUEST_CONTACTS=True,
+        COLLECT_PROVIDERS="2gis,osm",
     )
     monkeypatch.setattr(main, "settings", current)
 
@@ -167,7 +168,6 @@ async def test_main_counts_requests_of_the_key_and_warns_about_its_end(
         main.leads_router,
         main.issue_router,
         main.collector_router,
-        main.imports_router,
         main.reminders_router,
         main.menu_router,
         main.fallback_router,
@@ -240,10 +240,10 @@ def test_importing_providers_does_not_create_the_database_engine() -> None:
 
 
 def test_services_package_still_exports_pipeline_functions() -> None:
-    from src.services import import_csv_harvest, run_lead_harvest
-    from src.services.pipeline import import_csv_harvest as direct
+    from src.services import run_lead_harvest
+    from src.services.pipeline import run_lead_harvest as direct
 
-    assert import_csv_harvest is direct and callable(run_lead_harvest)
+    assert run_lead_harvest is direct and callable(run_lead_harvest)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

@@ -116,7 +116,7 @@ def test_invalid_settings_name_the_variable(overrides: dict, message: str) -> No
 def test_default_targets_are_all_categories_in_all_districts() -> None:
     config = _config()
     assert len(config.targets) == len(TARGET_CATEGORIES) * len(SPB_DISTRICTS)
-    assert config.providers == ["2gis", "osm"]  # 2GIS is the main source, the page reader is not listed
+    assert config.providers == ["2gis_scraper", "2gis", "osm"]
 
 
 def test_targets_from_settings_with_free_text_query_and_bbox() -> None:
@@ -505,4 +505,4 @@ def test_env_example_is_a_valid_configuration() -> None:
     assert settings.COLLECT_INTERVAL_MINUTES is None
     assert settings.TWOGIS_API_KEY is None
     assert (settings.LEADS_BATCH_SIZE, settings.LEADS_MIN_POOL) == (30, 60)
-    assert config.providers == ["2gis", "osm"]
+    assert config.providers == ["2gis_scraper", "2gis", "osm"]

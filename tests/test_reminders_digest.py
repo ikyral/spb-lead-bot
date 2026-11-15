@@ -232,7 +232,7 @@ async def test_digest_counts(session_maker) -> None:
     async with session_maker() as session:
         counts = await get_digest_counts(session, due_before, stale_before)
 
-    assert counts == DigestCounts(useful_in_pool=3, waiting_for_enrichment=2, reminders_due=1, written_no_answer=2)
+    assert counts == DigestCounts(useful_in_pool=3, reminders_due=1, written_no_answer=2)
 
 
 def _data(counts: DigestCounts, followups: list[Lead], usage: RequestUsage | None = None) -> DigestData:
@@ -245,7 +245,7 @@ def _usage(used: int, limit: int) -> RequestUsage:
 
 
 def test_an_empty_plan_says_there_is_nobody_to_remind() -> None:
-    text = format_digest_summary(_data(DigestCounts(0, 0, 0, 0), []))
+    text = format_digest_summary(_data(DigestCounts(0, 0, 0), []))
 
     assert "План на 09.11" in text
     assert "Полезных лидов в запасе (без сайта и сайт не открывается): <b>0</b>" in text
@@ -254,9 +254,9 @@ def test_an_empty_plan_says_there_is_nobody_to_remind() -> None:
 
 
 def test_a_plan_with_data() -> None:
-    text = format_digest_summary(_data(DigestCounts(12, 340, 2, 5), [_issued(1), _issued(2)], _usage(640, 1000)))
+    text = format_digest_summary(_data(DigestCounts(12, 2, 5), [_issued(1), _issued(2)], _usage(640, 1000)))
 
-    assert "<b>12</b>" in text and "<b>340</b>" in text
+    assert "<b>12</b>" in text
     assert "Напоминаний на сегодня: <b>2</b>" in text
     assert "«Написал» без ответа дольше 3 дн.: <b>5</b>" in text
     assert "Запросов к API 2ГИС осталось: <b>360</b> из 1000" in text

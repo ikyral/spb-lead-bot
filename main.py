@@ -12,7 +12,6 @@ from src.bot.commands import register_bot_commands
 from src.bot.digest import DIGEST_JOB_ID, DailyDigest
 from src.bot.handlers.collector import router as collector_router
 from src.bot.handlers.fallback import router as fallback_router
-from src.bot.handlers.imports import router as imports_router
 from src.bot.handlers.issue import router as issue_router
 from src.bot.handlers.issue import stop_background_batches
 from src.bot.handlers.leads import router as leads_router
@@ -21,12 +20,11 @@ from src.bot.handlers.reminders import router as reminders_router
 from src.bot.handlers.search import router as search_router
 from src.bot.middlewares import AdminOnlyMiddleware
 from src.bot.notifier import AdminNotifier
-from src.config import resolve_path, settings, settings_error
+from src.config import settings, settings_error
 from src.database.repo import async_session_maker, engine, init_db
 from src.services.chains import load_chain_index, refresh_chain_flags
 from src.services.collector import load_collector_config
 from src.services.dgis_key import DgisKeyPolicy, DgisQuota
-from src.services.lead_import import ImportService
 from src.services.providers.registry import build_providers
 from src.services.providers.twogis import TwoGisOptions
 from src.services.providers.twogis_scraper import ScraperOptions
@@ -75,7 +73,6 @@ async def main() -> None:
     dp.include_router(leads_router)
     dp.include_router(issue_router)
     dp.include_router(collector_router)
-    dp.include_router(imports_router)
     dp.include_router(reminders_router)
     dp.include_router(menu_router)
     # Last: it takes any private text the others did not.
@@ -87,8 +84,6 @@ async def main() -> None:
         if twogis_key and twogis_key.strip()
         else None
     )
-    if settings.SCRAPER_ASSISTED:
-        logger.warning("SCRAPER_ASSISTED is ignored by the bot: it works only in the collector on a computer")
     provider_set = build_providers(
         collector_config.providers,
         twogis_key,
@@ -108,23 +103,11 @@ async def main() -> None:
         enabled_by_default=settings.COLLECT_ENABLED,
         run_on_start=settings.COLLECT_RUN_ON_START,
         min_pool=settings.LEADS_MIN_POOL,
-        external_mode=not settings.COLLECT_ENABLED or not collector_config.providers,
-        pool_reminder=notifier.remind_pool_low,
         batch_size=settings.LEADS_BATCH_SIZE,
         dgis_quota=dgis_quota,
         key_notice=notifier.send,
     )
     dp["collector_runner"] = collector_runner
-
-    import_service = ImportService(
-        async_session_maker,
-        notifier.report_import,
-        resolve_path(settings.IMPORT_INBOX_DIR),
-        settings.IMPORT_MAX_FILE_BYTES,
-        settings.IMPORT_MAX_LEADS,
-        settings.LEADS_REQUIRE_CONTACT,
-    )
-    dp["import_service"] = import_service
 
     hour, minute = settings.digest_hour_minute
     daily_digest = DailyDigest(
@@ -139,10 +122,6 @@ async def main() -> None:
     dp["daily_digest"] = daily_digest
     if settings.DIGEST_ENABLED:
         collector_runner.add_daily_job(daily_digest.send_scheduled, hour, minute, DIGEST_JOB_ID)
-    if settings.IMPORT_INBOX_INTERVAL_SECONDS > 0:
-        collector_runner.add_interval_job(
-            import_service.scan_inbox, settings.IMPORT_INBOX_INTERVAL_SECONDS, "import_inbox"
-        )
 
     # Polling calls these inside its own lifetime, while the bot can still send messages.
     async def set_command_menus(bot: Bot) -> None:

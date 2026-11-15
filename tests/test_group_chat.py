@@ -541,6 +541,7 @@ def batch_env(session_maker, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(issue, "settings", _settings(LEADS_BATCH_SIZE=3, LEADS_MAX_NICHE_SHARE=1))
     issue._issuing_to.clear()
     session_maker.pauses = pauses
+    session_maker.real_sleep = real_sleep
     return session_maker
 
 
@@ -884,7 +885,10 @@ async def test_stopping_the_bot_returns_the_leads_not_yet_sent(batch_env, monkey
 
     monkeypatch.setattr(issue, "_send_card", send_one_then_hang)
     await issue.handle_next_batch_request(_group_message(), _runner())
-    await _let_background_run()
+    for _ in range(100):
+        if len(sent) == 1:
+            break
+        await batch_env.real_sleep(0.01)
     assert len(sent) == 1
 
     await issue.stop_background_batches()

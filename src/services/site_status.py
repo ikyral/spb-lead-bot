@@ -70,10 +70,7 @@ def confidence_of_check(site_status: str, source: str) -> str | None:
     How far to trust a status from a source or from checking the listed address.
 
     A listed address was really opened. The absence of a site is weaker: OSM often just lacks the tag.
-    A search engine is weaker still: a page it found is only similar by name, and not finding one proves little.
     """
-    if source == SOURCE_GOOGLE:
-        return CONFIDENCE_LOW if site_status == SITE_NOT_FOUND else CONFIDENCE_MEDIUM
     if site_status in (SITE_DEAD, SITE_SOCIAL_ONLY, SITE_FOUND):
         return CONFIDENCE_HIGH
     if site_status == SITE_NO_SITE:

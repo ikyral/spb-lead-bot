@@ -10,15 +10,14 @@ Site statuses (`leads.site_status`, src/services/site_status.py), in the order o
 1. `no_site`, `dead_site`, `social_only`: a source, a check of the listed address, or a person's verdict.
 2. `site_not_found`: an automatic search found nothing. Not proof of there being no site.
 3. `site_uncertain`: there is a candidate in `site_url` that may belong to someone else.
-4. `unknown`: nobody has looked, e.g. the source gives no contacts.
 
 `site_found` (a working site is known) is never handed out. `has_site` is only the answer of the checker:
 such a place is not saved. No automatic search exists yet, so nothing sets `site_not_found` or `site_uncertain`.
 
 ## 2. Database Schema (leads table in SQLite)
 - `id`: Integer, Primary Key, Autoincrement
-- `external_id`: String(128), Unique, Indexed (Format: `osm_{id}`, `2gis_{id}`, `csv_{hash}`)
-- `source`: String(32) (`osm`, `2gis`, `csv`)
+- `external_id`: String(128), Unique, Indexed (Format: `osm_{id}`, `2gis_{id}`)
+- `source`: String(32) (`osm`, `2gis`, `2gis_scraper`)
 - `name`: String(255), Not Null
 - `category`: String(128), Not Null
 - `district`: String(128), Nullable
@@ -38,15 +37,15 @@ such a place is not saved. No automatic search exists yet, so nothing sets `site
 - `contact_status_by_id`: BigInteger, Nullable (Telegram ID of the admin who set the status)
 - `contact_status_by`: String(128), Nullable (their @username or name at that moment)
 - `contact_status_at`: DateTime, Nullable (when the status was set)
-- `exported_at`: DateTime, Nullable (on a collector's computer: when the lead went into an export file)
-- `imported_at`: DateTime, Nullable (on the server: when the lead arrived from an export file)
+- `exported_at`: DateTime, Nullable
+- `imported_at`: DateTime, Nullable
 - `site_url`: String(512), Nullable (the known site or the candidate)
 - `site_confidence`: String(16), Nullable (`high`, `medium`, `low`)
-- `site_source`: String(16), Nullable (`2gis`, `osm`, `search`, `manual`, `2gis_card`)
+- `site_source`: String(16), Nullable (`2gis`, `osm`, `search`, `manual`)
 - `site_checked_at`: DateTime, Nullable (when the status was determined)
 - `is_chain`: Boolean, Nullable (part of a chain: kept for counting branches, not handed out)
 
-The `collector_state` table has a single row with the automatic collection switch, the result of the last run, the position in the search targets and the daily request count. The `import_log` table records each imported file with counts only, never the content of leads. The `provider_state` table holds blocks of each source: how many in a row, the pause after them, the automatic switch-off and the last run.
+The `collector_state` table has a single row with the automatic collection switch, the result of the last run, the position in the search targets and the daily request count. The `provider_state` table holds blocks of each source: how many in a row, the pause after them, the automatic switch-off and the last run.
 
 ## 3. Saint Petersburg Districts Bounding Boxes (SPB_DISTRICTS)
 Format: `(south_lat, west_lon, north_lat, east_lon)`
@@ -124,14 +123,14 @@ Format: `(south_lat, west_lon, north_lat, east_lon)`
 All weights are constants at the top of the module.
 - If a working site is known (`has_site`, `site_found`) -> return `0`.
 - Status base points: `dead_site` `+60`, `social_only` `+55`, `no_site` `+50`, `site_not_found` `+40`,
-  `site_uncertain` `+35`, `unknown` `+30`.
+  `site_uncertain` `+35`.
 - Contact points:
   - Russian mobile `phone`: `+25`; another `phone`: `+15`
   - Has `socials`: `+10`
-  - Neither `phone` nor `socials`: `-35`, except unverified statuses (`unknown`, `site_uncertain`, `site_not_found`)
+  - Neither `phone` nor `socials`: `-35`, except unverified statuses (`site_uncertain`, `site_not_found`)
 - Category:
   - High-margin category: `+10` (category key in `HIGH_MARGIN_CATEGORY_KEYS`, `high_margin: True`, or a free-text
-    category such as a CSV `Рубрика` containing a keyword from `HIGH_MARGIN_KEYWORDS`).
+    category such as a rubric string containing a keyword from `HIGH_MARGIN_KEYWORDS`).
   - Small repair shops (`ремонт обуви / одежды / телефонов / часов / ноутбуков / бытовой техники`, incl.
     `ремонт и пошив одежды`) get no bonus: these phrases are removed before keyword matching, so
     `Ремонт под ключ`, `Кузовной ремонт` and `Автосервис, ремонт телефонов` keep it.

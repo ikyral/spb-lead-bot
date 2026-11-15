@@ -16,7 +16,6 @@ from src.services.checker import analyze_website, create_check_client
 from src.services.dedup import DuplicateIndex, merge_duplicate_places
 from src.services.dgis_key import DgisKeyPolicy, DgisQuota
 from src.services.providers.base import RawPlace
-from src.services.providers.csv_loader import parse_csv_leads
 from src.services.providers.osm import OSMOverpassProvider
 from src.services.providers.twogis import TwoGisOptions, TwoGisProvider
 from src.services.scorer import calculate_lead_score, is_worth_saving
@@ -27,8 +26,6 @@ logger = logging.getLogger(__name__)
 # Simultaneous website checks. They target different hosts and mostly wait on the
 # network (up to TOTAL_CHECK_TIMEOUT_SECONDS for a dead site), so 20 is safe.
 CHECK_CONCURRENCY: int = 20
-# Upper bound for one CSV import (each row may need a website check).
-MAX_CSV_PLACES: int = 2000
 
 # Called as progress(done, total) after each website check.
 ProgressCallback = Callable[[int, int], Awaitable[None]]
@@ -246,20 +243,3 @@ async def run_lead_harvest(
     # gather keeps the order (OSM first), so duplicate merging keeps the OSM identity as before.
     osm_places, twogis_places = await asyncio.gather(_search_osm(), _search_2gis())
     return await _process_and_save_places(session, osm_places + twogis_places, progress=progress)
-
-
-async def import_csv_harvest(
-    session: AsyncSession,
-    file_bytes: bytes,
-    progress: ProgressCallback | None = None,
-) -> dict[str, int]:
-    """
-    Parse leads from CSV file bytes, verify websites, score, and save them.
-
-    Only the first MAX_CSV_PLACES places are processed; the rest is reported as `over_limit`.
-    """
-    places = parse_csv_leads(file_bytes)
-    over_limit = max(0, len(places) - MAX_CSV_PLACES)
-    stats: dict[str, int] = await _process_and_save_places(session, places[:MAX_CSV_PLACES], progress=progress)
-    stats["over_limit"] = over_limit
-    return stats

@@ -1,11 +1,10 @@
-"""Search handlers for finding leads in SPb and importing CSV data."""
+"""Search handlers for finding leads in SPb."""
 
 import html
-import io
 import logging
 import time
 
-from aiogram import Bot, F, Router
+from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
@@ -22,7 +21,7 @@ from src.bot.middlewares import PUBLIC_FLAG, is_admin
 from src.bot.texts import SEARCH_MENU_BUTTON_TEXT, START_ADMIN_TEXT, START_USER_TEXT
 from src.config import settings
 from src.database.repo import async_session_maker
-from src.services.pipeline import MAX_CSV_PLACES, import_csv_harvest, run_lead_harvest
+from src.services.pipeline import run_lead_harvest
 from src.services.providers.base import SPB_DISTRICTS, TARGET_CATEGORIES
 
 logger = logging.getLogger(__name__)
@@ -181,40 +180,3 @@ async def handle_category_chosen(callback: CallbackQuery) -> None:
         await status_message.edit_text(report, parse_mode="HTML")
     else:
         await _edit_or_send(callback, report)
-
-
-@router.message(F.document, F.document.file_name.lower().endswith(".csv"))
-async def handle_csv_upload(message: Message, bot: Bot) -> None:
-    """Download and process uploaded CSV file with raw places."""
-    if not message.document:
-        return
-
-    status_msg = await message.answer("⏳ Загружаю и анализирую CSV файл...")
-    try:
-        file_io = io.BytesIO()
-        await bot.download(message.document, destination=file_io)
-        file_bytes = file_io.getvalue()
-
-        progress = ProgressReporter(status_msg, "⏳ Анализирую CSV файл и проверяю сайты...")
-        async with async_session_maker() as session:
-            stats = await import_csv_harvest(session, file_bytes, progress=progress)
-
-        report = (
-            "📁 <b>Импорт CSV завершен!</b>\n\n"
-            f"• Найдено: <b>{stats['total_found']}</b>\n"
-            f"• Подходят: <b>{stats['qualified']}</b>\n"
-            f"• Новых сохранено: <b>{stats['saved_new']}</b>\n"
-            f"• Дубликатов пропущено: <b>{stats['duplicates_skipped']}</b>"
-        )
-        if stats.get("over_limit"):
-            report += (
-                f"\n\n⚠️ Обработаны первые <b>{MAX_CSV_PLACES}</b> записей, "
-                f"ещё <b>{stats['over_limit']}</b> пропущено. Разбейте файл на части."
-            )
-        await status_msg.edit_text(report, parse_mode="HTML")
-    except Exception as exc:
-        logger.exception("Error during CSV import")
-        await status_msg.edit_text(
-            f"⚠️ Ошибка при обработке CSV: <code>{html.escape(str(exc))}</code>",
-            parse_mode="HTML",
-        )

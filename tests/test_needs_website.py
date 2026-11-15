@@ -20,7 +20,6 @@ from src.database.models import CONTACT_REPLIED, STATUS_ISSUED, STATUS_NEW, Lead
 from src.database.repo import (
     IssueRules,
     count_new_leads,
-    count_unknown_site_leads,
     get_leads,
     get_pool_stats,
     issue_next_leads,
@@ -35,7 +34,7 @@ from src.services.chains import (
     refresh_chain_flags,
     rescore_new_leads,
 )
-from src.services.pipeline import import_csv_harvest, save_collected_places
+from src.services.pipeline import save_collected_places
 from src.services.providers.base import TARGET_CATEGORIES, RawPlace
 from src.services.scheduler import TopupDecision, TopupOutcome
 from src.services.scorer import MIN_LEAD_SCORE, calculate_lead_score, has_mobile_phone, is_worth_saving
@@ -347,17 +346,13 @@ async def test_most_certain_first_and_by_score_within_a_group(session_maker) -> 
     ]
 
 
-async def test_known_site_is_never_handed_out_and_unknown_can_be_held_back(session_maker) -> None:
+async def test_known_site_is_never_handed_out(session_maker) -> None:
     await _add(
         session_maker,
         {"name": "есть сайт", "site_status": SITE_FOUND, "score": 100},
-        {"name": "неизвестен", "site_status": SITE_UNKNOWN},
         {"name": "не найден", "site_status": SITE_NOT_FOUND},
     )
-    assert await _issued_names(session_maker, rules=IssueRules(issue_unknown=False)) == ["не найден"]
-    async with session_maker() as session:
-        assert await count_unknown_site_leads(session) == 1
-    assert await _issued_names(session_maker) == ["неизвестен"]
+    assert await _issued_names(session_maker) == ["не найден"]
     assert await _issued_names(session_maker) == []
 
 
@@ -418,20 +413,6 @@ async def _run_batch(monkeypatch, session_maker, **overrides) -> tuple[str, Magi
     message, runner = _batch_message(), _runner()
     await issue._issue_batch(message, runner)
     return message.answer.await_args.args[0], runner
-
-
-async def test_batch_explains_how_many_wait_for_a_check_of_the_site(session_maker, monkeypatch) -> None:
-    await _add(
-        session_maker,
-        {"name": "неизвестен 1", "site_status": SITE_UNKNOWN},
-        {"name": "неизвестен 2", "site_status": SITE_UNKNOWN},
-        {"name": "не найден", "site_status": SITE_NOT_FOUND},
-    )
-    text, runner = await _run_batch(monkeypatch, session_maker, LEADS_ISSUE_UNKNOWN=False, LEADS_MAX_NICHE_SHARE=1)
-    assert "<b>2</b> ждут проверки сайта" in text
-    # More collection would not make them pass the rule: only the usual check of the pool.
-    runner.request_topup.assert_not_awaited()
-    runner.check_pool.assert_awaited_once()
 
 
 async def test_batch_explains_the_limit_of_a_niche(session_maker, monkeypatch) -> None:
@@ -602,18 +583,33 @@ async def test_old_lead_without_a_mark_gets_one_and_only_a_recount_removes_it(se
         assert await count_new_leads(session) == 1
 
 
-async def test_csv_import_goes_through_the_same_filter(session_maker, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_collected_places_go_through_the_same_filter(session_maker, monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_analyze(url, client=None):
         return "dead_site", None
 
     monkeypatch.setattr("src.services.pipeline.analyze_website", fake_analyze)
-    data = (
-        "Название;Рубрика;Телефон;Сайт;Адрес\n"
-        "Пятёрочка;Магазин;+78125550101;http://x.example;Улица 1\n"
-        "Маленькая мастерская Ивана;Ремонт;+78125550102;http://y.example;Улица 2\n"
-    ).encode()
+    places = [
+        RawPlace(
+            source="2gis",
+            external_id="p1",
+            name="Пятёрочка",
+            category="Магазин",
+            phone="+78125550101",
+            raw_website="http://x.example",
+            address="Улица 1",
+        ),
+        RawPlace(
+            source="2gis",
+            external_id="p2",
+            name="Маленькая мастерская Ивана",
+            category="Ремонт",
+            phone="+78125550102",
+            raw_website="http://y.example",
+            address="Улица 2",
+        ),
+    ]
     async with session_maker() as session:
-        stats = await import_csv_harvest(session, data)
+        stats = await save_collected_places(session, places)
         assert stats["saved_new"] == 1
         assert [lead.name for lead in await issue_next_leads(session, 10)] == ["Маленькая мастерская Ивана"]
 
@@ -822,10 +818,9 @@ async def test_collection_status_shows_the_pool_by_site(session_maker) -> None:
 
 def test_every_setting_of_this_feature_is_in_the_example() -> None:
     example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
-    for name in ("LEADS_ISSUE_UNKNOWN", "LEADS_MAX_NICHE_SHARE", "LEADS_CHAIN_MIN_BRANCHES", "LEADS_CHAIN_BLOCKLIST"):
+    for name in ("LEADS_MAX_NICHE_SHARE", "LEADS_CHAIN_MIN_BRANCHES", "LEADS_CHAIN_BLOCKLIST"):
         assert f"{name}=" in example
     defaults = _chain_settings()
-    assert defaults.LEADS_ISSUE_UNKNOWN is True
     assert defaults.LEADS_MAX_NICHE_SHARE == 0.5
     assert defaults.LEADS_CHAIN_MIN_BRANCHES == 3
 

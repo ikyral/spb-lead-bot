@@ -13,18 +13,11 @@ from src.services.scheduler import TRIGGER_MANUAL, CollectorRunner
 
 router = Router(name="collector")
 
-EXTERNAL_COLLECTOR_TEXT: str = (
-    "📥 Сбор выполняется на внешнем сборщике, этот сервер сам не собирает. "
-    "Новые лиды приходят файлами: отправьте файл боту или положите его в папку импорта на сервере."
-)
-
 
 @router.message(Command("collect_now"))
 async def handle_collect_now(message: Message, collector_runner: CollectorRunner) -> None:
     """Start a collection in the background; the result is sent when it finishes."""
-    if collector_runner.external_mode:
-        await message.answer(EXTERNAL_COLLECTOR_TEXT)
-    elif collector_runner.start_in_background(TRIGGER_MANUAL):
+    if collector_runner.start_in_background(TRIGGER_MANUAL):
         await message.answer("▶️ Сбор запущен. Итог пришлю, когда он закончится.")
     else:
         await message.answer("⏳ Сбор уже выполняется. Итог придёт, когда он закончится.")
@@ -58,11 +51,6 @@ async def handle_collect_status(message: Message, collector_runner: CollectorRun
 @router.message(Command("collect_on"))
 async def handle_collect_on(message: Message, collector_runner: CollectorRunner) -> None:
     """Enable automatic collection."""
-    if collector_runner.external_mode:
-        await message.answer(
-            f"{EXTERNAL_COLLECTOR_TEXT} Чтобы собирать здесь, задайте COLLECT_ENABLED=true и COLLECT_PROVIDERS."
-        )
-        return
     await collector_runner.set_auto_enabled(True)
     await message.answer("✅ Автосбор включён.")
 
@@ -70,9 +58,6 @@ async def handle_collect_on(message: Message, collector_runner: CollectorRunner)
 @router.message(Command("collect_off"))
 async def handle_collect_off(message: Message, collector_runner: CollectorRunner) -> None:
     """Disable automatic collection: both the schedule and refilling the pool."""
-    if collector_runner.external_mode:
-        await message.answer(EXTERNAL_COLLECTOR_TEXT)
-        return
     await collector_runner.set_auto_enabled(False)
     await message.answer("⏸ Автосбор выключен. Сбор вручную по-прежнему работает: /collect_now")
 
@@ -80,7 +65,9 @@ async def handle_collect_off(message: Message, collector_runner: CollectorRunner
 @router.message(Command("provider_on"))
 async def handle_provider_on(message: Message, command: CommandObject, collector_runner: CollectorRunner) -> None:
     """Turn a source back on after blocks. This is the only way out of an automatic switch-off."""
-    name = (command.args or "").strip() or ("2gis" if collector_runner.known_provider("2gis") else "2gis_scraper")
+    raw_name = (command.args or "").strip()
+    default_name = "2gis_scraper" if collector_runner.known_provider("2gis_scraper") else "2gis"
+    name = "2gis" if raw_name == "twogis" else (raw_name or default_name)
     if not collector_runner.known_provider(name):
         await message.answer(UNKNOWN_PROVIDER_TEXT.format(name=html.escape(name)), parse_mode="HTML")
         return

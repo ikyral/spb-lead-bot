@@ -14,14 +14,11 @@ from src.bot.texts import (
     DIGEST_DONE_BUTTON_TEXT,
     DIGEST_LATER_BUTTON_TEXT,
     DIGEST_REJECT_BUTTON_TEXT,
-    ENRICH_BUTTON_TEXT,
     HELP_BUTTON_TEXT,
     IN_WORK_BUTTON_TEXT,
-    MORE_ENRICH_BUTTON_TEXT,
     NEW_LEADS_BUTTON_TEXT,
     REMIND_BUTTON_TEXT,
     REMIND_DAYS,
-    REQUEST_FILE_BUTTON_TEXT,
     SEARCH_MENU_BUTTON_TEXT,
     STATS_BUTTON_TEXT,
 )
@@ -41,12 +38,10 @@ from src.services.twogis_links import twogis_card_url, twogis_search_url
 DISTRICT_NAMES: list[str] = list(SPB_DISTRICTS.keys())
 CATEGORY_KEYS: list[str] = list(TARGET_CATEGORIES.keys())
 
-ENRICH_REQUEST_CALLBACK: str = "enrich:request"
 # Shown when callback data is malformed, forged, or from a keyboard of an older bot version.
 STALE_BUTTON_TEXT: str = "Кнопка устарела. Откройте меню заново."
 OPEN_CARD_BUTTON_TEXT: str = "🔎 Открыть в 2ГИС"
 FIND_IN_2GIS_BUTTON_TEXT: str = "🔎 Найти в 2ГИС"
-ADD_PHONE_BUTTON_TEXT: str = "✏️ Добавить телефон"
 SITE_YES_BUTTON_TEXT: str = "🌐 Сайт есть"
 SITE_NO_BUTTON_TEXT: str = "✅ Сайта нет"
 SEARCH_BUTTON_TEXT: str = "🔎 Проверить в Яндексе"
@@ -64,30 +59,14 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
     """Return the persistent bottom reply keyboard, for private chats only: the main buttons, then the older menu."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BATCH_BUTTON_TEXT), KeyboardButton(text=ENRICH_BUTTON_TEXT)],
-            [KeyboardButton(text=STATS_BUTTON_TEXT), KeyboardButton(text=HELP_BUTTON_TEXT)],
-            [KeyboardButton(text=SEARCH_MENU_BUTTON_TEXT), KeyboardButton(text=NEW_LEADS_BUTTON_TEXT)],
-            [KeyboardButton(text=IN_WORK_BUTTON_TEXT), KeyboardButton(text=CRM_STATS_BUTTON_TEXT)],
+            [KeyboardButton(text=BATCH_BUTTON_TEXT), KeyboardButton(text=STATS_BUTTON_TEXT)],
+            [KeyboardButton(text=HELP_BUTTON_TEXT), KeyboardButton(text=SEARCH_MENU_BUTTON_TEXT)],
+            [KeyboardButton(text=NEW_LEADS_BUTTON_TEXT), KeyboardButton(text=IN_WORK_BUTTON_TEXT)],
+            [KeyboardButton(text=CRM_STATS_BUTTON_TEXT)],
         ],
         resize_keyboard=True,
         is_persistent=True,
     )
-
-
-def get_enrich_request_keyboard() -> InlineKeyboardMarkup:
-    """Under the instruction on enrichment: the same as /export_unknown 30."""
-    builder = InlineKeyboardBuilder()
-    builder.button(text=REQUEST_FILE_BUTTON_TEXT, callback_data=ENRICH_REQUEST_CALLBACK)
-    return builder.as_markup()
-
-
-def get_after_enrichment_keyboard() -> InlineKeyboardMarkup:
-    """Under the result of an enrichment: look at the leads, or take the next file to check."""
-    builder = InlineKeyboardBuilder()
-    builder.button(text=BATCH_BUTTON_TEXT, callback_data="panel:next")
-    builder.button(text=MORE_ENRICH_BUTTON_TEXT, callback_data=ENRICH_REQUEST_CALLBACK)
-    builder.adjust(1)
-    return builder.as_markup()
 
 
 def get_districts_keyboard() -> InlineKeyboardMarkup:
@@ -121,50 +100,45 @@ def get_lead_card_keyboard(
     search_url: str | None = None,
     site_verdict: bool | None = None,
 ) -> InlineKeyboardMarkup:
-    """Generate inline control buttons for lead card with pagination."""
+    """
+    Generate inline keyboard for lead card with pagination & actions.
+
+    All navigation and action buttons have stable callback data: `lead:{lead_id}:{action}:{offset}`.
+    """
     builder = InlineKeyboardBuilder()
 
-    # Action buttons
-    builder.button(text="✅ В работу", callback_data=f"lead:{lead_id}:work:{offset}")
-    builder.button(text="🗑 В отказ", callback_data=f"lead:{lead_id}:reject:{offset}")
+    # Action row 1: Take to work, reject
+    builder.button(text="💼 В работу", callback_data=f"lead:{lead_id}:work:{offset}")
+    builder.button(text="❌ Отказ", callback_data=f"lead:{lead_id}:reject:{offset}")
+
+    # Action row 2: Pitch text
     builder.button(text="💡 Текст КП", callback_data=f"lead:{lead_id}:pitch:{offset}")
 
-    # Pagination buttons
+    # Navigation row
     nav_buttons: list[InlineKeyboardButton] = []
     if has_prev:
-        prev_offset = max(0, offset - 1)
         nav_buttons.append(
-            InlineKeyboardButton(
-                text="⬅️ Назад",
-                callback_data=f"lead:{lead_id}:prev:{prev_offset}",
-            )
+            InlineKeyboardButton(text="⬅️ Назад", callback_data=f"lead:{lead_id}:prev:{offset - 1}")
         )
     if has_next:
-        next_offset = offset + 1
         nav_buttons.append(
-            InlineKeyboardButton(
-                text="➡️ Далее",
-                callback_data=f"lead:{lead_id}:next:{next_offset}",
-            )
+            InlineKeyboardButton(text="Вперед ➡️", callback_data=f"lead:{lead_id}:next:{offset + 1}")
         )
-
     for btn in nav_buttons:
         builder.add(btn)
 
-    # External map URL link button
+    # Link buttons: map, 2GIS card, or a search in Yandex
     if map_url and map_url.startswith(("http://", "https://")):
-        builder.row(InlineKeyboardButton(text="🗺 Открыть на карте", url=map_url))
-
+        builder.button(text="📍 На карте", url=map_url)
     if card_url:
-        builder.row(InlineKeyboardButton(text=OPEN_CARD_BUTTON_TEXT, url=card_url))
-
+        builder.button(text=OPEN_CARD_BUTTON_TEXT, url=card_url)
     if search_url:
         yes_text, no_text = _site_verdict_titles(site_verdict)
-        builder.button(text=yes_text, callback_data=f"lead:{lead_id}:site_yes:{offset}")
-        builder.button(text=no_text, callback_data=f"lead:{lead_id}:site_no:{offset}")
+        builder.button(text=yes_text, callback_data=f"sv:{lead_id}:yes:{offset}")
+        builder.button(text=no_text, callback_data=f"sv:{lead_id}:no:{offset}")
         builder.button(text=SEARCH_BUTTON_TEXT, url=search_url)
 
-    # Rows: 2 for actions, 1 for pitch, then nav, the links and the verdict about the site.
+    # 2 actions, 1 for pitch, then nav, the links and the verdict about the site.
     rows = [2, 1]
     if nav_buttons:
         rows.append(len(nav_buttons))
@@ -174,6 +148,37 @@ def get_lead_card_keyboard(
         rows += [2, 1]
     builder.adjust(*rows)
 
+    return builder.as_markup()
+
+
+def get_crm_status_keyboard() -> InlineKeyboardMarkup:
+    """Generate inline keyboard for CRM status filter in /leads."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📋 Новые", callback_data="crm:new")
+    builder.button(text="💼 В работе", callback_data="crm:in_work")
+    builder.button(text="❌ Отказ", callback_data="crm:rejected")
+    builder.adjust(3)
+    return builder.as_markup()
+
+
+def get_lead_actions_keyboard(
+    lead_id: int,
+    current_status: str,
+    map_url: str | None = None,
+) -> InlineKeyboardMarkup:
+    """Generate action buttons for a single lead in the CRM list."""
+    builder = InlineKeyboardBuilder()
+    if map_url:
+        builder.button(text="📍 На карте", url=map_url)
+    status_buttons: list[tuple[str, str]] = [
+        ("new", "📋 В новые"),
+        ("in_work", "💼 В работу"),
+        ("rejected", "❌ В отказ"),
+    ]
+    for status_key, label in status_buttons:
+        if status_key != current_status:
+            builder.button(text=label, callback_data=f"set_status:{lead_id}:{status_key}")
+    builder.adjust(1)
     return builder.as_markup()
 
 
@@ -196,13 +201,12 @@ def get_lead_status_keyboard(
     lead_id: int,
     current_status: str | None,
     card_url: str | None = None,
-    can_add_phone: bool = False,
     search_url: str | None = None,
     site_verdict: bool | None = None,
     twogis_search: str | None = None,
 ) -> InlineKeyboardMarkup:
     """
-    Buttons of a handed-out lead: its card or a search, statuses with the current one marked, its site, a phone.
+    Buttons of a handed-out lead: its card or a search, statuses with the current one marked, its site.
 
     After 'Написал' a row of reminders: in 1, 3 or 7 days.
     """
@@ -228,9 +232,6 @@ def get_lead_status_keyboard(
         builder.button(text=no_text, callback_data=f"sv:{lead_id}:no")
         builder.button(text=SEARCH_BUTTON_TEXT, url=search_url)
         rows += [2, 1]
-    if can_add_phone:
-        builder.button(text=ADD_PHONE_BUTTON_TEXT, callback_data=f"lp:{lead_id}")
-        rows.append(1)
     builder.adjust(*rows)
     return builder.as_markup()
 
@@ -243,7 +244,6 @@ def get_issued_lead_keyboard(lead: Lead) -> InlineKeyboardMarkup:
         lead.id,
         lead.contact_status,
         card_url=twogis_card_url(lead.source_url),
-        can_add_phone=not lead.phone,
         search_url=yandex_search_url(lead.name, lead.address),
         site_verdict=manual_site_verdict(lead),
         twogis_search=twogis_search_url(lead.name, lead.address, settings.SCRAPER_CITY_SLUG) if needs_a_look else None,

@@ -3,17 +3,15 @@
 import asyncio
 import json
 import logging
-from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from aiogram import Dispatcher
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import SendMessage
-from aiogram.types import CallbackQuery, Chat, ForceReply, Message, Update, User
+from aiogram.types import CallbackQuery, Chat, Message, User
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -21,12 +19,10 @@ from src.bot import formatters
 from src.bot.formatters import format_collector_status, format_issued_lead, format_lead_card, generate_pitch_text
 from src.bot.handlers import issue
 from src.bot.keyboards import (
-    ADD_PHONE_BUTTON_TEXT,
     OPEN_CARD_BUTTON_TEXT,
     get_issued_lead_keyboard,
     get_lead_card_keyboard,
 )
-from src.bot.middlewares import AdminOnlyMiddleware
 from src.bot.notifier import AdminNotifier
 from src.config import Settings
 from src.database.models import STATUS_ISSUED, STATUS_NEW, Lead, ProviderState, SearchProgress
@@ -47,10 +43,6 @@ from src.services.api_client import ProviderAuthError, ProviderQuotaError
 from src.services.collector import CollectorConfig, collect_leads, load_collector_config
 from src.services.dedup import merge_duplicate_places
 from src.services.dgis_key import DgisKeyPolicy, DgisQuota, key_expiry_notice, key_fingerprint
-from src.services.lead_export import export_new_leads
-from src.services.lead_file import REASON_NO_CONTACTS, build_document, lead_to_record, parse_lead_file
-from src.services.lead_import import SOURCE_TELEGRAM, ImportService
-from src.services.normalize import parse_manual_phone
 from src.services.providers import twogis
 from src.services.providers.base import RawPlace, SearchArea, SearchQuery
 from src.services.providers.registry import ProviderSet, build_providers
@@ -496,14 +488,14 @@ async def test_temporary_failure_is_still_repeated_and_every_attempt_is_counted(
     assert await _used(session_maker) == 3
 
 
-def test_scraper_is_off_by_default_everywhere() -> None:
+def test_scraper_is_on_by_default_everywhere() -> None:
     settings = Settings(_env_file=None)
-    assert "2gis_scraper" not in settings.COLLECT_PROVIDERS
-    assert "2gis_scraper" not in settings.COLLECTOR_PROVIDERS
-    assert settings.COLLECT_PROVIDERS.split(",")[0] == "2gis"
+    assert "2gis_scraper" in settings.COLLECT_PROVIDERS
+    assert "2gis_scraper" in settings.COLLECTOR_PROVIDERS
+    assert settings.COLLECT_PROVIDERS.split(",")[0] == "2gis_scraper"
     example = Settings(_env_file=Path(__file__).parent.parent / ".env.example")
-    assert "2gis_scraper" not in example.COLLECT_PROVIDERS
-    assert "2gis_scraper" not in example.COLLECTOR_PROVIDERS
+    assert "2gis_scraper" in example.COLLECT_PROVIDERS
+    assert "2gis_scraper" in example.COLLECTOR_PROVIDERS
 
 
 def test_all_the_new_settings_have_the_documented_defaults() -> None:
@@ -1036,20 +1028,6 @@ async def test_status_shows_requests_stock_and_days(session_maker) -> None:
     assert "✅ 2gis" in text_
 
 
-async def test_status_of_a_server_with_an_external_collector_shows_the_stock_too(session_maker) -> None:
-    await _add_leads(session_maker, with_contacts=1, without=1)
-
-    async def report(_: RunReport) -> None:
-        return None
-
-    runner = CollectorRunner(session_maker, ProviderSet(), _config(), report, external_mode=True, batch_size=30)
-    text_ = format_collector_status(await runner.get_status())
-    assert "внешний сборщик" in text_
-    assert "(с контактами: <b>1</b>, без контактов: <b>1</b>)" in text_
-    assert "меньше чем на день" in text_
-    assert "API 2ГИС" not in text_
-
-
 async def test_status_without_a_date_asks_for_one(session_maker) -> None:
     async def report(_: RunReport) -> None:
         return None
@@ -1097,18 +1075,16 @@ def test_buttons_of_a_lead_without_contacts() -> None:
     assert statuses == ["Написал", "Ответили", "Отказ", "Нет ответа"]
     assert [button.callback_data for button in rows[3]] == ["sv:1:yes", "sv:1:no"]
     assert rows[4][0].url.startswith("https://yandex.ru/search/")
-    assert (rows[5][0].text, rows[5][0].callback_data) == (ADD_PHONE_BUTTON_TEXT, "lp:1")
     callbacks = [button.callback_data for row in rows[1:] for button in row if button.url is None]
     assert all(len(data.encode()) <= 64 for data in callbacks)
 
 
-def test_known_phone_is_shown_as_before_and_needs_no_button_to_add_it() -> None:
+def test_known_phone_is_shown_as_before() -> None:
     lead = _lead(phone="+78125550101", site_status="no_site")
     card = format_issued_lead(lead)
     assert "📞 <b>Телефон:</b> +78125550101" in card
     assert "смотри в карточке" not in card
     assert "Сайта нет (по данным источника)" in card
-    assert ADD_PHONE_BUTTON_TEXT not in [button.text for row in _buttons(lead) for button in row]
 
 
 @pytest.mark.parametrize("url", [None, "javascript:alert(1)", "https://2gis.ru/a b", "2gis.ru/firm/1"])
@@ -1182,7 +1158,6 @@ def issue_env(session_maker, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(issue, "async_session_maker", session_maker)
     monkeypatch.setattr(issue.asyncio, "sleep", no_pause)
     issue._issuing_to.clear()
-    issue._phone_prompts.clear()
     return session_maker
 
 
@@ -1236,7 +1211,6 @@ async def test_status_button_keeps_the_link_on_the_card(issue_env) -> None:
     markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
     assert markup.inline_keyboard[0][0].url == "https://2gis.ru/spb/firm/1"
     assert markup.inline_keyboard[1][0].text == "✅ Написал"
-    assert markup.inline_keyboard[-1][0].text == ADD_PHONE_BUTTON_TEXT
 
 
 async def test_refused_card_returns_to_the_pool_without_losing_the_others(issue_env) -> None:
@@ -1251,335 +1225,3 @@ async def test_refused_card_returns_to_the_pool_without_losing_the_others(issue_
     statuses = {lead.id: lead.crm_status for lead in await _saved(issue_env)}
     assert statuses == {1: STATUS_NEW, 2: STATUS_ISSUED}
 
-
-# ---------- adding a phone by hand ----------
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ("+7 (921) 000-00-02", "+79210000002"),
-        ("8 812 555-01-01", "+78125550101"),
-        ("9210000002", "+79210000002"),
-        ("  +7 921 000 00 02 ", "+79210000002"),
-        ("+375 29 123-45-67", "+375291234567"),
-        ("", None),
-        (None, None),
-        ("нет номера", None),
-        ("+7921", None),
-        ("12345", None),
-        ("8921000000212", None),
-        ("+792100000021", None),
-        ("89210000002 доб. 5", None),
-        ("<b>89210000002</b>", None),
-    ],
-)
-def test_manual_phone_format(raw: str | None, expected: str | None) -> None:
-    assert parse_manual_phone(raw) == expected
-
-
-async def _issued_lead(session_maker) -> int:
-    async with session_maker() as session:
-        await pipeline.save_collected_places(session, [_place()])
-        return (await issue_next_leads(session, 1))[0].id
-
-
-def _add_phone_callback(lead_id: int, chat_id: int = ADMIN) -> MagicMock:
-    callback = MagicMock(spec=CallbackQuery)
-    callback.data = f"lp:{lead_id}"
-    callback.answer = AsyncMock()
-    callback.from_user = User(id=ADMIN, is_bot=False, first_name="Анна <Админ>")
-    callback.message = _chat_message(chat_id)
-    return callback
-
-
-def _reply_message(text_: str, prompt_id: int = 777, chat_id: int = ADMIN) -> MagicMock:
-    message = _chat_message(chat_id)
-    message.text = text_
-    message.reply_to_message = MagicMock(message_id=prompt_id)
-    return message
-
-
-async def test_adding_a_phone_saves_it_and_updates_the_card(issue_env) -> None:
-    lead_id = await _issued_lead(issue_env)
-    callback = _add_phone_callback(lead_id)
-    await issue.handle_add_phone(callback)
-
-    asked = callback.message.answer.await_args
-    assert asked.args[0].startswith(issue.PHONE_PROMPT_PREFIX)
-    assert "Анна &lt;Админ&gt;" in asked.args[0]
-    assert isinstance(asked.kwargs["reply_markup"], ForceReply)
-    assert asked.kwargs["reply_markup"].selective is True
-    callback.answer.assert_awaited_once()
-
-    reply = _reply_message("8 (921) 000-00-02")
-    await issue.handle_phone_reply(reply)
-
-    assert (await _saved(issue_env))[0].phone == "+79210000002"
-    assert "+79210000002" in reply.answer.await_args.args[0]
-    edited = reply.bot.edit_message_text.await_args
-    assert edited.kwargs["message_id"] == 500  # the card, not the question
-    assert "📞 <b>Телефон:</b> +79210000002" in edited.args[0]
-    buttons = [button.text for row in edited.kwargs["reply_markup"].inline_keyboard for button in row]
-    assert OPEN_CARD_BUTTON_TEXT in buttons
-    assert ADD_PHONE_BUTTON_TEXT not in buttons
-    assert issue._phone_prompts == {}
-
-
-async def test_wrong_number_is_refused_and_can_be_corrected(issue_env) -> None:
-    lead_id = await _issued_lead(issue_env)
-    await issue.handle_add_phone(_add_phone_callback(lead_id))
-
-    wrong = _reply_message("позвоню завтра")
-    await issue.handle_phone_reply(wrong)
-    assert "Не похоже" in wrong.answer.await_args.args[0]
-    assert (await _saved(issue_env))[0].phone is None
-    wrong.bot.edit_message_text.assert_not_awaited()
-
-    fixed = _reply_message("+7 921 000-00-02")
-    await issue.handle_phone_reply(fixed)
-    assert (await _saved(issue_env))[0].phone == "+79210000002"
-
-
-async def test_question_forgotten_after_a_restart_is_explained(issue_env) -> None:
-    await _issued_lead(issue_env)
-    reply = _reply_message("+7 921 000-00-02", prompt_id=12345)
-    await issue.handle_phone_reply(reply)
-    assert "устарел" in reply.answer.await_args.args[0]
-    assert (await _saved(issue_env))[0].phone is None
-
-
-async def test_old_question_expires(issue_env, monkeypatch) -> None:
-    lead_id = await _issued_lead(issue_env)
-    await issue.handle_add_phone(_add_phone_callback(lead_id))
-    real = issue.time.monotonic()
-    monkeypatch.setattr(issue.time, "monotonic", lambda: real + issue._PHONE_PROMPT_TTL_SECONDS + 1)
-    reply = _reply_message("+7 921 000-00-02")
-    await issue.handle_phone_reply(reply)
-    assert "устарел" in reply.answer.await_args.args[0]
-    assert (await _saved(issue_env))[0].phone is None
-
-
-async def test_the_list_of_questions_is_bounded(issue_env, monkeypatch) -> None:
-    monkeypatch.setattr(issue, "_MAX_PHONE_PROMPTS", 3)
-    for prompt_id in range(10):
-        issue._remember_phone_prompt(ADMIN, prompt_id, 1, 2)
-    assert len(issue._phone_prompts) == 3
-    assert (ADMIN, 9) in issue._phone_prompts
-
-
-@pytest.mark.parametrize("data", ["lp:", "lp:abc", "lp:1:2", "lp:999"])
-async def test_stale_add_phone_button(issue_env, data: str) -> None:
-    callback = _add_phone_callback(1)
-    callback.data = data
-    await issue.handle_add_phone(callback)
-    assert callback.answer.await_args.kwargs.get("show_alert") is True
-    callback.message.answer.assert_not_awaited()
-
-
-async def test_two_quick_replies_do_not_fail(issue_env) -> None:
-    lead_id = await _issued_lead(issue_env)
-    await issue.handle_add_phone(_add_phone_callback(lead_id))
-    await asyncio.gather(
-        issue.handle_phone_reply(_reply_message("+7 921 000-00-02")),
-        issue.handle_phone_reply(_reply_message("+7 921 000-00-02")),
-    )
-    assert (await _saved(issue_env))[0].phone == "+79210000002"
-
-
-async def test_card_update_failure_keeps_the_saved_phone(issue_env) -> None:
-    lead_id = await _issued_lead(issue_env)
-    await issue.handle_add_phone(_add_phone_callback(lead_id))
-    reply = _reply_message("+7 921 000-00-02")
-    reply.bot.edit_message_text = AsyncMock(
-        side_effect=TelegramBadRequest(method=MagicMock(spec=SendMessage), message="message to edit not found")
-    )
-    await issue.handle_phone_reply(reply)
-    assert (await _saved(issue_env))[0].phone == "+79210000002"
-
-
-@pytest.fixture
-def guarded_dispatcher(issue_env, monkeypatch: pytest.MonkeyPatch) -> Iterator[Dispatcher]:
-    """The handlers behind the same admin check as in main.py."""
-    monkeypatch.setattr("src.bot.middlewares.settings", Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=ADMIN))
-    dp = Dispatcher()
-    guard = AdminOnlyMiddleware()
-    dp.message.middleware(guard)
-    dp.callback_query.middleware(guard)
-    issue.router._parent_router = None  # another test may have left it attached
-    dp.include_router(issue.router)
-    yield dp
-    issue.router._parent_router = None
-    dp.sub_routers.clear()
-
-
-def _reply_update(user_id: int, text_: str, prompt_id: int, prompt_text: str) -> Update:
-    chat = Chat(id=GROUP, type="supergroup")
-    when = datetime(2026, 11, 5, tzinfo=UTC)
-    prompt = Message(
-        message_id=prompt_id,
-        date=when,
-        chat=chat,
-        text=prompt_text,
-        from_user=User(id=1, is_bot=True, first_name="Бот"),
-    )
-    message = Message(
-        message_id=prompt_id + 1,
-        date=when,
-        chat=chat,
-        text=text_,
-        reply_to_message=prompt,
-        from_user=User(id=user_id, is_bot=False, first_name="Человек"),
-    )
-    return Update(update_id=prompt_id, message=message)
-
-
-def _press_update(user_id: int, data: str) -> Update:
-    chat = Chat(id=GROUP, type="supergroup")
-    card = Message(message_id=500, date=datetime(2026, 11, 5, tzinfo=UTC), chat=chat, text="карточка")
-    callback = CallbackQuery(
-        id="1",
-        from_user=User(id=user_id, is_bot=False, first_name="Человек"),
-        chat_instance="c",
-        data=data,
-        message=card,
-    )
-    return Update(update_id=1, callback_query=callback)
-
-
-def _patch_telegram(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    calls = MagicMock()
-    calls.answer = AsyncMock(return_value=MagicMock(message_id=777))
-    calls.reply = AsyncMock()
-    calls.callback_answer = AsyncMock()
-    monkeypatch.setattr(Message, "answer", calls.answer)
-    monkeypatch.setattr(Message, "reply", calls.reply)
-    monkeypatch.setattr(CallbackQuery, "answer", calls.callback_answer)
-    return calls
-
-
-async def test_stranger_cannot_press_add_phone(guarded_dispatcher, issue_env, monkeypatch) -> None:
-    calls = _patch_telegram(monkeypatch)
-    lead_id = await _issued_lead(issue_env)
-    await guarded_dispatcher.feed_update(MagicMock(), _press_update(STRANGER, f"lp:{lead_id}"))
-    assert calls.callback_answer.await_args.args[0] == "⛔ Нет доступа"
-    calls.answer.assert_not_awaited()
-    assert issue._phone_prompts == {}
-
-
-async def test_stranger_cannot_set_a_phone_by_replying(guarded_dispatcher, issue_env, monkeypatch) -> None:
-    calls = _patch_telegram(monkeypatch)
-    lead_id = await _issued_lead(issue_env)
-    issue._remember_phone_prompt(GROUP, 777, lead_id, 500)
-    update = _reply_update(STRANGER, "+7 921 000-00-02", 777, f"{issue.PHONE_PROMPT_PREFIX} «Организация 1»")
-    await guarded_dispatcher.feed_update(MagicMock(), update)
-    assert (await _saved(issue_env))[0].phone is None
-    assert (GROUP, 777) in issue._phone_prompts
-    assert calls.reply.await_args.args[0] == "⛔ Нет доступа"
-
-
-async def test_admin_goes_all_the_way_through_the_dispatcher(guarded_dispatcher, issue_env, monkeypatch) -> None:
-    calls = _patch_telegram(monkeypatch)
-    lead_id = await _issued_lead(issue_env)
-
-    await guarded_dispatcher.feed_update(MagicMock(), _press_update(ADMIN, f"lp:{lead_id}"))
-    question = calls.answer.await_args.args[0]
-    assert question.startswith(issue.PHONE_PROMPT_PREFIX)
-
-    bot = MagicMock()
-    bot.edit_message_text = AsyncMock()
-    update = _reply_update(ADMIN, "+7 921 000-00-02", 777, question)
-    await guarded_dispatcher.feed_update(bot, update)
-    assert (await _saved(issue_env))[0].phone == "+79210000002"
-
-
-async def test_ordinary_replies_are_not_taken_for_a_phone(guarded_dispatcher, issue_env, monkeypatch) -> None:
-    calls = _patch_telegram(monkeypatch)
-    update = _reply_update(ADMIN, "+7 921 000-00-02", 777, "какое-то другое сообщение бота")
-    await guarded_dispatcher.feed_update(MagicMock(), update)
-    calls.answer.assert_not_awaited()
-    calls.reply.assert_not_awaited()
-
-
-# ---------- files from a collector on another computer ----------
-
-
-def _record(**overrides) -> dict:
-    return {
-        "source": "2gis",
-        "source_id": "70001",
-        "name": "Организация",
-        "address": "Невский проспект, 10",
-        "phones": [],
-        "website": None,
-        "rubric": "dentist_clinic",
-        "rubric_name": "Стоматологические клиники",
-        "source_url": "https://2gis.ru/spb/firm/70001",
-    } | overrides
-
-
-def _file(*records: dict) -> bytes:
-    document = build_document(list(records), datetime(2026, 11, 5, tzinfo=UTC), "home")
-    return json.dumps(document, ensure_ascii=False).encode("utf-8")
-
-
-def test_file_lead_without_contacts_follows_the_setting() -> None:
-    allowed = parse_lead_file(_file(_record()), 1024 * 1024, 10, require_contact=False)
-    assert len(allowed.places) == 1
-    assert allowed.places[0].contacts_known is False
-    assert allowed.places[0].rubric == "Стоматологические клиники"
-
-    refused = parse_lead_file(_file(_record()), 1024 * 1024, 10, require_contact=True)
-    assert refused.places == []
-    assert refused.rejected == {REASON_NO_CONTACTS: 1}
-
-
-def test_file_lead_from_another_source_still_needs_contacts() -> None:
-    parsed = parse_lead_file(_file(_record(source="osm")), 1024 * 1024, 10, require_contact=False)
-    assert parsed.rejected == {REASON_NO_CONTACTS: 1}
-
-
-def test_file_from_an_older_collector_without_a_rubric_name_is_fine() -> None:
-    record = _record(phones=["+78125550101"])
-    del record["rubric_name"]
-    assert parse_lead_file(_file(record), 1024 * 1024, 10).places[0].rubric is None
-
-
-async def test_from_the_collector_through_a_file_to_the_card(session_maker, tmp_path: Path, monkeypatch) -> None:
-    """The home computer case: without contacts the lead must survive export and import."""
-    engine = create_async_engine(f"sqlite+aiosqlite:///{(tmp_path / 'home.db').as_posix()}")
-    await init_db(engine)
-    home = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-    async with home() as session:
-        await pipeline.save_collected_places(session, [_place(rubric="Клиника")])
-    exported = await export_new_leads(home, tmp_path, "spb", 100)
-    assert json.loads(exported.files[0].read_text(encoding="utf-8"))["leads"][0]["rubric_name"] == "Клиника"
-    await engine.dispose()
-
-    service = ImportService(session_maker, AsyncMock(), tmp_path / "inbox", 1024 * 1024, 100)
-    result = await service.import_bytes(exported.files[0].read_bytes(), "leads.json", SOURCE_TELEGRAM)
-    assert (result.ok, result.saved_new, result.rejected_total) == (True, 1, 0)
-
-    lead = (await _saved(session_maker))[0]
-    assert lead.site_status == SITE_UNKNOWN
-    assert lead.rubric == "Клиника"
-    assert lead.source_url == "https://2gis.ru/spb/firm/1"
-    assert lead.imported_at is not None
-    assert "смотри в карточке" in format_issued_lead(lead)
-    assert lead_to_record(lead, "spb")["phones"] == []
-
-
-async def test_server_that_requires_contacts_refuses_such_a_file(session_maker, tmp_path: Path) -> None:
-    service = ImportService(session_maker, AsyncMock(), tmp_path / "inbox", 1024 * 1024, 100, require_contact=True)
-    result = await service.import_bytes(_file(_record()), "leads.json", SOURCE_TELEGRAM)
-    assert result.saved_new == 0
-    assert result.rejected == {REASON_NO_CONTACTS: 1}
-
-
-# ---------- captcha: only a stop, no way around ----------
-
-
-def test_the_browser_module_has_nothing_that_hides_automation() -> None:
-    source = (Path(__file__).parent.parent / "src" / "services" / "scraper" / "browser.py").read_text(encoding="utf-8")
-    for marker in ("add_init_script", "AutomationControlled", "navigator", "window.chrome", "recaptcha", "mouse"):
-        assert marker not in source

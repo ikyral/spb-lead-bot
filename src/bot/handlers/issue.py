@@ -1,10 +1,7 @@
 """Handing out leads in batches: 'next batch' button, status buttons and the funnel statistics."""
 
 import asyncio
-import html
 import logging
-import time
-from dataclasses import dataclass
 
 from aiogram import F, Router
 from aiogram.exceptions import (
@@ -14,7 +11,7 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
 )
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardMarkup, LinkPreviewOptions, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, LinkPreviewOptions, Message
 
 from src.bot.chats import is_group_chat
 from src.bot.formatters import (
@@ -40,18 +37,15 @@ from src.database.repo import (
     async_session_maker,
     count_issued_leads,
     count_new_leads,
-    count_unknown_site_leads,
     get_contact_status_counts,
     get_pool_stats,
     get_status_counts,
     issue_next_leads,
     return_undelivered_leads,
     set_contact_status,
-    set_lead_phone,
     set_site_verdict,
 )
 from src.services.chains import rescore_new_leads
-from src.services.normalize import parse_manual_phone
 from src.services.scheduler import TRIGGER_BATCH, CollectorRunner, TopupDecision, TopupOutcome
 
 logger = logging.getLogger(__name__)
@@ -69,23 +63,6 @@ MAX_SEND_ATTEMPTS: int = 3
 _issuing_to: set[int] = set()
 # Batches being sent in the background; the set keeps a strong reference to each task.
 _background_batches: set[asyncio.Task[None]] = set()
-# Starts the question 'which phone?': a reply to such a message is the answer to it.
-PHONE_PROMPT_PREFIX: str = "✏️ Телефон для лида"
-_PHONE_PROMPT_TTL_SECONDS: float = 3600.0
-_MAX_PHONE_PROMPTS: int = 200
-
-
-@dataclass(frozen=True)
-class _PhonePrompt:
-    """A question waiting for a reply: which lead it is about and which message shows the lead."""
-
-    lead_id: int
-    card_message_id: int
-    asked_at: float
-
-
-# By (chat, message with the question). A restart loses them; the admin is then asked to press the button again.
-_phone_prompts: dict[tuple[int, int], _PhonePrompt] = {}
 
 
 async def _answer_safely(message: Message, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
@@ -135,22 +112,17 @@ def _describe_topup(decision: TopupDecision) -> str:
         return "🔄 Сбор уже идёт, итог пришлю."
     if decision.outcome is TopupOutcome.COOLDOWN and decision.retry_at is not None:
         return f"⏳ Внеочередной сбор возможен не чаще раза в час, следующий: {format_msk_time(decision.retry_at)}."
-    if decision.outcome is TopupOutcome.EXTERNAL:
-        return "📥 Лиды приходят с внешнего сборщика: нужен новый файл импорта."
     if decision.outcome is TopupOutcome.DAILY_LIMIT:
         return "🛑 Суточный лимит запросов исчерпан, сбор продолжится завтра."
     return "⏸ Автосбор выключен. Запустить вручную: /collect_now"
 
 
-def _describe_held_back(held_back: int, unknown: int, rules: IssueRules, size: int) -> list[str]:
+def _describe_held_back(held_back: int, rules: IssueRules, size: int) -> list[str]:
     """Why leads still in the pool did not go into a short batch."""
     lines: list[str] = []
-    waiting = 0 if rules.issue_unknown else unknown
-    if waiting:
-        lines.append(f"⏳ <b>{waiting}</b> ждут проверки сайта: сейчас такие лиды не выдаются (LEADS_ISSUE_UNKNOWN).")
-    if held_back > waiting:
+    if held_back > 0:
         lines.append(
-            f"⚖️ Ещё <b>{held_back - waiting}</b> не вошли в пачку: "
+            f"⚖️ Ещё <b>{held_back}</b> не вошли в пачку: "
             f"одна ниша занимает не больше {rules.niche_cap(size)} из {size}."
         )
     return lines
@@ -158,7 +130,7 @@ def _describe_held_back(held_back: int, unknown: int, rules: IssueRules, size: i
 
 async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> None:
     size = settings.LEADS_BATCH_SIZE
-    rules = IssueRules(issue_unknown=settings.LEADS_ISSUE_UNKNOWN, max_niche_share=settings.LEADS_MAX_NICHE_SHARE)
+    rules = IssueRules(max_niche_share=settings.LEADS_MAX_NICHE_SHARE)
     async with async_session_maker() as session:
         leads = await issue_next_leads(session, size, rules)
 
@@ -193,7 +165,6 @@ async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> N
 
     async with async_session_maker() as session:
         pool_size = await count_new_leads(session)
-        unknown = await count_unknown_site_leads(session)
 
     delivered = len(leads) - len(undelivered)
     lines: list[str] = []
@@ -214,7 +185,7 @@ async def _issue_batch(message: Message, collector_runner: CollectorRunner) -> N
             )
     if held_back > 0:
         # More leads would not change the rules: the pool is refilled only if it is really low.
-        lines += _describe_held_back(held_back, unknown, rules, size)
+        lines += _describe_held_back(held_back, rules, size)
         await collector_runner.check_pool()
     elif len(leads) < size:
         lines.append(_describe_topup(await collector_runner.request_topup(TRIGGER_BATCH)))
@@ -363,91 +334,6 @@ async def handle_site_verdict(callback: CallbackQuery) -> None:
         except TelegramAPIError as exc:
             # The verdict is saved; only the card on the screen is out of date.
             logger.warning("Could not update the card of lead %s: %s", lead_id, exc)
-
-
-def _remember_phone_prompt(chat_id: int, prompt_message_id: int, lead_id: int, card_message_id: int) -> None:
-    now = time.monotonic()
-    for key, prompt in list(_phone_prompts.items()):
-        if now - prompt.asked_at > _PHONE_PROMPT_TTL_SECONDS:
-            del _phone_prompts[key]
-    if len(_phone_prompts) >= _MAX_PHONE_PROMPTS:
-        del _phone_prompts[next(iter(_phone_prompts))]
-    _phone_prompts[(chat_id, prompt_message_id)] = _PhonePrompt(lead_id, card_message_id, now)
-
-
-@router.callback_query(F.data.startswith("lp:"))
-async def handle_add_phone(callback: CallbackQuery) -> None:
-    """Ask for the phone found in the card of a handed-out lead."""
-    parts = (callback.data or "").split(":")
-    if len(parts) != 2 or not parts[1].isdigit() or not isinstance(callback.message, Message):
-        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
-        return
-    lead_id = int(parts[1])
-    async with async_session_maker() as session:
-        lead = await session.get(Lead, lead_id)
-    if lead is None or lead.issued_at is None:
-        await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
-        return
-
-    user = callback.from_user
-    # A selective reply field opens only for those mentioned: in a group, for the admin who pressed.
-    mention = f'<a href="tg://user?id={user.id}">{html.escape(user.full_name)}</a>'
-    try:
-        prompt = await callback.message.answer(
-            f"{PHONE_PROMPT_PREFIX} «{html.escape(lead.name[:100])}»\n"
-            f"{mention}, ответьте на это сообщение номером, например +7 921 000-00-02.",
-            reply_markup=ForceReply(force_reply=True, selective=True, input_field_placeholder="+7 921 000-00-02"),
-            parse_mode="HTML",
-        )
-    except TelegramAPIError as exc:
-        logger.warning("Could not ask for the phone of lead %s: %s", lead_id, exc)
-        await callback.answer("Не удалось отправить вопрос, попробуйте ещё раз", show_alert=True)
-        return
-    _remember_phone_prompt(callback.message.chat.id, prompt.message_id, lead_id, callback.message.message_id)
-    await callback.answer()
-
-
-@router.message(F.text, F.reply_to_message.text.startswith(PHONE_PROMPT_PREFIX))
-async def handle_phone_reply(message: Message) -> None:
-    """Check the number, save it to the lead and show it on the card."""
-    reply_to = message.reply_to_message
-    key = (message.chat.id, reply_to.message_id if reply_to is not None else 0)
-    prompt = _phone_prompts.get(key)
-    if prompt is None or time.monotonic() - prompt.asked_at > _PHONE_PROMPT_TTL_SECONDS:
-        _phone_prompts.pop(key, None)
-        await _answer_safely(message, "Этот вопрос устарел. Нажмите «✏️ Добавить телефон» на лиде ещё раз.")
-        return
-
-    phone = parse_manual_phone(message.text)
-    if phone is None:
-        await _answer_safely(
-            message,
-            "⚠️ Не похоже на номер телефона. Ответьте на вопрос ещё раз одним номером, например +7 921 000-00-02.",
-        )
-        return
-
-    async with async_session_maker() as session:
-        lead = await set_lead_phone(session, prompt.lead_id, phone)
-    _phone_prompts.pop(key, None)  # two quick replies both get here
-    if lead is None:
-        await _answer_safely(message, STALE_BUTTON_TEXT)
-        return
-
-    await _answer_safely(message, f"✅ Телефон сохранён: <code>{html.escape(phone)}</code>")
-    if message.bot is None:
-        return
-    try:
-        await message.bot.edit_message_text(
-            format_issued_lead(lead),
-            chat_id=message.chat.id,
-            message_id=prompt.card_message_id,
-            reply_markup=get_issued_lead_keyboard(lead),
-            parse_mode="HTML",
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
-        )
-    except TelegramAPIError as exc:
-        # The phone is saved; only the card on the screen is out of date.
-        logger.warning("Could not update the card of lead %s: %s", prompt.lead_id, exc)
 
 
 @router.message(Command("rescore"))

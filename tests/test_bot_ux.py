@@ -12,7 +12,6 @@ from aiogram.methods import SendMessage
 from aiogram.types import (
     BotCommandScopeChat,
     BotCommandScopeDefault,
-    CallbackQuery,
     Chat,
     InlineKeyboardMarkup,
     Message,
@@ -22,11 +21,10 @@ from aiogram.types import (
 )
 
 from src.bot import commands as bot_commands
-from src.bot.formatters import MAX_MESSAGE_LENGTH, format_help, format_import_report, format_unknown_niche
-from src.bot.handlers import collector, fallback, imports, issue, leads, menu, reminders, search
+from src.bot.formatters import MAX_MESSAGE_LENGTH, format_help
+from src.bot.handlers import collector, fallback, issue, leads, menu, reminders, search
 from src.bot.middlewares import AdminOnlyMiddleware
 from src.bot.texts import (
-    ENRICH_COMMAND,
     HELP_SECTIONS,
     NOT_UNDERSTOOD_ADMIN_TEXT,
     NOT_UNDERSTOOD_USER_TEXT,
@@ -36,9 +34,6 @@ from src.bot.texts import (
     HelpSection,
 )
 from src.config import Settings
-from src.services.lead_enrich import EnrichStats
-from src.services.lead_file import REQUEST_FILE_ERROR
-from src.services.lead_import import ImportResult
 
 ADMIN, SECOND_ADMIN, STRANGER = 100, 200, 999
 GROUP = -1001
@@ -48,7 +43,6 @@ ROUTERS = (
     leads.router,
     issue.router,
     collector.router,
-    imports.router,
     reminders.router,
     menu.router,
     fallback.router,
@@ -57,9 +51,7 @@ ADMIN_ONLY_COMMANDS = {
     "next_leads",
     "rescore",
     "today",
-    "export_unknown",
     "leads_stats",
-    "niches",
     "collect_status",
     "collect_now",
     "collect_on",
@@ -146,7 +138,7 @@ def test_help_hides_admin_commands_from_a_stranger() -> None:
 def test_help_for_an_admin_has_every_command_marked_with_an_example() -> None:
     text = "\n".join(format_help(is_admin=True))
 
-    for section in ("Выдача", "Обогащение", "Статистика", "Настройки"):
+    for section in ("Выдача", "Статистика", "Настройки"):
         assert f"<b>{section}</b>" in text
     for command in ADMIN_ONLY_COMMANDS:
         assert f"🔒 /{command} —" in text
@@ -180,25 +172,7 @@ def test_the_real_help_fits_in_one_message() -> None:
     assert len(format_help(is_admin=True)) == 1
 
 
-# ---------- wrong arguments and wrong files ----------
-
-
-async def test_a_wrong_number_gets_one_sentence_and_an_example(monkeypatch) -> None:
-    message = MagicMock()
-    message.answer = AsyncMock()
-
-    await imports.handle_export_unknown(message, MagicMock(args="0"))
-
-    text = message.answer.await_args.args[0]
-    assert "от 1 до" in text
-    assert "<code>/export_unknown 30</code>" in text
-
-
-def test_an_unknown_niche_gets_an_example_with_a_real_niche() -> None:
-    first, *_ = format_unknown_niche("abc", ["beauty", "dentist_clinic"])
-
-    assert first.startswith("Неизвестная ниша: abc. Пример: <code>/export_unknown 30 beauty</code>")
-    assert "dentist_clinic" in first
+# ---------- wrong arguments ----------
 
 
 async def test_an_unknown_source_gets_an_example() -> None:
@@ -213,90 +187,6 @@ async def test_an_unknown_source_gets_an_example() -> None:
     assert "Неизвестный источник: &lt;yandex&gt;" in text
     assert "<code>/provider_on 2gis_scraper</code>" in text
     runner.enable_provider.assert_not_called()
-
-
-def test_a_request_file_sent_back_says_which_file_to_send_and_where_it_is() -> None:
-    result = ImportResult(source="telegram", file_name="enrich_request_1.json", ok=False, error=REQUEST_FILE_ERROR)
-
-    text = format_import_report(result)
-
-    assert REQUEST_FILE_ERROR in text
-    assert "без слова request" in text
-    assert "<code>exports/</code>" in text
-
-
-def test_other_import_errors_get_no_hint_about_request_files() -> None:
-    result = ImportResult(source="telegram", file_name="x.json", ok=False, error="неверный JSON")
-
-    assert "без слова request" not in format_import_report(result)
-
-
-# ---------- the file for a collector and the result of an enrichment ----------
-
-
-def test_the_caption_of_a_request_has_the_steps_and_the_command_within_the_limit() -> None:
-    caption = imports._export_caption(30, 30, 3, None)
-    with_niche = imports._export_caption(10, 30, 0, "очень длинная ниша <b>" * 20)
-
-    assert f"<code>{ENRICH_COMMAND}</code>" in caption
-    assert "капчу" in caption and "без слова request" in caption
-    assert len(with_niche) <= 1024
-    assert "<b>очень" not in with_niche  # a niche from the database is escaped
-
-
-async def test_the_result_of_an_enrichment_ends_with_buttons_for_what_is_next() -> None:
-    message = MagicMock()
-    status = MagicMock()
-    status.edit_text = AsyncMock()
-    message.answer = AsyncMock(return_value=status)
-    message.document = MagicMock(file_size=10, file_name="enrich.json")
-    message.chat.id = ADMIN
-    bot = MagicMock()
-    bot.download = AsyncMock()
-    result = ImportResult(source="telegram", file_name="enrich.json", total=1, enrichment=EnrichStats(updated=1))
-    service = MagicMock(max_bytes=1000)
-    service.import_bytes = AsyncMock(return_value=result)
-
-    await imports.handle_lead_file(message, bot, service)
-
-    message.answer.assert_awaited_once()  # only the note: it became the result
-    markup = status.edit_text.await_args.kwargs["reply_markup"]
-    assert isinstance(markup, InlineKeyboardMarkup)
-    data = [button.callback_data for row in markup.inline_keyboard for button in row]
-    assert data == ["panel:next", "enrich:request"]
-
-
-async def test_a_failed_import_has_no_buttons() -> None:
-    message = MagicMock()
-    status = MagicMock()
-    status.edit_text = AsyncMock()
-    message.answer = AsyncMock(return_value=status)
-    message.document = MagicMock(file_size=10, file_name="enrich_request.json")
-    bot = MagicMock()
-    bot.download = AsyncMock()
-    result = ImportResult(source="telegram", file_name="enrich_request.json", ok=False, error=REQUEST_FILE_ERROR)
-    service = MagicMock(max_bytes=1000)
-    service.import_bytes = AsyncMock(return_value=result)
-
-    await imports.handle_lead_file(message, bot, service)
-
-    assert status.edit_text.await_args.kwargs["reply_markup"] is None
-
-
-async def test_the_button_for_a_request_is_answered_before_the_file_is_built(monkeypatch) -> None:
-    order: list[str] = []
-
-    async def send(message, limit, niche_text=None):
-        order.append(f"file {limit}")
-
-    monkeypatch.setattr(menu, "send_enrich_request", send)
-    callback = MagicMock(spec=CallbackQuery)
-    callback.message = MagicMock(spec=Message)
-    callback.answer = AsyncMock(side_effect=lambda *args, **kwargs: order.append("answered"))
-
-    await menu.handle_enrich_request_button(callback)
-
-    assert order == ["answered", "file 30"]
 
 
 # ---------- through the dispatcher ----------
@@ -338,7 +228,7 @@ def telegram(monkeypatch: pytest.MonkeyPatch) -> Iterator[MagicMock]:
     for router in ROUTERS:
         dp.include_router(router)
     calls.feed = lambda chat_id, user_id, text: dp.feed_update(
-        _bot(), _update(chat_id, user_id, text), collector_runner=MagicMock(), import_service=MagicMock()
+        _bot(), _update(chat_id, user_id, text), collector_runner=MagicMock()
     )
     yield calls
     for router in ROUTERS:
@@ -403,7 +293,7 @@ async def test_help_for_a_stranger_through_the_bot_hides_admin_commands(telegram
     await telegram.feed(STRANGER, STRANGER, "/help")
 
     answer, _ = _answered(telegram)
-    assert "/export_unknown" not in answer
+    assert "/collect_now" not in answer
     assert "/help" in answer
 
 
@@ -411,35 +301,14 @@ async def test_help_button_for_an_admin(telegram) -> None:
     await telegram.feed(ADMIN, ADMIN, "❓ Помощь")
 
     answer, markup = _answered(telegram)
-    assert "🔒 /export_unknown" in answer
+    assert "🔒 /collect_now" in answer
     assert isinstance(markup, ReplyKeyboardMarkup)
 
 
-async def test_enrichment_button_shows_five_steps_with_the_command_and_a_request_button(telegram) -> None:
-    await telegram.feed(ADMIN, ADMIN, "🔎 Обогащение")
-
-    answer, markup = _answered(telegram)
-    assert all(f"<b>{step}.</b>" in answer for step in range(1, 6))
-    assert f"<code>{ENRICH_COMMAND}</code>" in answer
-    assert len(answer) <= MAX_MESSAGE_LENGTH
-    assert isinstance(markup, InlineKeyboardMarkup)
-    assert markup.inline_keyboard[0][0].callback_data == "enrich:request"
-
-
-async def test_a_stranger_cannot_open_the_enrichment_guide(telegram) -> None:
-    await telegram.feed(STRANGER, STRANGER, "🔎 Обогащение")
-
-    answer, _ = _answered(telegram)
-    assert "только администраторам" in answer
-    assert "collect_cli" not in answer
-
-
-async def test_stats_button_shows_the_funnel_and_the_niches(telegram, monkeypatch) -> None:
-    stats, niches = AsyncMock(), AsyncMock()
+async def test_stats_button_shows_the_funnel(telegram, monkeypatch) -> None:
+    stats = AsyncMock()
     monkeypatch.setattr(menu, "handle_leads_stats", stats)
-    monkeypatch.setattr(menu, "handle_niches", niches)
 
-    await telegram.feed(ADMIN, ADMIN, "📊 Ниши и статистика")
+    await telegram.feed(ADMIN, ADMIN, "📊 Статистика")
 
     stats.assert_awaited_once()
-    niches.assert_awaited_once()

@@ -9,8 +9,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramMigrateToChat, TelegramRetryAfter
 from aiogram.types import InlineKeyboardMarkup, LinkPreviewOptions
 
-from src.bot.formatters import format_collection_report, format_import_messages
-from src.services.lead_import import ImportResult
+from src.bot.formatters import format_collection_report
 from src.services.scheduler import TRIGGER_LOW_POOL, TRIGGER_SCHEDULE, RunReport
 
 logger = logging.getLogger(__name__)
@@ -141,18 +140,7 @@ class AdminNotifier:
         except TelegramAPIError as exc:
             logger.warning("Failed to notify chat %s about its new ID: %s", chat_id, exc)
 
-    async def report_import(self, result: ImportResult, exclude_chat: int | None = None) -> None:
-        """The outcome of an imported file. The chat it was sent from sees the result there."""
-        # One after another, or a long list would arrive out of order.
-        for text in format_import_messages(result):
-            await self.send(text, exclude_chat=exclude_chat, link_preview=False)
 
-    async def remind_pool_low(self, pool_size: int) -> None:
-        """Ask for a new file from the external collector."""
-        await self.send(
-            f"📉 В запасе осталось лидов: <b>{pool_size}</b>, нужен новый импорт. "
-            "Загрузите файл с внешнего сборщика: отправьте его боту или положите в папку импорта на сервере."
-        )
 
     async def report(self, report: RunReport) -> None:
         """Alerts always go out; the summary only if there is something to tell."""

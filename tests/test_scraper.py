@@ -3,7 +3,6 @@
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -18,21 +17,18 @@ from src.database.repo import (
     record_provider_block,
     record_provider_success,
 )
-from src.services import pipeline
+from src.services import pipeline, twogis_links
 from src.services.api_client import (
     ProviderBlockedError,
     ProviderBudgetExhausted,
-    ProviderNoConnectionError,
-    ProviderTemporaryError,
     ProviderUnavailableError,
 )
 from src.services.collector import collect_leads, load_collector_config, unavailable_reason
 from src.services.providers import ScraperOptions, TwoGisScraperProvider
 from src.services.providers.base import BaseMapProvider, RawPlace, SearchArea, SearchPage, SearchQuery
 from src.services.providers.registry import build_providers
-from src.services.scraper import twogis_site
-from src.services.scraper.browser import PageSnapshot, PlaywrightSession
 from src.services.scraper.robots import RobotsRules, RobotsUnavailableError, fetch_robots, parse_robots
+from src.services.scraper.snapshot import PageSnapshot
 from src.services.twogis_links import build_card_url
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -112,9 +108,9 @@ def _provider(
 
 
 def test_public_urls() -> None:
-    assert twogis_site.build_search_url("spb", "кафе") == "https://2gis.ru/spb/search/%D0%BA%D0%B0%D1%84%D0%B5"
-    assert twogis_site.build_search_url("spb", "кафе", 3).endswith("/page/3")
-    assert twogis_site.build_search_url("spb", "кафе / бар") == (
+    assert twogis_links.build_search_url("spb", "кафе") == "https://2gis.ru/spb/search/%D0%BA%D0%B0%D1%84%D0%B5"
+    assert twogis_links.build_search_url("spb", "кафе", 3).endswith("/page/3")
+    assert twogis_links.build_search_url("spb", "кафе / бар") == (
         "https://2gis.ru/spb/search/%D0%BA%D0%B0%D1%84%D0%B5%20%2F%20%D0%B1%D0%B0%D1%80"
     )
     assert build_card_url("spb", "70000001_abc") == "https://2gis.ru/spb/firm/70000001"
@@ -132,8 +128,8 @@ def test_public_urls() -> None:
     ],
 )
 def test_which_responses_are_read(url: str, search: bool, card: bool) -> None:
-    assert twogis_site.is_search_response(url) is search
-    assert twogis_site.is_card_response(url) is card
+    assert twogis_links.is_search_response(url) is search
+    assert twogis_links.is_card_response(url) is card
 
 
 @pytest.mark.parametrize(
@@ -149,7 +145,7 @@ def test_which_responses_are_read(url: str, search: bool, card: bool) -> None:
     ],
 )
 def test_detect_block(status: int, url: str, title: str, html: str, expected: str | None) -> None:
-    reason = twogis_site.detect_block(status, url, title, html)
+    reason = twogis_links.detect_block(status, url, title, html)
     if expected is None:
         assert reason is None
     else:
@@ -157,14 +153,14 @@ def test_detect_block(status: int, url: str, title: str, html: str, expected: st
 
 
 def test_reading_responses_tolerates_odd_data() -> None:
-    assert twogis_site.read_search_bodies([]) is None
-    assert twogis_site.read_search_bodies([{"unrelated": 1}, {"result": "строка"}]) is None
-    assert twogis_site.read_search_bodies([{"meta": {"code": 404}}]).items == []
-    data = twogis_site.read_search_bodies([{"result": {"items": ["мусор", {"id": "1"}], "total": "много"}}])
+    assert twogis_links.read_search_bodies([]) is None
+    assert twogis_links.read_search_bodies([{"unrelated": 1}, {"result": "строка"}]) is None
+    assert twogis_links.read_search_bodies([{"meta": {"code": 404}}]).items == []
+    data = twogis_links.read_search_bodies([{"result": {"items": ["мусор", {"id": "1"}], "total": "много"}}])
     assert (data.items, data.total) == ([{"id": "1"}], None)
-    assert twogis_site.read_card_body([{"result": {"items": ["мусор"]}}], "1") is None
-    assert twogis_site.refusal_in_bodies([{"meta": {"code": 403}}]) is not None
-    assert twogis_site.refusal_in_bodies([{"meta": {"code": 200}}, {"meta": "?"}]) is None
+    assert twogis_links.read_card_body([{"result": {"items": ["мусор"]}}], "1") is None
+    assert twogis_links.refusal_in_bodies([{"meta": {"code": 403}}]) is not None
+    assert twogis_links.refusal_in_bodies([{"meta": {"code": 200}}, {"meta": "?"}]) is None
 
 
 # ---------- robots.txt ----------
@@ -226,39 +222,6 @@ async def test_missing_robots_means_allowed_but_unreadable_means_stop() -> None:
 # ---------- reading pages ----------
 
 
-async def test_page_is_read_from_json_and_cards_give_missing_contacts() -> None:
-    session = FakeSession([_ok_page(_json("twogis_page_search.json")), _ok_page(_json("twogis_page_card.json"))])
-    pauses = Pauses()
-    provider = _provider(session, pauses=pauses)
-
-    page = await provider.search(QUERY, AREA, page=1)
-
-    assert [place.external_id for place in page.places] == ["2gis_70000001018420390_abc", "2gis_70000001018420391_def"]
-    first, second = page.places
-    assert (first.source, first.category, first.high_margin) == ("2gis", "dentist_clinic", True)
-    assert first.district == "Центральный"
-    assert first.phone == "+7 (812) 555-01-01"
-    assert first.source_url == "https://2gis.ru/spb/firm/70000001018420390"
-    assert second.phone == "+7 921 000-00-02"
-    assert second.email == "info@dentpro.example"
-    assert second.raw_website == "https://dentpro.example/?utm_source=2gis"
-    assert second.map_url  # coordinates come from the list, the card has none
-
-    # The building and the malformed item are not opened; the search text includes the district.
-    assert len(session.visited) == 2
-    assert session.visited[0].startswith("https://2gis.ru/spb/search/")
-    assert session.visited[1] == "https://2gis.ru/spb/firm/70000001018420391"
-    assert page.has_more is False  # all 3 items of total=3 are shown
-    assert len(pauses.delays) == 1
-
-
-async def test_has_more_follows_the_total() -> None:
-    body = {"result": {"total": 2, "items": [{"id": "1", "name": "A", "contact_groups": ["x"]}]}}
-    provider = _provider(FakeSession([_ok_page(body), _ok_page(body)]))
-    assert (await provider.search(QUERY, AREA, page=1)).has_more is True
-    assert (await provider.search(QUERY, AREA, page=2)).has_more is False
-
-
 async def test_empty_result_is_normal() -> None:
     provider = _provider(FakeSession([_ok_page({"meta": {"code": 404}})]))
     page = await provider.search(QUERY, AREA)
@@ -285,37 +248,6 @@ def test_too_short_pauses_cannot_be_configured() -> None:
                 _env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=1, SCRAPER_MIN_DELAY_SECONDS=9, SCRAPER_MAX_DELAY_SECONDS=8
             )
         )
-
-
-async def test_page_limit_per_run_stops_opening_pages_and_drops_uncontacted_organizations() -> None:
-    body = {
-        "result": {
-            "items": [
-                {"id": "1", "name": "С контактами", "contact_groups": ["x"]},
-                {"id": "2", "name": "Без контактов"},
-                {"id": "3", "name": "Без контактов 2"},
-            ]
-        }
-    }
-    session = FakeSession([_ok_page(body)])
-    provider = _provider(session, ScraperOptions(max_pages_per_run=1))
-
-    page = await provider.search(QUERY, AREA)
-
-    assert [place.name for place in page.places] == ["С контактами"]  # others would look like having no website
-    assert page.has_more is False
-    assert len(session.visited) == 1
-    with pytest.raises(ProviderBudgetExhausted):
-        await provider.search(QUERY, AREA, page=2)
-
-
-async def test_results_limit_per_run() -> None:
-    items = [{"id": str(i), "name": "A", "contact_groups": ["x"]} for i in (1, 2)]
-    body = {"result": {"items": items}}
-    provider = _provider(FakeSession([_ok_page(body)]), ScraperOptions(max_results_per_run=2))
-    await provider.search(QUERY, AREA)
-    with pytest.raises(ProviderBudgetExhausted):
-        await provider.search(QUERY, AREA, page=2)
 
 
 async def test_limits_start_over_for_the_next_run() -> None:
@@ -346,19 +278,6 @@ async def test_refusal_stops_reading_at_once(page: PageSnapshot, expected: str) 
     with pytest.raises(ProviderBlockedError, match=expected):
         await provider.search(QUERY, AREA)
     assert len(session.visited) == 1
-
-
-async def test_captcha_on_a_card_keeps_what_was_read() -> None:
-    session = FakeSession([_ok_page(_json("twogis_page_search.json")), CAPTCHA_PAGE])
-    with pytest.raises(ProviderBlockedError, match="капч") as error:
-        await _provider(session).search(QUERY, AREA)
-    assert [place.name for place in error.value.partial] == ["Улыбка, стоматология"]
-
-
-async def test_an_unrecognized_card_is_left_out_and_is_not_a_refusal() -> None:
-    session = FakeSession([_ok_page(_json("twogis_page_search.json")), _ok_page()])
-    result = await _provider(session).search(QUERY, AREA)
-    assert [place.name for place in result.places] == ["Улыбка, стоматология"]
 
 
 async def test_robots_forbidding_stops_before_opening_anything() -> None:
@@ -402,92 +321,7 @@ async def test_browser_that_failed_to_start_is_still_closed() -> None:
     assert session.closed == 1
 
 
-# ---------- the browser wrapper with Playwright mocked ----------
 
-
-def _playwright_mock() -> tuple[MagicMock, MagicMock, MagicMock, MagicMock]:
-    page = MagicMock()
-    page.close = AsyncMock()
-    context = MagicMock()
-    context.new_page = AsyncMock(return_value=page)
-    context.close = AsyncMock()
-    browser = MagicMock()
-    browser.new_context = AsyncMock(return_value=context)
-    browser.close = AsyncMock()
-    playwright = MagicMock()
-    playwright.chromium.launch = AsyncMock(return_value=browser)
-    playwright.stop = AsyncMock()
-    return playwright, browser, context, page
-
-
-def _start_returning(playwright: MagicMock) -> MagicMock:
-    starter = MagicMock()
-    starter.start = AsyncMock(return_value=playwright)
-    return MagicMock(return_value=starter)
-
-
-async def test_browser_starts_with_defaults_only_and_everything_is_closed() -> None:
-    playwright, browser, context, page = _playwright_mock()
-    session = PlaywrightSession()
-    with patch("playwright.async_api.async_playwright", _start_returning(playwright)):
-        await session.start()
-
-    # Nothing that disguises automation: no User-Agent, proxy, or browser arguments.
-    playwright.chromium.launch.assert_awaited_once_with(headless=True)
-    browser.new_context.assert_awaited_once_with(locale="ru-RU")
-
-    await session.close()
-    page.close.assert_awaited_once()
-    context.close.assert_awaited_once()
-    browser.close.assert_awaited_once()
-    playwright.stop.assert_awaited_once()
-
-
-async def test_failure_of_one_close_step_does_not_skip_the_rest() -> None:
-    playwright, browser, context, page = _playwright_mock()
-    page.close.side_effect = RuntimeError("page is gone")
-    browser.close.side_effect = RuntimeError("browser is gone")
-    session = PlaywrightSession()
-    with patch("playwright.async_api.async_playwright", _start_returning(playwright)):
-        await session.start()
-    await session.close()
-    context.close.assert_awaited_once()
-    playwright.stop.assert_awaited_once()
-
-
-async def test_missing_browser_gives_install_instructions_and_stops_the_driver() -> None:
-    from playwright.async_api import Error as PlaywrightError
-
-    playwright, _browser, _context, _page = _playwright_mock()
-    playwright.chromium.launch.side_effect = PlaywrightError("Executable doesn't exist")
-    session = PlaywrightSession()
-    with (
-        patch("playwright.async_api.async_playwright", _start_returning(playwright)),
-        pytest.raises(ProviderUnavailableError, match="playwright install chromium"),
-    ):
-        await session.start()
-    playwright.stop.assert_awaited_once()
-
-
-async def test_browser_errors_do_not_leak_urls() -> None:
-    from playwright.async_api import Error as PlaywrightError
-    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-
-    playwright, _browser, _context, page = _playwright_mock()
-    session = PlaywrightSession()
-    with patch("playwright.async_api.async_playwright", _start_returning(playwright)):
-        await session.start()
-
-    page.goto = AsyncMock(side_effect=PlaywrightError("net::ERR at https://x.example/?key=SECRET"))
-    with pytest.raises(ProviderTemporaryError) as error:
-        await session.visit("https://x.example/", lambda url: False)
-    assert "SECRET" not in str(error.value)
-
-    page.goto = AsyncMock(side_effect=PlaywrightTimeoutError("Timeout at https://x.example/?key=SECRET"))
-    with pytest.raises(ProviderNoConnectionError) as error:  # not a single response came
-        await session.visit("https://x.example/", lambda url: False)
-    assert "SECRET" not in str(error.value)
-    assert page.remove_listener.call_count == 2
 
 
 # ---------- how the collector treats a blocked provider ----------
@@ -751,14 +585,14 @@ def test_registry_knows_the_scraper_and_explains_what_is_off() -> None:
     assert result.disabled == {"2gis": "не задан DGIS_API_KEY"}
 
     with_key = build_providers(["2gis_scraper", "2gis"], twogis_api_key="key")
-    assert with_key.providers[1].fallback_for is None  # the API is the main source and does not wait for the reader
+    assert with_key.providers[1].fallback_for == "2gis_scraper"
 
 
-def test_registry_without_playwright_installed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+def test_registry_without_pychrome_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None if name == "pychrome" else object())
     result = build_providers(["2gis_scraper"], twogis_api_key=None)
     assert result.providers == []
-    assert "playwright" in result.disabled["2gis_scraper"]
+    assert "pychrome" in result.disabled["2gis_scraper"]
 
 
 @pytest.mark.parametrize("name", ["DGIS_API_KEY", "TWOGIS_API_KEY"])

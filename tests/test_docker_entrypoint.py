@@ -6,7 +6,7 @@ import pytest
 
 import docker_entrypoint as entrypoint
 
-APP_UID, APP_GID = 1000, 1000
+APP_UID, APP_GID = 2000, 2000
 
 
 @pytest.fixture

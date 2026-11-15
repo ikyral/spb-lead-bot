@@ -1,5 +1,5 @@
 """
-2GIS through its public web pages in a browser, without an API key.
+2GIS through its public web pages via Chrome DevTools Protocol, without an API key.
 
 Polite by design: one page at a time, a random pause of several seconds between pages, a limit
 of pages and results per run, robots.txt, no more than one run a day. At the first sign of a
@@ -7,21 +7,20 @@ refusal (captcha, 401/403/429, a page that came empty) it stops; there is no cod
 get past any of these. Reacting to a block over time is the job of the collector. A page that
 loaded normally but is not understood is not a refusal: reading stops, and nothing counts against
 the site or uses up the rest between runs. The same goes for no connection at all.
-
-The assisted mode of the collector on a computer with a screen changes one thing: at a captcha it
-waits for the owner, who passes it by hand in the visible window, and goes on if they do. The code
-never touches the captcha. All the limits stay, and a captcha nobody passed is an ordinary block.
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
 import random
-import sys
+import re
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 from src.config import Settings, resolve_path
 from src.services.api_client import (
@@ -38,10 +37,20 @@ from src.services.api_client import (
 )
 from src.services.providers.base import BaseMapProvider, RawPlace, SearchArea, SearchPage, SearchQuery
 from src.services.providers.twogis import extract_contacts, parse_catalog_items
-from src.services.scraper import twogis_site
-from src.services.scraper.browser import PageSnapshot, PlaywrightSession
+from src.services.scraper.chrome.parsers import ChromeScraperSession, ScrapedSearchResult, classify_2gis_url
 from src.services.scraper.robots import RobotsNoConnectionError, RobotsRules, RobotsUnavailableError, fetch_robots
-from src.services.twogis_links import build_card_url
+from src.services.scraper.snapshot import PageSnapshot
+from src.services.twogis_links import (
+    BASE_URL,
+    FROM_LINKS_KEY,
+    build_card_url,
+    build_search_url,
+    detect_block,
+    is_card_response,
+    read_card_body,
+    read_card_links,
+    refusal_in_bodies,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,31 +61,12 @@ ROBOTS_AGENT: str = "spb-lead-bot"
 MAX_UNRECOGNIZED_IN_A_ROW: int = 3
 _SERVER_ERROR: int = 500
 
-# How often the window is checked while a person is passing the captcha.
-CAPTCHA_POLL_SECONDS: float = 1.5
-# With assisted runs a person sits and waits, so a run stays small whatever the general limits are:
-# enough for a batch of 30 leads with a margin, plus a card of each organization and the search pages.
-ASSISTED_MAX_RESULTS_PER_RUN: int = 60
-ASSISTED_MAX_PAGES_PER_RUN: int = 80
-
 Sleep = Callable[[float], Awaitable[None]]
-
-
-def call_owner(message: str) -> None:
-    """Tell the person at the computer: a line in the console and a sound."""
-    # flush: run_collector.ps1 reads the output through a pipe, where it would wait in a buffer.
-    print(message, flush=True)
-    if sys.platform == "win32":
-        import winsound
-
-        winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
-    else:
-        print("\a", end="", file=sys.stderr, flush=True)
 
 
 @dataclass(frozen=True)
 class ScraperOptions:
-    """Limits of one run."""
+    """Limits and configuration of one run."""
 
     city_slug: str = "spb"
     min_delay_seconds: float = 3.0
@@ -86,20 +76,18 @@ class ScraperOptions:
     min_hours_between_runs: float = 20.0
     page_timeout_seconds: float = 45.0
     headless: bool = True
-    assisted: bool = False
     profile_dir: Path | None = None
-    assisted_wait_minutes: float = 5.0
-    assisted_max_captchas: int = 2
-    # Only the command line of the collector sets this, for one run: see --ignore-interval.
+    chrome_path: Path | None = None
+    disable_images: bool = True
+    silent_browser: bool = True
+    click_delay_ms: int = 0
+    use_gc: bool = False
     ignore_interval: bool = False
 
     @classmethod
-    def from_settings(cls, settings: Settings, assisted: bool = False) -> "ScraperOptions":
-        """
-        `assisted` is decided by the caller, not by SCRAPER_ASSISTED: only the collector on a
-        computer with a screen asks for it, so on the server this setting changes nothing.
-        """
-        options = cls(
+    def from_settings(cls, settings: Settings) -> ScraperOptions:
+        raw_chrome_path = settings.SCRAPER_CHROME_PATH.strip()
+        return cls(
             city_slug=settings.SCRAPER_CITY_SLUG,
             min_delay_seconds=settings.SCRAPER_MIN_DELAY_SECONDS,
             max_delay_seconds=settings.SCRAPER_MAX_DELAY_SECONDS,
@@ -108,18 +96,10 @@ class ScraperOptions:
             min_hours_between_runs=settings.SCRAPER_MIN_HOURS_BETWEEN_RUNS,
             page_timeout_seconds=settings.SCRAPER_PAGE_TIMEOUT_SECONDS,
             headless=settings.SCRAPER_HEADLESS,
-        )
-        if not assisted:
-            return options
-        return replace(
-            options,
-            headless=False,
-            assisted=True,
-            profile_dir=resolve_path(settings.SCRAPER_PROFILE_DIR),
-            assisted_wait_minutes=settings.SCRAPER_ASSISTED_WAIT_MINUTES,
-            assisted_max_captchas=settings.SCRAPER_ASSISTED_MAX_CAPTCHAS,
-            max_pages_per_run=min(options.max_pages_per_run, ASSISTED_MAX_PAGES_PER_RUN),
-            max_results_per_run=min(options.max_results_per_run, ASSISTED_MAX_RESULTS_PER_RUN),
+            chrome_path=resolve_path(raw_chrome_path) if raw_chrome_path else None,
+            disable_images=settings.SCRAPER_DISABLE_IMAGES,
+            click_delay_ms=settings.SCRAPER_CLICK_DELAY_MS,
+            use_gc=settings.SCRAPER_USE_GC,
         )
 
 
@@ -150,7 +130,7 @@ def read_card_contacts(card: dict[str, Any]) -> CardContacts | None:
     # A social network given as the site is what the card calls a site: the check will say what it is.
     website = websites[0] if websites else _social_among(listed_as_site)
     # A site is listed but its address cannot be read, or links of a page do not show a site: both say nothing.
-    if website is None and (listed_as_site or card.get(twogis_site.FROM_LINKS_KEY)):
+    if website is None and (listed_as_site or card.get(FROM_LINKS_KEY)):
         return None
     return CardContacts(phones=phones, website=website, socials=socials, email=emails[0] if emails else None)
 
@@ -182,6 +162,20 @@ class BrowserSession(Protocol):
     async def close(self) -> None: ...
 
 
+@runtime_checkable
+class _SearchReaderSession(BrowserSession, Protocol):
+    async def read_search(
+        self,
+        url: str,
+        page: int = 1,
+        *,
+        max_items: int | None = None,
+        block_checker: Callable[[PageSnapshot], str | None] | None = None,
+        reset: bool = False,
+        continue_current: bool = False,
+    ) -> ScrapedSearchResult: ...
+
+
 RobotsLoader = Callable[[], Awaitable[RobotsRules]]
 
 
@@ -207,23 +201,25 @@ class TwoGisScraperProvider(BaseMapProvider):
         robots_loader: RobotsLoader | None = None,
         sleep: Sleep = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
-        notify: Callable[[str], None] = call_owner,
     ) -> None:
         self._options = options or ScraperOptions()
         self.min_hours_between_runs = self._options.min_hours_between_runs
         self.ignore_interval = self._options.ignore_interval
         self._session_factory = session_factory or (
-            lambda: PlaywrightSession(
+            lambda: ChromeScraperSession(
                 page_timeout_seconds=self._options.page_timeout_seconds,
                 headless=self._options.headless,
                 profile_dir=self._options.profile_dir,
+                chrome_path=self._options.chrome_path,
+                disable_images=self._options.disable_images,
+                silent_browser=self._options.silent_browser,
+                delay_between_clicks_ms=self._options.click_delay_ms,
+                use_gc=self._options.use_gc,
             )
         )
-        self._robots_loader = robots_loader or (lambda: fetch_robots(twogis_site.BASE_URL, ROBOTS_AGENT))
+        self._robots_loader = robots_loader or (lambda: fetch_robots(BASE_URL, ROBOTS_AGENT))
         self._sleep = sleep
         self._clock = clock
-        self._notify = notify
-        self._captchas = 0
         self._session: BrowserSession | None = None
         self._robots: RobotsRules | None = None
         self._pages = 0
@@ -239,77 +235,179 @@ class TwoGisScraperProvider(BaseMapProvider):
         """Read one page of search results, opening cards of organizations listed without contacts."""
         if self._results >= self._options.max_results_per_run:
             raise ProviderBudgetExhausted("лимит результатов за запуск")
-        snapshot = await self._open(self._search_url(query, area, page), twogis_site.is_search_response)
 
-        data = twogis_site.read_search_page(snapshot)
-        if data is None:
-            self._refuse_if_not_loaded(snapshot)
-            raise ProviderFormatError(FORMAT_NOT_RECOGNIZED_TEXT)
+        url = self._search_url(query, area, page)
+        if url.startswith(("http://", "https://")) and classify_2gis_url(url) == "firm":
+            return await self._search_single_firm_url(url, query, area)
+
+        session = await self._prepare_session_open(url)
+        if isinstance(session, _SearchReaderSession):
+            return await self._search_via_chrome(session, url, query, area, page)
+
+        snapshot = await self._visit_opened_session(session, url, is_card_response)
+        card = self._recognized_card(snapshot, "")
+        if card is None:
+            return SearchPage(places=[], has_more=False)
+        places = self._parse_items_to_places([card], query, area)
+        self._results += len(places)
+        return SearchPage(places=places, has_more=False)
+
+    async def _search_via_chrome(
+        self,
+        session: _SearchReaderSession,
+        url: str,
+        query: SearchQuery,
+        area: SearchArea,
+        page: int,
+    ) -> SearchPage:
+        remaining_budget = max(1, self._options.max_results_per_run - self._results)
+        try:
+            scraped = await session.read_search(
+                url,
+                page,
+                max_items=remaining_budget,
+                block_checker=self._detect_snapshot_block,
+            )
+            raw_items = self._extract_byid_items(scraped.items)
+        except ProviderNoConnectionError:
+            raise
+        except ProviderError:
+            self.run_counted = True
+            raise
+
+        if scraped.not_found:
+            self.run_counted = True
+            return SearchPage(places=[], has_more=False)
+
+        if scraped.blocked_reason is not None:
+            self.run_counted = True
+            partial = self._parse_items_to_places(
+                [item for item in raw_items if isinstance(item.get("contact_groups"), list)],
+                query,
+                area,
+            )
+            self._results += len(partial)
+            raise ProviderBlockedError(scraped.blocked_reason, partial=partial)
+
+        if raw_items:
+            self.run_counted = True
+            items = await self._with_contacts(raw_items, trust_empty_contacts=True)
+            can_continue = (
+                scraped.has_more
+                and not items.budget_ended
+                and (self._results + len(items.complete)) < self._options.max_results_per_run
+            )
+            return self._finish_search_items(items, query, area, has_more=can_continue)
+
         self.run_counted = True
+        return SearchPage(places=[], has_more=False)
 
-        items = await self._with_contacts(data.items)
-        places = parse_catalog_items(
-            {"result": {"items": items.complete}},
-            area.district,
-            query.category,
-            query.high_margin,
-            city_slug=self._options.city_slug,
-        )
+    def _finish_search_items(
+        self,
+        items: _CardResults,
+        query: SearchQuery,
+        area: SearchArea,
+        *,
+        has_more: bool,
+    ) -> SearchPage:
+        places = self._parse_items_to_places(items.complete, query, area)
         self._results += len(places)
         if items.blocked is not None:
             raise ProviderBlockedError(items.blocked, partial=places)
         if items.stopped is not None:
             items.stopped.partial = places
             raise items.stopped
-
-        shown = page * len(data.items)
-        has_more = bool(data.items) and not items.budget_ended and (data.total is None or shown < data.total)
         return SearchPage(places=places, has_more=has_more)
+
+    def _parse_items_to_places(
+        self,
+        items: list[dict[str, Any]],
+        query: SearchQuery,
+        area: SearchArea,
+    ) -> list[RawPlace]:
+        return parse_catalog_items(
+            {"result": {"items": items}},
+            area.district,
+            query.category,
+            query.high_margin,
+            city_slug=self._options.city_slug,
+        )
+
+    async def _search_single_firm_url(
+        self,
+        url: str,
+        query: SearchQuery,
+        area: SearchArea,
+    ) -> SearchPage:
+        match = re.search(r"/firm/([^/?#]+)", urlsplit(url).path)
+        firm_id = match.group(1) if match else ""
+        snapshot = await self._open(url, is_card_response)
+        card = self._recognized_card(snapshot, firm_id)
+        if card is None:
+            return SearchPage(places=[], has_more=False)
+        places = self._parse_items_to_places([card], query, area)
+        self._results += len(places)
+        return SearchPage(places=places, has_more=False)
+
+    @staticmethod
+    def _extract_byid_items(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        extracted: list[dict[str, Any]] = []
+        for payload in payloads:
+            result = payload.get("result")
+            if not isinstance(result, dict):
+                continue
+            items = result.get("items")
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if isinstance(item, dict):
+                    extracted.append(item)
+        return extracted
+
+    @staticmethod
+    def _merge_byid_items(prior: list[dict[str, Any]], current: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for item in [*prior, *current]:
+            item_id = str(item.get("id") or "")
+            if item_id:
+                if item_id in seen_ids:
+                    continue
+                seen_ids.add(item_id)
+            merged.append(item)
+        return merged
+
+    @staticmethod
+    def _detect_snapshot_block(snapshot: PageSnapshot) -> str | None:
+        return detect_block(
+            snapshot.status, snapshot.final_url, snapshot.title, snapshot.html
+        ) or refusal_in_bodies(snapshot.json_bodies)
 
     async def read_card(self, card_url: str, firm_id: str) -> dict[str, Any] | None:
         """One organization card, by the rules of any other page. None if it was not recognized."""
-        snapshot = await self._open(card_url, twogis_site.is_card_response)
+        snapshot = await self._open(card_url, is_card_response)
         return self._recognized_card(snapshot, firm_id)
-
-    async def inspect_search(self, query: SearchQuery, area: SearchArea) -> PageSnapshot:
-        """A search page with everything 2GIS sent to it, for the diagnostics."""
-        return await self._open(
-            self._search_url(query, area), twogis_site.is_site_response, twogis_site.is_search_response
-        )
-
-    async def inspect_card(self, firm_id: str) -> PageSnapshot:
-        """A card with everything 2GIS sent to it, for the diagnostics."""
-        card_url = build_card_url(self._options.city_slug, firm_id)
-        if card_url is None:
-            raise ProviderUnavailableError("не удалось составить ссылку на карточку")
-        return await self._open(card_url, twogis_site.is_site_response, twogis_site.is_card_response)
 
     async def close(self) -> None:
         """End the run: the browser is closed and the limits start over next time."""
         session, self._session = self._session, None
         self._robots = None
-        self._pages = self._results = self._captchas = self._unrecognized_in_a_row = 0
+        self._pages = self._results = self._unrecognized_in_a_row = 0
         self.human_check_passed = False
         self.run_counted = False
         if session is not None:
             await session.close()
 
     def _search_url(self, query: SearchQuery, area: SearchArea, page: int = 1) -> str:
+        raw = query.text.strip()
+        parsed_host = (urlsplit(raw).hostname or "").lower()
+        if raw.startswith(("http://", "https://")) and re.match(r"^(?:www\.)?2gis\.[^.]+$", parsed_host):
+            return raw
         text = f"{query.text} {area.district}" if area.district else query.text
-        return twogis_site.build_search_url(self._options.city_slug, text, page)
+        return build_search_url(self._options.city_slug, text, page)
 
-    async def _open(
-        self,
-        url: str,
-        wants_body: Callable[[str], bool],
-        refusals_from: Callable[[str], bool] | None = None,
-    ) -> PageSnapshot:
-        """
-        Open a page if the rules allow it, stopping at any sign of a refusal.
-
-        `refusals_from` narrows down whose refusal counts, when more responses are read than the
-        page depends on: a side service of the site that answers 403 is not a block.
-        """
+    async def _prepare_session_open(self, url: str) -> BrowserSession:
+        """Enforce run page budget & robots.txt, initialize session if needed, and pause between pages."""
         if self._pages >= self._options.max_pages_per_run:
             raise ProviderBudgetExhausted("лимит страниц за запуск")
         rules = await self._robots_rules()
@@ -324,15 +422,21 @@ class TwoGisScraperProvider(BaseMapProvider):
             await self._pause_between_pages()
 
         self._pages += 1
+        return self._session
+
+    async def _visit_opened_session(
+        self,
+        session: BrowserSession,
+        url: str,
+        wants_body: Callable[[str], bool],
+        refusals_from: Callable[[str], bool] | None = None,
+    ) -> PageSnapshot:
         try:
-            snapshot = await self._session.visit(url, wants_body)
-            if self._options.assisted and twogis_site.is_captcha(snapshot.final_url, snapshot.title, snapshot.html):
-                self.run_counted = True
-                snapshot = await self._after_human_check(self._session, url, wants_body)
+            snapshot = await session.visit(url, wants_body)
             bodies = snapshot.json_bodies if refusals_from is None else snapshot.bodies_from(refusals_from)
-            reason = twogis_site.detect_block(
+            reason = detect_block(
                 snapshot.status, snapshot.final_url, snapshot.title, snapshot.html
-            ) or twogis_site.refusal_in_bodies(bodies)
+            ) or refusal_in_bodies(bodies)
             if reason:
                 raise ProviderBlockedError(reason)
         except ProviderNoConnectionError:
@@ -343,9 +447,29 @@ class TwoGisScraperProvider(BaseMapProvider):
             raise
         return snapshot
 
+    async def _open(
+        self,
+        url: str,
+        wants_body: Callable[[str], bool],
+        refusals_from: Callable[[str], bool] | None = None,
+    ) -> PageSnapshot:
+        """
+        Open a page if the rules allow it, stopping at any sign of a refusal.
+
+        `refusals_from` narrows down whose refusal counts, when more responses are read than the
+        page depends on: a side service of the site that answers 403 is not a block.
+        """
+        session = await self._prepare_session_open(url)
+        return await self._visit_opened_session(session, url, wants_body, refusals_from=refusals_from)
+
     def _recognized_card(self, snapshot: PageSnapshot, firm_id: str) -> dict[str, Any] | None:
         """The card if the code understands what it lists. Without it, the page itself may be what is wrong."""
-        card = twogis_site.read_card_page(snapshot, firm_id)
+        if snapshot.status == 404:
+            self.run_counted = True
+            return None
+        card = read_card_body(snapshot.bodies_from_or_all(is_card_response), firm_id)
+        if card is None:
+            card = read_card_links(snapshot, firm_id)
         if card is None or read_card_contacts(card) is None:
             self._refuse_if_not_loaded(snapshot)
             return None
@@ -366,49 +490,6 @@ class TwoGisScraperProvider(BaseMapProvider):
         delay = random.uniform(self._options.min_delay_seconds, self._options.max_delay_seconds)  # noqa: S311
         await self._sleep(delay)
 
-    async def _after_human_check(
-        self, session: BrowserSession, url: str, wants_body: Callable[[str], bool]
-    ) -> PageSnapshot:
-        """Ask the owner to pass the captcha, then open the page again as any other page: pause, limit, checks."""
-        if self._captchas >= self._options.assisted_max_captchas:
-            raise ProviderBlockedError(
-                f"сайт снова показал капчу, а запросов к человеку за запуск уже {self._captchas}"
-            )
-        self._captchas += 1
-        await self._wait_for_human(session)
-        self.human_check_passed = True
-
-        if self._pages >= self._options.max_pages_per_run:
-            raise ProviderBudgetExhausted("лимит страниц за запуск")
-        await self._pause_between_pages()
-        self._pages += 1
-        snapshot = await session.visit(url, wants_body)
-        if twogis_site.is_captcha(snapshot.final_url, snapshot.title, snapshot.html):
-            raise ProviderBlockedError("капча появилась снова сразу после прохождения")
-        return snapshot
-
-    async def _wait_for_human(self, session: BrowserSession) -> None:
-        """Only look at the window until it stops showing the captcha. Everything on the page is up to the person."""
-        minutes = self._options.assisted_wait_minutes
-        await session.bring_to_front()
-        self._notify(f"Сайт показал капчу. Пройдите проверку в окне браузера, жду до {minutes:g} мин.")
-        deadline = self._clock() + minutes * 60
-        while self._clock() < deadline:
-            await self._sleep(CAPTCHA_POLL_SECONDS)
-            try:
-                shown = await session.read_page()
-            except ProviderUnavailableError:
-                raise ProviderBlockedError("окно браузера закрыто, капча не пройдена") from None
-            # An empty window during a navigation is not yet a passed check.
-            if (
-                shown is not None
-                and shown.final_url.startswith("http")
-                and not twogis_site.is_captcha(shown.final_url, shown.title, shown.html)
-            ):
-                self._notify("Проверка пройдена, продолжаю сбор.")
-                return
-        raise ProviderBlockedError(f"капча не пройдена за {minutes:g} мин")
-
     async def _robots_rules(self) -> RobotsRules:
         if self._robots is None:
             try:
@@ -419,7 +500,12 @@ class TwoGisScraperProvider(BaseMapProvider):
                 raise ProviderUnavailableError(f"не удалось прочитать robots.txt: {exc}") from None
         return self._robots
 
-    async def _with_contacts(self, items: list[dict[str, Any]]) -> _CardResults:
+    async def _with_contacts(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        trust_empty_contacts: bool = False,
+    ) -> _CardResults:
         """
         Keep only organizations whose contacts are known.
 
@@ -430,7 +516,8 @@ class TwoGisScraperProvider(BaseMapProvider):
         for item in items:
             if item.get("type") not in (None, "branch"):
                 continue
-            if item.get("contact_groups"):
+            has_groups = isinstance(item.get("contact_groups"), list)
+            if item.get("contact_groups") or (trust_empty_contacts and has_groups):
                 result.complete.append(item)
                 continue
             firm_id = str(item.get("id") or "")
@@ -438,7 +525,7 @@ class TwoGisScraperProvider(BaseMapProvider):
             if card_url is None or result.budget_ended or result.blocked or result.stopped:
                 continue
             try:
-                snapshot = await self._open(card_url, twogis_site.is_card_response)
+                snapshot = await self._open(card_url, is_card_response)
             except ProviderBudgetExhausted:
                 result.budget_ended = True
                 continue

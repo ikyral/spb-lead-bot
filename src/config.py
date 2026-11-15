@@ -54,8 +54,6 @@ class Settings(BaseSettings):
     LEADS_MIN_POOL: int = Field(default=60, ge=0)
     # false: an organization from 2GIS without a phone or a site is a lead, the owner looks in its card.
     LEADS_REQUIRE_CONTACT: bool = False
-    # false: leads with nothing known about the site are not handed out at all.
-    LEADS_ISSUE_UNKNOWN: bool = True
     # The largest share of a batch that one niche may take; 1 = no limit.
     LEADS_MAX_NICHE_SHARE: float = Field(default=0.5, gt=0, le=1)
     # Organizations with this many branches, or from this list, are not handed out.
@@ -66,22 +64,20 @@ class Settings(BaseSettings):
     # Empty = a neutral text from src/bot/texts.py. Longer values are cut, so a card stays within Telegram's limit.
     OUTREACH_OFFER: str = ""
     OUTREACH_SIGNATURE: str = ""
-    # The morning plan for admins: reminders, the pool, what waits for enrichment. Time in COLLECT_TIMEZONE.
+    # The morning plan for admins: reminders, the pool. Time in COLLECT_TIMEZONE.
     DIGEST_ENABLED: bool = True
     DIGEST_TIME: str = "09:30"
     # 'Wrote to them' with no answer for this many days counts as time to remind, without a reminder set.
     FOLLOWUP_AFTER_DAYS: int = Field(default=3, ge=1, le=60)
 
     # Automatic collection. Search targets and the schedule are validated by src.services.collector.
-    # false, or an empty COLLECT_PROVIDERS, means leads come from an external collector as files.
     COLLECT_ENABLED: bool = True
     COLLECT_CRON: str = "0 4 * * *"
     COLLECT_INTERVAL_MINUTES: int | None = Field(default=None, ge=1)  # when set, replaces COLLECT_CRON
     COLLECT_TIMEZONE: str = "Europe/Moscow"
     COLLECT_RUN_ON_START: bool = False
-    # 2gis is the main source and needs no access to contacts; without a key it is skipped.
-    # 2gis_scraper is opt-in and not listed here: the site answers it with a captcha.
-    COLLECT_PROVIDERS: str = "2gis,osm"
+    # 2gis_scraper is the primary collector via Chrome CDP; 2gis (API) and osm are fallback/alternative providers.
+    COLLECT_PROVIDERS: str = "2gis_scraper,2gis,osm"
     COLLECT_QUERIES: str = ""  # category keys and/or free-text queries; empty = all categories
     COLLECT_DISTRICTS: str = ""  # empty = all SPb districts
     COLLECT_BBOX: str = ""  # 'south,west,north,east'; replaces COLLECT_DISTRICTS
@@ -106,36 +102,12 @@ class Settings(BaseSettings):
     SCRAPER_PAGE_TIMEOUT_SECONDS: float = Field(default=45.0, ge=5.0)
 
     SCRAPER_HEADLESS: bool = True  # false only for manual debugging on a computer with a screen
+    SCRAPER_CHROME_PATH: str = ""  # пусто = автопоиск Chrome/Chromium
+    SCRAPER_DISABLE_IMAGES: bool = True
+    SCRAPER_CLICK_DELAY_MS: int = Field(default=0, ge=0, le=10000)
+    SCRAPER_USE_GC: bool = False
 
-    # The collector on a computer with a screen: a person passes a captcha by hand. The bot ignores these.
-    SCRAPER_ASSISTED: bool = False
-    SCRAPER_PROFILE_DIR: str = "data/browser_profile"
-    SCRAPER_ASSISTED_WAIT_MINUTES: float = Field(default=5.0, gt=0, le=30)
-    SCRAPER_ASSISTED_MAX_CAPTCHAS: int = Field(default=2, ge=1, le=5)
-    # How many times collect_cli.py --check may look at the site within 24 hours.
-    SCRAPER_CHECK_MAX_PER_DAY: int = Field(default=3, ge=1, le=10)
-
-    # Looking for the site and contacts of leads on Google, only with collect_cli.py --assisted --google.
-    # The upper bounds keep it a person's pace whatever is configured; pauses are fixed in the code.
-    GOOGLE_MAX_PER_RUN: int = Field(default=15, ge=1, le=20)
-    GOOGLE_MAX_PER_DAY: int = Field(default=60, ge=1, le=100)
-    # 0 = no interval, as for the parser of 2GIS: when to run is then up to the owner.
-    GOOGLE_MIN_HOURS_BETWEEN_RUNS: float = Field(default=3.0, ge=0.0)
-    # How close the name of a lead must be to the address or the title of a result, from 0.5 to 1.
-    GOOGLE_NAME_MATCH_THRESHOLD: float = Field(default=0.6, ge=0.5, le=1.0)
-    # Cookies of the browser for Google, kept apart from those for 2GIS.
-    GOOGLE_PROFILE_DIR: str = "data/google_profile"
-
-    # The collector for a separate computer (collect_cli.py). Relative paths are from the project root.
-    COLLECTOR_PROVIDERS: str = "2gis"
-    COLLECTOR_DB_PATH: str = "data/collector.db"
-    COLLECTOR_EXPORT_DIR: str = "exports"
-
-    # Importing export files on the server. Telegram lets bots download at most 20 MB.
-    IMPORT_MAX_FILE_BYTES: int = Field(default=5 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024)
-    IMPORT_MAX_LEADS: int = Field(default=2000, ge=1)
-    IMPORT_INBOX_DIR: str = "data/inbox"
-    IMPORT_INBOX_INTERVAL_SECONDS: int = Field(default=300, ge=0)  # 0 = do not watch the folder
+    COLLECTOR_PROVIDERS: str = "2gis_scraper,2gis"
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",

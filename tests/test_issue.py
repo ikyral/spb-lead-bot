@@ -974,7 +974,7 @@ ROLLBACK_SCHEMA = [
     "ALTER TABLE leads DROP COLUMN is_chain",
     "ALTER TABLE leads DROP COLUMN contact_links",
     "ALTER TABLE leads DROP COLUMN remind_at",
-    "DROP TABLE import_log",
+    "DROP TABLE IF EXISTS import_log",
     "DROP TABLE collector_state",
     "DROP TABLE provider_state",
     "DROP TABLE search_progress",

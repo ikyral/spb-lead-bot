@@ -1,81 +1,32 @@
 """Unit tests for SPb map and CSV data providers."""
 
-from pathlib import Path
 
 import httpx
 import pytest
 
-from src.services.providers import OSMOverpassProvider, TwoGisProvider, parse_csv_leads
+from src.services.providers import OSMOverpassProvider, TwoGisProvider
+from src.services.providers.registry import build_providers
 from src.services.providers.twogis import TwoGisOptions
+from src.services.providers.twogis_scraper import TwoGisScraperProvider
 
 # These tests are about paging as such. The limits of a demo key: test_no_contacts_mode.py.
 PAID_KEY = TwoGisOptions(demo_key=False)
 
 
-def test_csv_external_ids_are_stable() -> None:
-    """IDs of already imported CSV leads must never change, otherwise re-imports create duplicates."""
-    places = parse_csv_leads(Path("data/test_leads.csv").read_bytes())
-    assert [p.external_id for p in places] == [
-        "csv_ba557a73ccc5",
-        "csv_fabaddede281",
-        "csv_bed2b36eed14",
-        "csv_f3ce564fe7bf",
-    ]
+def test_build_providers_with_twogis_alias_and_fallback() -> None:
+    """Verify twogis alias and fallback_for wiring."""
+    pset = build_providers(["2gis_scraper", "twogis", "osm"], twogis_api_key="secret_key")
+    providers = pset.providers
+    assert len(providers) == 3
+    assert isinstance(providers[0], TwoGisScraperProvider)
+    assert isinstance(providers[1], TwoGisProvider)
+    assert isinstance(providers[2], OSMOverpassProvider)
+    assert providers[1].fallback_for == "2gis_scraper"
 
 
-def test_parse_real_csv_leads() -> None:
-    """Verify parsing real test_leads.csv yields exactly 4 expected RawPlaces."""
-    places = parse_csv_leads(Path("data/test_leads.csv").read_bytes())
-    assert len(places) == 4
-
-    p1, p2, p3, p4 = places
-    assert p1.name == "Стоматология Улыбка СПб"
-    assert (p1.category, p1.district, p1.address) == ("Стоматология", "Петроградский", "Большой пр. П.С., 44")
-    assert (p1.phone, p1.raw_website, p1.socials) == (
-        "+7 (812) 555-01-01",
-        "https://broken-domain-dentist-spb-404.ru",
-        "https://vk.com/dent_spb_test",
-    )
-    assert (p1.source, p1.high_margin) == ("csv", True)
-    assert p1.external_id.startswith("csv_")
-
-    assert (p2.name, p2.category, p2.district) == ("Детейлинг Гараж 78", "Автосервис", "Приморский")
-    assert p2.raw_website == p2.socials == "https://vk.com/detailing78_test"
-    assert p2.high_margin is True
-
-    assert (p3.name, p3.raw_website, p3.socials, p3.high_margin) == (
-        "Студия мебели ЛофтНева",
-        None,
-        "https://t.me/loftneva_test",
-        True,
-    )
-
-    assert (p4.name, p4.category, p4.raw_website, p4.socials, p4.high_margin) == (
-        "Кофейня с рабочим сайтом",
-        "Кафе",
-        "https://ya.ru",
-        None,
-        False,
-    )
-
-
-def test_parse_csv_cp1251_and_comma() -> None:
-    """Verify cp1251 decoding and comma delimiter support."""
-    content = "имя,категория,адрес,телефон,сайт\nТест Клиника,Клиника,Невский 1,+79990001122,https://vk.com/c"
-    places = parse_csv_leads(content.encode("cp1251"))
-    assert len(places) == 1
-    assert (places[0].name, places[0].phone, places[0].socials, places[0].high_margin) == (
-        "Тест Клиника",
-        "+79990001122",
-        "https://vk.com/c",
-        True,
-    )
-
-
-def test_parse_csv_empty_returns_empty() -> None:
-    """Empty CSV bytes should return empty list."""
-    assert parse_csv_leads(b"") == []
-    assert parse_csv_leads(b"\n\n   \n") == []
+def test_build_providers_without_scraper_has_no_fallback() -> None:
+    pset = build_providers(["2gis", "osm"], twogis_api_key="secret_key")
+    assert pset.providers[0].fallback_for is None
 
 
 @pytest.mark.asyncio

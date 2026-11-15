@@ -125,8 +125,7 @@ def test_keyboards_callback_data_limits():
     button_texts = [btn.text for row in reply_kb.keyboard for btn in row]
     assert button_texts == [
         f"📦 Следующие {settings.LEADS_BATCH_SIZE}",
-        "🔎 Обогащение",
-        "📊 Ниши и статистика",
+        "📊 Статистика",
         "❓ Помощь",
         "🔍 Поиск по СПб",
         "📋 Новые лиды",
@@ -467,37 +466,6 @@ async def test_category_harvest_shows_progress_without_false_eta(monkeypatch: py
     assert "10-30 секунд" not in texts[0]
     assert any("5/10" in text for text in texts)
     assert "Сбор завершен" in texts[-1]
-
-
-@pytest.mark.asyncio
-async def test_csv_upload_reports_rows_over_limit(monkeypatch: pytest.MonkeyPatch):
-    from aiogram.types import Document
-
-    from src.bot.handlers import search
-
-    received_kwargs: dict = {}
-
-    async def fake_import(session, file_bytes, **kwargs):
-        received_kwargs.update(kwargs)
-        return {**_HARVEST_STATS, "over_limit": 500}
-
-    monkeypatch.setattr(search, "import_csv_harvest", fake_import)
-    monkeypatch.setattr(search, "async_session_maker", _DummySessionCtx)
-
-    status_msg = MagicMock(spec=Message)
-    status_msg.edit_text = AsyncMock()
-    msg = MagicMock(spec=Message)
-    msg.document = Document(file_id="f", file_unique_id="u", file_name="leads.csv")
-    msg.answer = AsyncMock(return_value=status_msg)
-    bot = MagicMock()
-    bot.download = AsyncMock()
-
-    await search.handle_csv_upload(msg, bot)
-
-    assert "progress" in received_kwargs
-    report = status_msg.edit_text.call_args[0][0]
-    assert "Импорт CSV завершен" in report
-    assert "500" in report and "2000" in report
 
 
 @pytest.mark.asyncio

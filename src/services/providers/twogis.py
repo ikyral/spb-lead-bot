@@ -99,8 +99,11 @@ class TwoGisProvider(BaseMapProvider):
         timeout: float = 10.0,
         options: TwoGisOptions | None = None,
         spend_request: Callable[[], Awaitable[None]] | None = None,
+        fallback_for: str | None = None,
     ) -> None:
         self.api_key = api_key
+        if fallback_for is not None:
+            self.fallback_for = fallback_for
         self._options = options or TwoGisOptions()
         self._max_page_size = DEMO_PAGE_SIZE if self._options.demo_key else TWOGIS_PAGE_SIZE
         self._max_pages = DEMO_MAX_PAGES if self._options.demo_key else TWOGIS_MAX_PAGES

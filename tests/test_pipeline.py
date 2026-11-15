@@ -1,7 +1,6 @@
 """Integration tests for lead pipeline and database repository."""
 
 import asyncio
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -12,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from src.database.models import Base, Lead
 from src.database.repo import get_leads, get_leads_stats, update_crm_status
 from src.services import pipeline
-from src.services.pipeline import import_csv_harvest, run_lead_harvest
+from src.services.pipeline import run_lead_harvest, save_collected_places
 from src.services.providers.base import RawPlace
 
 
@@ -39,16 +38,16 @@ async def session() -> AsyncSession:
 
 
 @pytest.mark.asyncio
-async def test_csv_pipeline_full_integration(
+async def test_pipeline_full_integration(
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    Test real test_leads.csv processing:
-    - 4 rows total.
-    - 1 dentist with dead_site -> qualified (score 100).
-    - 1 detailing with social_only -> qualified (score 90).
-    - 1 furniture studio with no_site -> qualified (score 80).
+    Test real places processing:
+    - 4 places total.
+    - 1 dentist with dead_site -> qualified (score 95).
+    - 1 detailing with social_only -> qualified (score 100).
+    - 1 furniture studio with no_site -> qualified (score 85).
     - 1 cafe with active site (ya.ru) -> dropped.
     - Repeated run detects all 3 as duplicates.
     """
@@ -61,16 +60,52 @@ async def test_csv_pipeline_full_integration(
 
     monkeypatch.setattr(httpx.AsyncClient, "send", mock_send)
 
-    csv_bytes = Path("data/test_leads.csv").read_bytes()
+    places = [
+        RawPlace(
+            external_id="p1",
+            source="2gis_scraper",
+            name="Стоматология Улыбка СПб",
+            category="dentist_clinic",
+            district="Петроградский",
+            phone="+78125550101",
+            raw_website="http://broken-domain-dentist-spb-404.ru",
+            socials="vk.com/smilespb",
+        ),
+        RawPlace(
+            external_id="p2",
+            source="2gis_scraper",
+            name="Детейлинг Гараж 78",
+            category="detailing",
+            phone="+79219998877",
+            raw_website="https://vk.com/detailing78",
+            socials="vk.com/detailing78",
+        ),
+        RawPlace(
+            external_id="p3",
+            source="2gis_scraper",
+            name="Студия мебели ЛофтНева",
+            category="renovation",
+            phone="+78125550102",
+            raw_website=None,
+            socials="vk.com/loftneva",
+        ),
+        RawPlace(
+            external_id="p4",
+            source="2gis_scraper",
+            name="Кофейня с рабочим сайтом",
+            category="horeca",
+            phone="+78125550103",
+            raw_website="https://ya.ru",
+        ),
+    ]
 
     # First run: 3 leads saved
-    first_stats = await import_csv_harvest(session, csv_bytes)
+    first_stats = await save_collected_places(session, places)
     assert first_stats == {
         "total_found": 4,
         "qualified": 3,
         "saved_new": 3,
         "duplicates_skipped": 0,
-        "over_limit": 0,
     }
 
     # Verify database contents
@@ -101,13 +136,12 @@ async def test_csv_pipeline_full_integration(
     assert stats == {"new": 3, "in_work": 0, "rejected": 0}
 
     # Second run: 0 saved, 3 duplicates skipped
-    second_stats = await import_csv_harvest(session, csv_bytes)
+    second_stats = await save_collected_places(session, places)
     assert second_stats == {
         "total_found": 4,
-        "qualified": 3,
+        "qualified": 0,
         "saved_new": 0,
         "duplicates_skipped": 3,
-        "over_limit": 0,
     }
 
 
@@ -244,10 +278,10 @@ async def test_run_lead_harvest_merges_same_business_from_osm_and_2gis(
 
 
 @pytest.mark.asyncio
-async def test_import_skips_business_already_saved_from_another_source(
+async def test_skips_business_already_saved_from_another_source(
     session: AsyncSession,
 ) -> None:
-    """A CSV row for a business already saved from OSM (same phone) is a duplicate, not a new lead."""
+    """A business already saved from OSM (same phone) is a duplicate, not a new lead."""
     session.add(
         Lead(
             external_id="osm_900",
@@ -262,10 +296,16 @@ async def test_import_skips_business_already_saved_from_another_source(
     )
     await session.commit()
 
-    csv_bytes = ("Название;Рубрика;Телефон\nГараж 78 детейлинг-центр;Автосервис;8 (999) 111 22 33\n").encode()
+    place = RawPlace(
+        external_id="2gis_scraper_1",
+        source="2gis_scraper",
+        name="Гараж 78 детейлинг-центр",
+        category="auto_repair",
+        phone="8 (999) 111 22 33",
+    )
 
-    res = await import_csv_harvest(session, csv_bytes)
-    assert res == {"total_found": 1, "qualified": 1, "saved_new": 0, "duplicates_skipped": 1, "over_limit": 0}
+    res = await save_collected_places(session, [place])
+    assert res == {"total_found": 1, "qualified": 0, "saved_new": 0, "duplicates_skipped": 1}
     assert await get_leads_stats(session) == {"new": 0, "in_work": 1, "rejected": 0}
 
 
@@ -373,21 +413,6 @@ async def test_run_lead_harvest_queries_osm_and_2gis_concurrently(
     assert res["total_found"] == 2 and res["saved_new"] == 1
     # Source order is preserved: the OSM record keeps its identity after merging
     assert [lead.external_id for lead in await get_leads(session, limit=10)] == ["osm_1"]
-
-
-@pytest.mark.asyncio
-async def test_csv_import_is_capped(session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A huge CSV must not turn into hours of website checks; the rest is reported, not silently dropped."""
-    monkeypatch.setattr(pipeline, "MAX_CSV_PLACES", 2)
-    csv_bytes = (
-        "Название;Рубрика;Телефон\n"
-        "Клиника 1;Стоматология;+7 999 000-00-01\n"
-        "Клиника 2;Стоматология;+7 999 000-00-02\n"
-        "Клиника 3;Стоматология;+7 999 000-00-03\n"
-    ).encode()
-
-    res = await import_csv_harvest(session, csv_bytes)
-    assert res == {"total_found": 2, "qualified": 2, "saved_new": 2, "duplicates_skipped": 0, "over_limit": 1}
 
 
 @pytest.mark.asyncio

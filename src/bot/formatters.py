@@ -17,7 +17,6 @@ from src.bot.texts import (
     DIGEST_NO_FOLLOWUPS,
     DIGEST_STALE_LINE,
     DIGEST_TITLE,
-    DIGEST_UNKNOWN_LINE,
     DIGEST_USEFUL_LINE,
     FOLLOWUP_DUE_LINE,
     FOLLOWUP_WRITTEN_LINE,
@@ -29,8 +28,6 @@ from src.bot.texts import (
     OUTREACH_SIGNATURE_FALLBACK,
     OUTREACH_TITLE,
     REMIND_LINE,
-    REQUEST_FILE_HINT,
-    UNKNOWN_NICHE_TEXT,
     HelpSection,
 )
 from src.config import settings
@@ -52,7 +49,6 @@ from src.services.contact_links import (
     ContactLink,
     lead_contacts,
 )
-from src.services.lead_file import REQUEST_FILE_ERROR
 from src.services.providers.base import TARGET_CATEGORIES, niche_title
 from src.services.site_status import (
     NO_SITE_STATUSES,
@@ -63,18 +59,14 @@ from src.services.site_status import (
     SITE_SOCIAL_ONLY,
     SITE_UNCERTAIN,
     SITE_UNKNOWN,
-    SOURCE_2GIS_CARD,
     SOURCE_MANUAL,
 )
 from src.services.twogis_links import twogis_card_url, twogis_search_url
 
 if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this module must not import
-    from src.database.models import ImportLog, ProviderState
+    from src.database.models import ProviderState
     from src.database.repo import PoolStats
     from src.services.digest import DigestData
-    from src.services.lead_enrich import EnrichStats, UsefulLead
-    from src.services.lead_import import ImportResult
-    from src.services.niche_priority import NicheStats
     from src.services.scheduler import CollectorStatus, DgisKeyStatus, RequestUsage, RunReport
 
 # Telegram's limit for one message.
@@ -162,8 +154,6 @@ def _site_verdict_line(lead: Lead, field_limit: int) -> str | None:
     if lead.site_status == SITE_NO_SITE:
         if lead.site_source == SOURCE_MANUAL:
             return "✅ Сайта нет (проверено вручную)"
-        if lead.site_source == SOURCE_2GIS_CARD:
-            return "🌐 В 2ГИС сайт не указан"
         return "🌐 Сайта нет (по данным источника)"
     if lead.site_status == SITE_NOT_FOUND:
         return "🌐 Сайт не найден в поиске"
@@ -342,7 +332,6 @@ def format_digest_summary(data: DigestData) -> str:
         DIGEST_TITLE.format(date=data.day.strftime("%d.%m")),
         "",
         DIGEST_USEFUL_LINE.format(count=counts.useful_in_pool),
-        DIGEST_UNKNOWN_LINE.format(count=counts.waiting_for_enrichment),
         DIGEST_DUE_LINE.format(count=counts.reminders_due),
         DIGEST_STALE_LINE.format(days=data.followup_after_days, count=counts.written_no_answer),
     ]
@@ -484,34 +473,6 @@ def format_collection_report(report: RunReport) -> str:
     return "\n".join(lines)
 
 
-def format_import_messages(result: ImportResult) -> list[str]:
-    """All the messages about an imported file: a file with results of reading cards may need several."""
-    if result.ok and result.enrichment is not None:
-        name = html.escape(result.file_name)
-        return _enrichment_messages(name, result.total, result.enrichment, result.pool_size)
-    return [format_import_report(result)]
-
-
-def format_import_report(result: ImportResult) -> str:
-    """Format the outcome of an imported file. The file name comes from outside and is escaped."""
-    name = html.escape(result.file_name)
-    if not result.ok:
-        text = f"⚠️ <b>Импорт не выполнен</b>: {name}\n\nПричина: {html.escape(result.error or 'неизвестна')}"
-        return f"{text}\n\n{REQUEST_FILE_HINT}" if result.error == REQUEST_FILE_ERROR else text
-    if result.enrichment is not None:
-        return _enrichment_messages(name, result.total, result.enrichment, result.pool_size)[0]
-    lines = [
-        f"📥 <b>Импорт завершён</b>: {name}\n",
-        f"• В файле: <b>{result.total}</b>",
-        f"• Новых: <b>{result.saved_new}</b>",
-        f"• Дубликатов: <b>{result.duplicates}</b>",
-        f"• Отклонено: <b>{result.rejected_total}</b>",
-    ]
-    lines += [f"   – {html.escape(reason)}: {count}" for reason, count in result.rejected.most_common()]
-    lines.append(f"\n📦 В запасе: <b>{result.pool_size}</b>")
-    return "\n".join(lines)
-
-
 def split_messages(blocks: list[str], separator: str = "\n\n") -> list[str]:
     """Join blocks of text into messages within Telegram's limit, never cutting a block with its tags in two."""
     messages: list[str] = []
@@ -527,70 +488,6 @@ def split_messages(blocks: list[str], separator: str = "\n\n") -> list[str]:
     if current:
         messages.append(current)
     return messages
-
-
-def _useful_lead_block(lead: UsefulLead) -> str:
-    def field(value: str) -> str:
-        return html.escape(value[:_REPORT_FIELD_LIMIT])
-
-    lines = [f"🏢 <b>{field(lead.name)}</b>", f"🏷 {field(niche_title(lead.category))}"]
-    if lead.address:
-        lines.append(f"📫 {field(lead.address)}")
-    if lead.phone:
-        lines.append(f"📞 {field(lead.phone)}")
-    if lead.site_status == SITE_SOCIAL_ONLY:
-        lines.append("📱 только соцсеть вместо сайта")
-    if lead.site_status == SITE_DEAD and lead.website:
-        lines.append(f"🌐 {field(lead.website)}")
-    contacts = format_contacts_line(lead.contacts[:_REPORT_LINKS])
-    if contacts:
-        lines.append(contacts)
-    url = twogis_card_url(lead.source_url) or twogis_search_url(lead.name, lead.address, settings.SCRAPER_CITY_SLUG)
-    title = "Открыть в 2ГИС" if twogis_card_url(lead.source_url) else "Найти в 2ГИС"
-    lines.append(f'🗺 <a href="{html.escape(url, quote=True)}">{title}</a>')
-    return "\n".join(lines)
-
-
-def _useful_leads_blocks(useful: list[UsefulLead]) -> list[str]:
-    without_site = [lead for lead in useful if lead.site_status != SITE_DEAD]
-    dead = [lead for lead in useful if lead.site_status == SITE_DEAD]
-    blocks: list[str] = []
-    for title, leads in (("Сайта нет", without_site), ("Сайт не открывается", dead)):
-        if leads:
-            blocks.append(f"<b>{title}: {len(leads)}</b>")
-            blocks += [_useful_lead_block(lead) for lead in leads]
-    return blocks or ["Полезных лидов в этом файле нет"]
-
-
-def _enrichment_messages(name: str, total: int, stats: EnrichStats, pool_size: int) -> list[str]:
-    title = "Поиск в Google обработан" if stats.from_google else "Карточки 2ГИС обработаны"
-    lines = [
-        f"🔎 <b>{title}</b>: {name}\n",
-        f"• В файле: <b>{total}</b>",
-        f"• Обновлено лидов: <b>{stats.updated}</b>",
-        f"• Сайтов найдено: <b>{stats.sites_found}</b> (рабочих: {stats.sites_working}, "
-        f"не открываются: {stats.sites_dead}, соцсеть или агрегатор: {stats.sites_social})",
-    ]
-    if stats.from_google:
-        lines.append(f"• Сайт и соцсети в поиске не найдены: <b>{stats.not_found}</b>")
-    if stats.no_site or not stats.from_google:
-        lines.append(f"• Без сайта в карточке: <b>{stats.no_site}</b>")
-    lines += [
-        f"• Не распознано: <b>{stats.not_recognized}</b>",
-        f"• Проигнорировано: <b>{stats.ignored_total}</b>",
-    ]
-    lines += [f"   – {html.escape(reason)}: {count}" for reason, count in stats.ignored.most_common()]
-    lines.append(f"\n📦 В запасе: <b>{pool_size}</b>")
-    return split_messages(["\n".join(lines), *_useful_leads_blocks(stats.useful)])
-
-
-def format_unknown_niche(text: str, niches: list[str]) -> list[str]:
-    """What to say about a niche that does not exist, with the list of those that do."""
-    example = html.escape(niches[0] if niches else next(iter(TARGET_CATEGORIES)))
-    header = UNKNOWN_NICHE_TEXT.format(niche=html.escape(text[:_NICHE_NAME_LIMIT]), example=example)
-    header += "\n\n<b>Ниши:</b>"
-    lines = [f"• <code>{html.escape(niche)}</code> — {html.escape(niche_title(niche))}" for niche in niches]
-    return split_messages([header, *lines], separator="\n")
 
 
 def format_help(is_admin: bool, sections: tuple[HelpSection, ...] = HELP_SECTIONS) -> list[str]:
@@ -614,53 +511,6 @@ def format_help(is_admin: bool, sections: tuple[HelpSection, ...] = HELP_SECTION
     if hidden:
         blocks.append(f"\n{HELP_HIDDEN_TEXT}")
     return split_messages(blocks, separator="\n")
-
-
-def format_niche_table(stats: list[NicheStats]) -> list[str]:
-    """The table of /niches, in as many messages as it takes. Each message is a table of its own."""
-    if not stats:
-        return ["Лидов пока нет, считать нечего."]
-    legend = (
-        "📊 <b>Ниши по доле полезных лидов</b>\n"
-        "Полезные: без сайта и сайт не открывается. Доля сглажена: (полезные + 1) / (проверено + 2), "
-        "поэтому у непроверенной ниши 50%. Сайта нет считается вместе с «только соцсеть»."
-    )
-    header = f"{'доля':>4} {'пров':>4} {'нет':>3} {'мёртв':>5} {'есть':>4} {'unkn':>4}  ниша"
-    rows = [
-        f"{round(item.share * 100):>3}% {item.checked:>4} {item.no_site:>3} {item.dead:>5} "
-        f"{item.has_site:>4} {item.unknown:>4}  {html.escape(niche_title(item.category)[:_NICHE_NAME_LIMIT])}"
-        for item in stats
-    ]
-    wrapper = len("<pre></pre>") + len(header) + 1
-    tables: list[str] = []
-    current: list[str] = []
-    for row in rows:
-        if current and wrapper + sum(len(line) + 1 for line in current) + len(row) > MAX_MESSAGE_LENGTH:
-            tables.append(_niche_table(header, current))
-            current = []
-        current.append(row)
-    tables.append(_niche_table(header, current))
-    return split_messages([legend, *tables])
-
-
-def _niche_table(header: str, rows: list[str]) -> str:
-    return "<pre>" + "\n".join([header, *rows]) + "</pre>"
-
-
-def _import_lines(last: ImportLog | None, imported_total: int) -> list[str]:
-    lines = [f"\n<b>Импорт файлов</b>: всего пришло лидов <b>{imported_total}</b>"]
-    if last is None:
-        lines.append("Файлы ещё не импортировались.")
-        return lines
-    lines.append(f"Последний: {format_msk_time(last.finished_at)}, {html.escape(last.file_name)}")
-    if last.ok:
-        lines.append(
-            f"В файле: <b>{last.total}</b>, новых: <b>{last.saved_new}</b>, "
-            f"дубликатов: <b>{last.duplicates}</b>, отклонено: <b>{last.rejected}</b>"
-        )
-    else:
-        lines.append(f"⚠️ Не выполнен: {html.escape(last.error or 'причина неизвестна')}")
-    return lines
 
 
 def _stock_lines(status: CollectorStatus) -> list[str]:
@@ -722,18 +572,6 @@ def format_collector_status(status: CollectorStatus) -> str:
     """Format the state of automatic collection."""
     state = status.state
     now = datetime.now(UTC)
-    if status.external_mode:
-        return "\n".join(
-            [
-                "🤖 <b>Сбор лидов</b>\n",
-                "Режим: <b>внешний сборщик</b>. Этот сервер сам не собирает, лиды приходят файлами.",
-                *_stock_lines(status),
-                *_site_stock_lines(status),
-                *(_dgis_key_lines(status.dgis_key) if status.dgis_key else []),
-                *_import_lines(status.last_import, status.imported_total),
-            ]
-        )
-
     lines = [
         "🤖 <b>Автосбор лидов</b>\n",
         f"Автозапуск: <b>{'включён' if status.auto_enabled else 'выключен'}</b>",
@@ -758,7 +596,6 @@ def format_collector_status(status: CollectorStatus) -> str:
 
     if state.last_started_at is None:
         lines.append("\nСбор ещё не запускался.")
-        lines += _import_lines(status.last_import, status.imported_total)
         return "\n".join(lines)
 
     run_status = _RUN_STATUS_TITLES.get(state.last_status or "", state.last_status or "—")
@@ -771,7 +608,6 @@ def format_collector_status(status: CollectorStatus) -> str:
     ]
     if state.last_error:
         lines.append(f"⚠️ Последняя ошибка: {html.escape(state.last_error)}")
-    lines += _import_lines(status.last_import, status.imported_total)
     return "\n".join(lines)
 
 

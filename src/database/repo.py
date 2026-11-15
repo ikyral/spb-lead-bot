@@ -1,5 +1,4 @@
 from collections import Counter
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -23,7 +22,6 @@ from src.database.models import (
     STATUS_NEW,
     Base,
     CollectorState,
-    ImportLog,
     Lead,
     ProviderState,
     SearchProgress,
@@ -31,18 +29,15 @@ from src.database.models import (
 from src.services.scorer import calculate_lead_score
 from src.services.site_status import (
     CONFIDENCE_HIGH,
-    CONFIDENCE_LOW,
     ISSUE_GROUPS,
     NO_SITE_STATUSES,
     SITE_DEAD,
     SITE_FOUND,
     SITE_NO_SITE,
-    SITE_UNKNOWN,
     SOURCE_MANUAL,
     UNVERIFIED_STATUSES,
     issue_group,
 )
-from src.services.twogis_links import TWOGIS_SOURCES, readable_card_number
 
 engine: AsyncEngine = create_async_engine(settings.DB_URL, echo=False)
 async_session_maker: async_sessionmaker[AsyncSession] = async_sessionmaker(
@@ -83,9 +78,7 @@ NEW_LEAD_COLUMNS: tuple[str, ...] = (
 )
 # The same for the collector_state table.
 NEW_STATE_COLUMNS: tuple[str, ...] = (
-    "last_pool_reminder_at",
     "key_warning_mark",
-    "scraper_check_runs",
     "digest_sent_on",
 )
 # The same for the provider_state table.
@@ -282,7 +275,6 @@ def _has_contacts_clause() -> ColumnElement[bool]:
 class IssueRules:
     """What may go into a batch. By default: everything in the pool, whatever its niche."""
 
-    issue_unknown: bool = True
     max_niche_share: float = 1.0
 
     def niche_cap(self, limit: int) -> int | None:
@@ -304,8 +296,6 @@ async def _pick_leads(
         .where(_in_pool_clause())
         .order_by(group, Lead.score.desc(), case((_has_contacts_clause(), 0), else_=1), Lead.created_at, Lead.id)
     )
-    if not rules.issue_unknown:
-        stmt = stmt.where(Lead.site_status != SITE_UNKNOWN)
     if cap is None:
         return list((await session.scalars(stmt.with_only_columns(Lead.id).limit(wanted))).all())
 
@@ -372,14 +362,6 @@ async def count_new_leads(session: AsyncSession) -> int:
     return int(result.scalar_one())
 
 
-async def count_unknown_site_leads(session: AsyncSession) -> int:
-    """How many leads of the pool have no verdict about the site yet."""
-    result = await session.execute(
-        select(func.count(Lead.id)).where(_in_pool_clause(), Lead.site_status == SITE_UNKNOWN)
-    )
-    return int(result.scalar_one())
-
-
 @dataclass(frozen=True)
 class PoolStats:
     """What the pool consists of, and how often a source was wrong about a site."""
@@ -416,59 +398,6 @@ async def get_pool_stats(session: AsyncSession) -> PoolStats:
     )
 
 
-async def get_unknown_site_candidates(session: AsyncSession, niche: str | None = None) -> list[Lead]:
-    """All of the pool that nobody has looked at and whose card on 2GIS a collector can open, the best first."""
-    stmt = (
-        select(Lead)
-        .where(_in_pool_clause(), Lead.site_status == SITE_UNKNOWN, Lead.source.in_(TWOGIS_SOURCES))
-        .order_by(Lead.score.desc(), Lead.created_at, Lead.id)
-    )
-    if niche is not None:
-        stmt = stmt.where(Lead.category == niche)
-    # A link is checked in Python, so a bad one cannot make a batch shorter than the pool allows.
-    return [lead for lead in (await session.scalars(stmt)).all() if readable_card_number(lead.source_url) is not None]
-
-
-async def get_unknown_site_leads(session: AsyncSession, limit: int) -> list[Lead]:
-    """The best of the pool that nobody has looked at, whose card on 2GIS a collector can open."""
-    return (await get_unknown_site_candidates(session))[:limit]
-
-
-async def get_niche_site_counts(session: AsyncSession) -> dict[str, dict[str, int]]:
-    """
-    Leads by niche and status of the site, for judging niches.
-
-    Everything checked counts, whatever became of the lead later. Chains are never handed out, and
-    'no site' with low confidence means only an empty tag in OSM, so neither says anything about a niche.
-    Unknown are only those that are still in the pool.
-    """
-    known = await session.execute(
-        select(Lead.category, Lead.site_status, func.count(Lead.id))
-        .where(
-            Lead.site_status != SITE_UNKNOWN,
-            func.coalesce(Lead.is_chain, False).is_(False),
-            func.coalesce(Lead.site_confidence, "") != CONFIDENCE_LOW,
-        )
-        .group_by(Lead.category, Lead.site_status)
-    )
-    unknown = await session.execute(
-        select(Lead.category, func.count(Lead.id))
-        .where(_in_pool_clause(), Lead.site_status == SITE_UNKNOWN)
-        .group_by(Lead.category)
-    )
-    counts: dict[str, dict[str, int]] = {}
-    for category, status, count in known.all():
-        counts.setdefault(category, {})[status] = int(count)
-    for category, count in unknown.all():
-        counts.setdefault(category, {})[SITE_UNKNOWN] = int(count)
-    return counts
-
-
-async def get_known_niches(session: AsyncSession) -> list[str]:
-    """The niches that have any leads at all."""
-    return [str(category) for category in (await session.scalars(select(Lead.category).distinct())).all()]
-
-
 async def get_leads_by_external_ids(session: AsyncSession, external_ids: list[str]) -> dict[str, Lead]:
     """The leads known by these IDs."""
     leads: dict[str, Lead] = {}
@@ -483,16 +412,6 @@ async def count_new_leads_with_contacts(session: AsyncSession) -> int:
     """How many of the leads not handed out yet can be contacted without opening their card."""
     result = await session.execute(select(func.count(Lead.id)).where(_in_pool_clause(), _has_contacts_clause()))
     return int(result.scalar_one())
-
-
-async def set_lead_phone(session: AsyncSession, lead_id: int, phone: str) -> Lead | None:
-    """Save a phone an admin found in the card. Returns the updated lead, None if there is no such lead."""
-    lead = await session.get(Lead, lead_id)
-    if lead is None:
-        return None
-    lead.phone = phone
-    await session.commit()
-    return lead
 
 
 async def set_site_verdict(session: AsyncSession, lead_id: int, has_site: bool) -> tuple[Lead | None, bool]:
@@ -593,7 +512,6 @@ class DigestCounts:
     """The numbers of the morning plan."""
 
     useful_in_pool: int
-    waiting_for_enrichment: int
     reminders_due: int
     written_no_answer: int
 
@@ -607,7 +525,6 @@ async def get_digest_counts(session: AsyncSession, due_before: datetime, stale_b
         await session.execute(
             select(
                 func.count(Lead.id).filter(_in_pool_clause(), Lead.site_status.in_(useful)),
-                func.count(Lead.id).filter(_in_pool_clause(), Lead.site_status == SITE_UNKNOWN),
                 func.count(Lead.id).filter(issued_not_ended, Lead.remind_at < due_before),
                 func.count(Lead.id).filter(
                     Lead.contact_status == CONTACT_CONTACTED, Lead.contact_status_at < stale_before
@@ -615,7 +532,7 @@ async def get_digest_counts(session: AsyncSession, due_before: datetime, stale_b
             )
         )
     ).one()
-    return DigestCounts(int(row[0]), int(row[1]), int(row[2]), int(row[3]))
+    return DigestCounts(int(row[0]), int(row[1]), int(row[2]))
 
 
 async def claim_digest_day(session: AsyncSession, day: str) -> bool:
@@ -641,58 +558,6 @@ async def get_contact_status_counts(session: AsyncSession) -> dict[str, int]:
         .group_by(Lead.contact_status)
     )
     return {str(status): int(count) for status, count in result.all()}
-
-
-async def get_unexported_leads(session: AsyncSession, limit: int) -> list[Lead]:
-    """The oldest leads that have not gone into an export file yet."""
-    stmt = select(Lead).where(Lead.exported_at.is_(None)).order_by(Lead.created_at, Lead.id).limit(limit)
-    return list((await session.scalars(stmt)).all())
-
-
-async def mark_leads_exported(session: AsyncSession, lead_ids: list[int], exported_at: datetime) -> None:
-    """Remember that these leads went into a file, so they are not exported again."""
-    for start in range(0, len(lead_ids), _EXISTENCE_CHECK_CHUNK):
-        chunk = lead_ids[start : start + _EXISTENCE_CHECK_CHUNK]
-        await session.execute(update(Lead).where(Lead.id.in_(chunk)).values(exported_at=exported_at))
-    await session.commit()
-
-
-async def add_import_log(
-    session: AsyncSession,
-    source: str,
-    file_name: str,
-    ok: bool,
-    error: str | None,
-    total: int,
-    saved_new: int,
-    duplicates: int,
-    rejected: int,
-) -> None:
-    """Record the outcome of importing a file."""
-    session.add(
-        ImportLog(
-            source=source,
-            file_name=file_name[:255],
-            ok=ok,
-            error=error[:512] if error else None,
-            total=total,
-            saved_new=saved_new,
-            duplicates=duplicates,
-            rejected=rejected,
-        )
-    )
-    await session.commit()
-
-
-async def get_last_import(session: AsyncSession) -> ImportLog | None:
-    """The most recent imported file, if any."""
-    return (await session.scalars(select(ImportLog).order_by(ImportLog.id.desc()).limit(1))).first()
-
-
-async def count_imported_leads(session: AsyncSession) -> int:
-    """Number of leads that came from export files."""
-    result = await session.execute(select(func.count(Lead.id)).where(Lead.imported_at.is_not(None)))
-    return int(result.scalar_one())
 
 
 async def get_provider_states(session: AsyncSession) -> dict[str, ProviderState]:
@@ -839,38 +704,6 @@ async def get_collector_state(session: AsyncSession) -> CollectorState:
         session.add(state)
         await session.flush()
     return state
-
-
-async def claim_scraper_check(
-    session: AsyncSession, limit: int, window: timedelta, now: datetime
-) -> tuple[datetime | None, int]:
-    """
-    Take one of the diagnostics runs allowed within the window.
-
-    Returns when the next one becomes possible if none is left (else None), and how many are left.
-    """
-    state = await get_collector_state(session)
-    runs: list[datetime] = []
-    for part in (state.scraper_check_runs or "").split(","):
-        with suppress(ValueError):
-            moment = datetime.fromisoformat(part)
-            if moment + window > now:
-                runs.append(moment)
-    if len(runs) >= limit:
-        return min(runs) + window, 0
-    runs.append(now)
-    state.scraper_check_runs = ",".join(moment.isoformat(timespec="seconds") for moment in runs)
-    await session.commit()
-    return None, limit - len(runs)
-
-
-async def release_scraper_check(session: AsyncSession, claimed_at: datetime) -> None:
-    """Give back a diagnostics run that never reached the site."""
-    state = await get_collector_state(session)
-    claimed = claimed_at.isoformat(timespec="seconds")
-    runs = [part for part in (state.scraper_check_runs or "").split(",") if part and part != claimed]
-    state.scraper_check_runs = ",".join(runs) or None
-    await session.commit()
 
 
 async def get_leads_stats(session: AsyncSession) -> dict[str, int]:

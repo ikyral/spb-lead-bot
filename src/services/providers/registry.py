@@ -10,7 +10,7 @@ from src.services.providers.twogis import TwoGisOptions, TwoGisProvider
 from src.services.providers.twogis_scraper import ScraperOptions, TwoGisScraperProvider
 from src.services.providers.yandex import YANDEX_DISABLED_REASON
 
-KNOWN_PROVIDERS: frozenset[str] = frozenset({"2gis_scraper", "2gis", "osm", "yandex"})
+KNOWN_PROVIDERS: frozenset[str] = frozenset({"2gis_scraper", "2gis", "twogis", "osm", "yandex"})
 
 
 @dataclass
@@ -32,14 +32,22 @@ def build_providers(
     result = ProviderSet()
     for name in enabled:
         if name == "2gis_scraper":
-            if importlib.util.find_spec("playwright") is not None:
+            if importlib.util.find_spec("pychrome") is not None:
                 result.providers.append(TwoGisScraperProvider(scraper_options))
             else:
-                result.disabled[name] = "не установлен playwright (pip install playwright, playwright install chromium)"
-        elif name == "2gis":
+                result.disabled[name] = (
+                    "не установлен pychrome для Chrome CDP (pip install pychrome) и нужен Chrome/Chromium"
+                )
+        elif name in ("2gis", "twogis"):
             if twogis_api_key and twogis_api_key.strip():
+                fallback_for = "2gis_scraper" if "2gis_scraper" in enabled else None
                 result.providers.append(
-                    TwoGisProvider(twogis_api_key.strip(), options=twogis_options, spend_request=twogis_spend_request)
+                    TwoGisProvider(
+                        twogis_api_key.strip(),
+                        options=twogis_options,
+                        spend_request=twogis_spend_request,
+                        fallback_for=fallback_for,
+                    )
                 )
             else:
                 result.disabled[name] = "не задан DGIS_API_KEY"

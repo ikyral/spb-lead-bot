@@ -117,16 +117,6 @@ def test_renovation_and_car_repair_keep_high_margin(category: str) -> None:
     assert is_high_margin_category(category) is True
 
 
-def test_csv_loader_uses_the_same_margin_rules() -> None:
-    from src.services.providers.csv_loader import parse_csv_leads
-
-    csv_bytes = (
-        "Название;Рубрика;Телефон\nСапожник;Ремонт обуви;+7 999 000-00-01\nРемСтрой;Ремонт квартир;+7 999 000-00-02\n"
-    ).encode()
-    shoe, renovation = parse_csv_leads(csv_bytes)
-    assert (shoe.high_margin, renovation.high_margin) == (False, True)
-
-
 # --- Checker Tests ---
 
 

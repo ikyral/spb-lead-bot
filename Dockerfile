@@ -10,6 +10,11 @@ ARG APP_GID=1000
 
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium \
+    fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
 # Fully pinned runtime dependencies only (no test/dev tools in the image).
 COPY requirements.txt requirements.lock ./
 RUN pip install --no-cache-dir -r requirements.lock
