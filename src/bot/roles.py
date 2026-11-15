@@ -19,11 +19,16 @@ OWNER_ONLY_TEXTS: frozenset[str] = frozenset({IN_WORK_BUTTON_TEXT, CRM_STATS_BUT
 
 
 def command_name(text: str | None) -> str | None:
-    """'/Rescore@my_bot 30' -> 'rescore'; None if the text is not a command."""
-    if not text or not text.startswith("/"):
+    """
+    '/Rescore@my_bot 30' -> 'rescore'; None if the text is not a command.
+
+    Split as aiogram's Command filter does (str.split drops leading whitespace of any kind),
+    so ' /collect_on' is a command here exactly when a handler would take it as one.
+    """
+    parts = (text or "").split(maxsplit=1)
+    if not parts or not parts[0].startswith("/"):
         return None
-    word = text.split(maxsplit=1)[0][1:]
-    return word.split("@", 1)[0].lower() or None
+    return parts[0][1:].split("@", 1)[0].lower() or None
 
 
 def is_owner_only_command(name: str | None) -> bool:

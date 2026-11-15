@@ -231,6 +231,9 @@ async def test_the_owner_of_the_bot_takes_over_a_lead_someone_else_works(session
     assert owner.outcome == OUTCOME_OK
     lead = await _get(session_maker, lead_id)
     assert (lead.owner_user_id, lead.contact_status, lead.owned_until) == (OWNER, CONTACT_REPLIED, None)
+    assert lead.owner_name == f"@user{OWNER}"
+    # issued_to_user_id keeps the person the batch went to: it records the handing out, not the owner.
+    assert lead.issued_to_user_id == ANNA
     # Now the operator is the one refused.
     assert (await _status(session_maker, lead_id, CONTACT_CONTACTED, ANNA)).outcome == OUTCOME_OWNED
 
@@ -727,6 +730,32 @@ async def test_operator_photo_with_a_command_caption_is_refused(guard, caption: 
     owner_photo = photo.model_copy(update={"from_user": User(id=OWNER, is_bot=False, first_name="U")})
     await guard(handler, owner_photo, {"event_from_user": owner_photo.from_user})
     handler.assert_awaited_once()
+
+
+# aiogram's Command filter drops any leading whitespace, so the guard must too.
+_PADDED_COMMANDS = [" /collect_on", "\n/team", " /rescore", "　/collect_on", "\xa0/rescore"]
+
+
+@pytest.mark.parametrize("command", _PADDED_COMMANDS)
+@pytest.mark.parametrize("as_caption", [False, True])
+async def test_whitespace_before_a_command_does_not_bypass_the_roles(guard, command: str, as_caption: bool) -> None:
+    content: dict[str, object] = (
+        {"photo": [{"file_id": "p", "file_unique_id": "q", "width": 1, "height": 1}], "caption": command}
+        if as_caption
+        else {"text": command}
+    )
+    for user_id, allowed in ((ANNA, False), (OWNER, True)):
+        message = Message(
+            message_id=1,
+            date=NOW,
+            chat=Chat(id=user_id, type="private"),
+            from_user=User(id=user_id, is_bot=False, first_name="U"),
+            **content,
+        )
+        handler = AsyncMock(return_value="handled")
+        result = await guard(handler, message, {"event_from_user": message.from_user})
+        assert (result == "handled") is allowed
+        assert handler.await_count == int(allowed)
 
 
 def test_command_names_are_parsed_robustly() -> None:
