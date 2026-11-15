@@ -39,8 +39,9 @@ def is_owner_only(event: TelegramObject) -> bool:
         # Uploading new leads: .json files and .csv harvests alike.
         if isinstance(getattr(event, "document", None), Document):
             return True
-        text = event.text if isinstance(getattr(event, "text", None), str) else None
-        if text is None:
-            return False
-        return is_owner_only_command(command_name(text)) or text.strip() in OWNER_ONLY_TEXTS
+        # Command filters match a caption too: a photo captioned '/collect_on' is the command.
+        texts = [
+            value for value in (getattr(event, "text", None), getattr(event, "caption", None)) if isinstance(value, str)
+        ]
+        return any(is_owner_only_command(command_name(text)) or text.strip() in OWNER_ONLY_TEXTS for text in texts)
     return False

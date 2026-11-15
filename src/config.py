@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     FOLLOWUP_AFTER_DAYS: int = Field(default=3, ge=1, le=60)
     # 'Wrote to them' keeps a lead with that person for this many days; then it goes back to the pool.
     LEAD_OWNERSHIP_DAYS: int = Field(default=30, ge=1)
-    # Leads exported as 'new' to CSV stay with that person and are hidden from others for this many hours.
+    # Leads of an enrichment request file (/export_unknown) stay with that person, hidden from others, this many hours.
     EXPORT_RESERVE_HOURS: int = Field(default=6, ge=1)
 
     # Automatic collection. Search targets and the schedule are validated by src.services.collector.

@@ -337,12 +337,7 @@ async def test_export_csv_neutralizes_formula_injection(monkeypatch: pytest.Monk
     async def fake_export(session, crm_status):
         return [evil_lead]
 
-    async def fake_reserve(session, user_id, hours):
-        return await fake_export(session, "new")
-
     monkeypatch.setattr(leads_handlers, "export_leads_by_status", fake_export)
-    # 'Новые' reserves the leads it exports (see reserve_pool_for_export).
-    monkeypatch.setattr(leads_handlers, "reserve_pool_for_export", fake_reserve)
     monkeypatch.setattr(leads_handlers, "async_session_maker", _DummySessionCtx)
 
     cb = MagicMock(spec=CallbackQuery)
@@ -524,12 +519,7 @@ async def test_export_csv_shows_moscow_time(monkeypatch: pytest.MonkeyPatch):
     async def fake_export(session, crm_status):
         return [lead]
 
-    async def fake_reserve(session, user_id, hours):
-        return await fake_export(session, "new")
-
     monkeypatch.setattr(leads_handlers, "export_leads_by_status", fake_export)
-    # 'Новые' reserves the leads it exports (see reserve_pool_for_export).
-    monkeypatch.setattr(leads_handlers, "reserve_pool_for_export", fake_reserve)
     monkeypatch.setattr(leads_handlers, "async_session_maker", _DummySessionCtx)
 
     cb = MagicMock(spec=CallbackQuery)

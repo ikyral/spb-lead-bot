@@ -7,11 +7,17 @@ site is often missing go first, and a part of every file goes to niches that hav
 
 import math
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database.models import Lead
-from src.database.repo import get_known_niches, get_niche_site_counts, get_unknown_site_candidates
+from src.database.repo import (
+    get_known_niches,
+    get_niche_site_counts,
+    get_unknown_site_candidates,
+    reserve_leads_for_export,
+)
 from src.services.providers.base import TARGET_CATEGORIES, niche_title
 from src.services.site_status import NO_SITE_STATUSES, SITE_DEAD, SITE_FOUND, SITE_UNKNOWN
 
@@ -109,12 +115,56 @@ def plan_export(candidates: list[Lead], stats: list[NicheStats], limit: int) -> 
     return ExportPlan(leads=explored + rest, explored=len(explored))
 
 
-async def choose_export(session: AsyncSession, limit: int, niche: str | None = None) -> ExportPlan:
-    """The leads for a request file: of one niche if it is named, otherwise by the priority of niches."""
-    candidates = await get_unknown_site_candidates(session, niche)
+async def choose_export(
+    session: AsyncSession,
+    limit: int,
+    niche: str | None = None,
+    user_id: int | None = None,
+    now: datetime | None = None,
+) -> ExportPlan:
+    """
+    The leads for a request file: of one niche if it is named, otherwise by the priority of niches.
+
+    With `user_id`, leads reserved by another person's export are skipped (see reserve_export).
+    """
+    candidates = await get_unknown_site_candidates(session, niche, for_user=user_id, now=now)
     if niche is not None:
         return ExportPlan(leads=candidates[:limit])
     return plan_export(candidates, await load_niche_stats(session), limit)
+
+
+# Parallel exports can reserve leads this one has just chosen; then it chooses again, this many times.
+_RESERVE_ATTEMPTS: int = 3
+
+
+async def reserve_export(
+    session: AsyncSession,
+    limit: int,
+    niche: str | None,
+    user_id: int,
+    hours: int,
+    now: datetime | None = None,
+) -> ExportPlan:
+    """
+    Choose the leads of a request file and reserve them for this person for `hours`.
+
+    The choice is advisory; the reserve is one guarded UPDATE (reserve_leads_for_export), so files of
+    different people never share a lead. Leads someone else took meanwhile are replaced by others.
+    """
+    plan = await choose_export(session, limit, niche, user_id, now)
+    taken = await reserve_leads_for_export(session, [lead.id for lead in plan.leads], user_id, hours, now)
+    explored_ids = {lead.id for lead in plan.leads[: plan.explored]}
+    explored = sum(1 for lead in taken if lead.id in explored_ids)
+    for _ in range(_RESERVE_ATTEMPTS - 1):
+        if len(taken) >= min(limit, len(plan.leads)) or not plan.leads:
+            break
+        have = {lead.id for lead in taken}
+        more = await choose_export(session, limit, niche, user_id, now)
+        wanted = [lead.id for lead in more.leads if lead.id not in have][: limit - len(taken)]
+        if not wanted:
+            break
+        taken += await reserve_leads_for_export(session, wanted, user_id, hours, now)
+    return ExportPlan(leads=taken, explored=min(explored, len(taken)))
 
 
 def _title_without_emoji(title: str) -> str:

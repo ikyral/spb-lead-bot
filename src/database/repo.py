@@ -482,12 +482,12 @@ def _may_work_clause(user_id: int, now: datetime, owner_role: bool) -> ColumnEle
     """
     May this person set a status: nobody else works the lead now, and it was handed out to them.
 
-    An active foreign owner refuses everyone, the owner of the bot too (they may return it to the pool first).
-    A lead handed out to someone else may be taken by the owner of the bot, or once its owner's time is over.
+    An operator is refused while someone else works the lead, and on a lead handed out to someone else
+    until its owner's time is over. The owner of the bot may act on any handed-out lead and takes it over.
     """
-    free = _free_for_clause(user_id, now)
     if owner_role:
-        return free
+        return true()
+    free = _free_for_clause(user_id, now)
     expired = and_(Lead.owner_user_id.is_not(None), Lead.owned_until.is_not(None), Lead.owned_until <= now)
     mine = or_(
         Lead.issued_to_user_id.is_(None), Lead.issued_to_user_id == user_id, Lead.owner_user_id == user_id, expired
@@ -634,30 +634,33 @@ async def migrate_legacy_ownership(
     return changed
 
 
-async def reserve_pool_for_export(
-    session: AsyncSession, user_id: int, hours: int, now: datetime | None = None
+async def reserve_leads_for_export(
+    session: AsyncSession, lead_ids: list[int], user_id: int, hours: int, now: datetime | None = None
 ) -> list[Lead]:
     """
-    Take the pool for a CSV export: every lead not reserved by someone else gets reserved_by = user_id.
+    Reserve the leads of an enrichment request file for this person; returns those actually reserved.
 
-    One UPDATE ... RETURNING, so two people exporting at once get disjoint sets. The same person
-    repeating within the reserve gets their leads again (and the reserve is extended).
+    One guarded UPDATE ... RETURNING: a lead another person reserved meanwhile is not returned, so two
+    people exporting at once get disjoint files. The same person repeating within the reserve gets their
+    leads again (and the reserve is extended). The order of `lead_ids` is kept.
     """
+    if not lead_ids:
+        return []
     now = now or datetime.now(UTC)
     stmt = (
         update(Lead)
-        .where(_in_pool_clause(), _not_reserved_for_other_clause(user_id, now))
+        .where(Lead.id.in_(lead_ids), _in_pool_clause(), _not_reserved_for_other_clause(user_id, now))
         .values(reserved_by=user_id, reserved_until=now + timedelta(hours=hours))
         .returning(Lead)
         .execution_options(synchronize_session=False)
     )
     try:
-        leads = list((await session.scalars(stmt)).all())
+        taken = {lead.id: lead for lead in (await session.scalars(stmt)).all()}
         await session.commit()
     except BaseException:
         await session.rollback()
         raise
-    return sorted(leads, key=lambda lead: (-lead.score, lead.id))
+    return [taken[lead_id] for lead_id in lead_ids if lead_id in taken]
 
 
 async def count_reserved_for_others(session: AsyncSession, user_id: int | None, now: datetime | None = None) -> int:
@@ -765,6 +768,8 @@ async def get_owned_in_area(
             Lead.category == category,
             Lead.owner_user_id.is_not(None),
             or_(Lead.owned_until.is_(None), Lead.owned_until > now),
+            # A refusal keeps its owner forever, but nobody works such a lead.
+            func.coalesce(Lead.contact_status, "") != CONTACT_REJECTED,
         )
     )
     owners: dict[str, tuple[int, datetime | None, bool]] = {}
@@ -847,8 +852,14 @@ async def get_pool_stats(session: AsyncSession) -> PoolStats:
     )
 
 
-async def get_unknown_site_candidates(session: AsyncSession, niche: str | None = None) -> list[Lead]:
-    """All of the pool that nobody has looked at and whose card on 2GIS a collector can open, the best first."""
+async def get_unknown_site_candidates(
+    session: AsyncSession, niche: str | None = None, for_user: int | None = None, now: datetime | None = None
+) -> list[Lead]:
+    """
+    All of the pool that nobody has looked at and whose card on 2GIS a collector can open, the best first.
+
+    With `for_user`, leads another person's enrichment export keeps are left out.
+    """
     stmt = (
         select(Lead)
         .where(_in_pool_clause(), Lead.site_status == SITE_UNKNOWN, Lead.source.in_(TWOGIS_SOURCES))
@@ -856,6 +867,8 @@ async def get_unknown_site_candidates(session: AsyncSession, niche: str | None =
     )
     if niche is not None:
         stmt = stmt.where(Lead.category == niche)
+    if for_user is not None:
+        stmt = stmt.where(_not_reserved_for_other_clause(for_user, now or datetime.now(UTC)))
     # A link is checked in Python, so a bad one cannot make a batch shorter than the pool allows.
     return [lead for lead in (await session.scalars(stmt)).all() if readable_card_number(lead.source_url) is not None]
 

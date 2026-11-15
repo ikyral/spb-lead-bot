@@ -1,6 +1,7 @@
 """Ownership of leads: issuing, statuses, return to the pool, the export reserve, roles and the migration."""
 
 import asyncio
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
@@ -44,10 +45,11 @@ from src.database.repo import (
     migrate_legacy_ownership,
     release_expired_leads,
     release_lead,
-    reserve_pool_for_export,
+    reserve_leads_for_export,
     return_undelivered_leads,
 )
 from src.services.collector import load_collector_config
+from src.services.niche_priority import MAX_LEADS_PER_NICHE, reserve_export
 from src.services.ownership import RELEASE_INTERVAL_SECONDS, RELEASE_JOB_ID, release_expired_job
 from src.services.providers.registry import ProviderSet
 from src.services.scheduler import CollectorRunner
@@ -213,16 +215,24 @@ async def test_another_person_is_refused_while_the_owner_is_active_and_nothing_c
         change = await _status(session_maker, lead_id, status, BORIS, now=NOW + timedelta(days=29))
         assert change.outcome == OUTCOME_OWNED
         assert change.lead is not None and change.lead.owner_name == f"@user{ANNA}"
-    # The owner of the bot too: an active owner must return the lead first.
-    owner = await _status(session_maker, lead_id, CONTACT_REPLIED, OWNER, owner_role=True)
-    assert owner.outcome == OUTCOME_OWNED
-
     after = await _get(session_maker, lead_id)
     assert (after.contact_status, after.owner_user_id, after.owned_until) == (
         before.contact_status,
         before.owner_user_id,
         before.owned_until,
     )
+
+
+async def test_the_owner_of_the_bot_takes_over_a_lead_someone_else_works(session_maker) -> None:
+    lead_id = await _issued_to(session_maker, ANNA)
+    await _status(session_maker, lead_id, CONTACT_CONTACTED, ANNA)
+
+    owner = await _status(session_maker, lead_id, CONTACT_REPLIED, OWNER, owner_role=True)
+    assert owner.outcome == OUTCOME_OK
+    lead = await _get(session_maker, lead_id)
+    assert (lead.owner_user_id, lead.contact_status, lead.owned_until) == (OWNER, CONTACT_REPLIED, None)
+    # Now the operator is the one refused.
+    assert (await _status(session_maker, lead_id, CONTACT_CONTACTED, ANNA)).outcome == OUTCOME_OWNED
 
 
 async def test_after_expiry_another_person_takes_the_lead_over_before_the_scheduler_runs(session_maker) -> None:
@@ -381,43 +391,92 @@ async def test_timestamps_come_back_as_aware_utc(session_maker) -> None:
 # ---------- export reserve ----------
 
 
-async def test_two_people_exporting_get_disjoint_sets_and_the_same_person_gets_the_same(session_maker) -> None:
-    await _add_pool(session_maker, 4)
+def _unknown(number: int) -> Lead:
+    """A lead for an enrichment request file: nothing known about the site, a card on 2GIS to open."""
+    return _lead(number, site_status="unknown", source_url=f"https://2gis.ru/spb/firm/7{number}")
+
+
+async def _export(session_maker, limit: int, user_id: int, now: datetime = NOW) -> list[int]:
     async with session_maker() as session:
-        anna = await reserve_pool_for_export(session, ANNA, 6, NOW)
-    await _add(session_maker, _lead(5))
-    async with session_maker() as session:
-        boris = await reserve_pool_for_export(session, BORIS, 6, NOW + timedelta(hours=1))
-        anna_again = await reserve_pool_for_export(session, ANNA, 6, NOW + timedelta(hours=2))
-    assert {lead.id for lead in anna} == {1, 2, 3, 4}
-    assert {lead.id for lead in boris} == {5}
-    assert {lead.id for lead in anna_again} == {1, 2, 3, 4}
-    assert all(lead.reserved_by == ANNA for lead in anna_again)
+        plan = await reserve_export(session, limit, None, user_id, 6, now)
+    return [lead.id for lead in plan.leads]
+
+
+async def test_two_people_exporting_get_disjoint_files_and_the_same_person_gets_the_same(session_maker) -> None:
+    await _add(session_maker, *(_unknown(number) for number in range(1, 7)))
+    anna = await _export(session_maker, 4, ANNA)
+    boris = await _export(session_maker, 4, BORIS, NOW + timedelta(hours=1))
+    anna_again = await _export(session_maker, 4, ANNA, NOW + timedelta(hours=2))
+    assert len(anna) == 4 and set(boris) == set(range(1, 7)) - set(anna)
+    assert set(anna_again) == set(anna)
+    for lead_id in anna:
+        lead = await _get(session_maker, lead_id)
+        assert (lead.reserved_by, lead.reserved_until) == (ANNA, NOW + timedelta(hours=8))  # extended
 
 
 async def test_concurrent_exports_never_overlap(session_maker) -> None:
-    await _add_pool(session_maker, 30)
-
-    async def export(user_id: int) -> set[int]:
-        async with session_maker() as session:
-            return {lead.id for lead in await reserve_pool_for_export(session, user_id, 6, NOW)}
-
-    first, second = await asyncio.gather(export(ANNA), export(BORIS))
-    assert not first & second and len(first | second) == 30
+    await _add(session_maker, *(_unknown(number) for number in range(1, 31)))
+    first, second = await asyncio.gather(_export(session_maker, 20, ANNA), _export(session_maker, 20, BORIS))
+    assert not set(first) & set(second)
+    # One niche gives at most MAX_LEADS_PER_NICHE to a file; whoever lost a race got other leads instead.
+    assert len(first) == len(second) == MAX_LEADS_PER_NICHE
 
 
 async def test_after_the_reserve_another_person_can_export_and_batches_skip_it_meanwhile(session_maker) -> None:
-    await _add_pool(session_maker, 2)
+    await _add(session_maker, _unknown(1), _unknown(2))
+    assert await _export(session_maker, 30, ANNA) == [1, 2]
     async with session_maker() as session:
-        await reserve_pool_for_export(session, ANNA, 6, NOW)
         assert await count_reserved_for_others(session, BORIS, NOW) == 2
         assert await count_reserved_for_others(session, ANNA, NOW) == 0
-        assert await reserve_pool_for_export(session, BORIS, 6, NOW + timedelta(hours=5)) == []
+        # A plan chosen before Anna's reserve still cannot take her leads.
+        assert await reserve_leads_for_export(session, [2, 1], BORIS, 6, NOW) == []
+    assert await _export(session_maker, 30, BORIS, NOW + timedelta(hours=5)) == []
     assert await _issue(session_maker, 10, BORIS, now=NOW + timedelta(hours=5)) == []
     assert len(await _issue(session_maker, 1, ANNA, now=NOW + timedelta(hours=5))) == 1  # her own reserve
-    async with session_maker() as session:
-        later = await reserve_pool_for_export(session, BORIS, 6, NOW + timedelta(hours=6))
-    assert [lead.id for lead in later] == [2]
+    # Exactly at reserved_until the reserve is over.
+    assert await _export(session_maker, 30, BORIS, NOW + timedelta(hours=6)) == [2]
+
+
+async def test_the_csv_export_of_new_leads_reserves_nothing(session_maker, monkeypatch) -> None:
+    from src.bot.handlers import leads as leads_handlers
+
+    await _add_pool(session_maker, 2)
+    monkeypatch.setattr(leads_handlers, "async_session_maker", session_maker)
+    callback = MagicMock(spec=CallbackQuery)
+    callback.data = "export:new"
+    callback.from_user = User(id=OWNER, is_bot=False, first_name="U")
+    callback.answer = AsyncMock()
+    callback.message = MagicMock(spec=Message)
+    callback.message.answer_document = AsyncMock()
+    await leads_handlers.handle_export_csv(callback)
+    callback.message.answer_document.assert_awaited_once()
+    assert (await _get(session_maker, 1)).reserved_by is None
+    assert len(await _issue(session_maker, 10, BORIS)) == 2
+
+
+async def test_enrich_request_file_holds_only_the_reserved_leads(session_maker, monkeypatch) -> None:
+    from src.bot.handlers import imports
+
+    await _add(session_maker, _unknown(1), _unknown(2), _unknown(3))
+    monkeypatch.setattr(imports, "async_session_maker", session_maker)
+
+    def message(user_id: int) -> MagicMock:
+        sent = MagicMock(spec=Message)
+        sent.from_user = User(id=user_id, is_bot=False, first_name="U")
+        sent.answer = AsyncMock()
+        sent.answer_document = AsyncMock()
+        return sent
+
+    def ids_in_file(sent: MagicMock) -> set[str]:
+        document = sent.answer_document.await_args.args[0]
+        payload = json.loads(document.data.decode("utf-8"))
+        return {str(record["source_id"]) for record in payload["records"]}
+
+    anna, boris = message(ANNA), message(BORIS)
+    await imports.send_enrich_request(anna, 2)
+    await imports.send_enrich_request(boris, 2)
+    assert len(ids_in_file(anna)) == 2 and len(ids_in_file(boris)) == 1
+    assert not ids_in_file(anna) & ids_in_file(boris)
 
 
 # ---------- summaries ----------
@@ -649,6 +708,25 @@ async def test_operator_gets_no_access_as_an_alert_and_a_reply(guard) -> None:
     await guard(AsyncMock(), _message(ANNA, "/rescore"), {})
     await guard(AsyncMock(), _message(ANNA, "/team"), {})  # within the cooldown: no second reply
     Message.answer.assert_awaited_once_with(NO_ACCESS_TEXT)  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("caption", ["/collect_on", "/Rescore@spb_lead_bot", "/team", "/provider_on 2gis"])
+async def test_operator_photo_with_a_command_caption_is_refused(guard, caption: str) -> None:
+    photo = Message(
+        message_id=1,
+        date=NOW,
+        chat=Chat(id=ANNA, type="private"),
+        from_user=User(id=ANNA, is_bot=False, first_name="U"),
+        photo=[{"file_id": "p", "file_unique_id": "q", "width": 1, "height": 1}],
+        caption=caption,
+    )
+    handler = AsyncMock()
+    assert await guard(handler, photo, {"event_from_user": photo.from_user}) is None
+    handler.assert_not_awaited()
+    # The owner may send the same.
+    owner_photo = photo.model_copy(update={"from_user": User(id=OWNER, is_bot=False, first_name="U")})
+    await guard(handler, owner_photo, {"event_from_user": owner_photo.from_user})
+    handler.assert_awaited_once()
 
 
 def test_command_names_are_parsed_robustly() -> None:

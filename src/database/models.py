@@ -112,7 +112,7 @@ class Lead(Base):
     owner_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
     owner_name: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
     owned_until: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
-    # A CSV export of the pool keeps its leads for that person until reserved_until; compared at read time.
+    # An enrichment request file keeps its leads for that person until reserved_until; compared at read time.
     reserved_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
     reserved_until: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
 

@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.bot.formatters import format_lead_card, generate_pitch_text, owned_by_text, site_verdict_text
 from src.bot.keyboards import STALE_BUTTON_TEXT, get_export_keyboard, get_lead_card_keyboard, manual_site_verdict
 from src.bot.texts import CRM_STATS_BUTTON_TEXT, IN_WORK_BUTTON_TEXT, NEW_LEADS_BUTTON_TEXT
-from src.config import settings
 from src.database.models import Lead
 from src.database.repo import (
     async_session_maker,
@@ -22,7 +21,6 @@ from src.database.repo import (
     get_leads,
     get_status_counts,
     owned_by_other,
-    reserve_pool_for_export,
     set_site_verdict,
     update_crm_status_unless_owned,
 )
@@ -225,12 +223,7 @@ async def handle_export_csv(callback: CallbackQuery) -> None:
         await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
         return
     async with async_session_maker() as session:
-        if crm_status == "new":
-            # The export for enrichment: the leads go to this person for EXPORT_RESERVE_HOURS, and
-            # another person exporting meanwhile gets different ones (see reserve_pool_for_export).
-            leads = await reserve_pool_for_export(session, callback.from_user.id, settings.EXPORT_RESERVE_HOURS)
-        else:
-            leads = await export_leads_by_status(session, crm_status)
+        leads = await export_leads_by_status(session, crm_status)
 
     if not leads:
         await callback.answer(f"Нет лидов со статусом «{STATUS_NAMES[crm_status]}»", show_alert=True)

@@ -14,6 +14,7 @@ from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, LinkPreviewOp
 from src.bot.formatters import format_import_messages, format_niche_table, format_unknown_niche
 from src.bot.keyboards import get_after_enrichment_keyboard
 from src.bot.texts import EXPORT_CAPTION_STEPS, EXPORT_WRONG_NUMBER_TEXT
+from src.config import settings
 from src.database.repo import async_session_maker
 from src.services.lead_file import (
     ENRICH_REQUEST_MAX_LEADS,
@@ -27,6 +28,7 @@ from src.services.niche_priority import (
     choose_export,
     known_niches,
     load_niche_stats,
+    reserve_export,
     resolve_niche,
 )
 from src.services.providers.base import niche_title
@@ -92,8 +94,18 @@ async def handle_export_unknown(message: Message, command: CommandObject) -> Non
     await send_enrich_request(message, limit, niche_text)
 
 
-async def send_enrich_request(message: Message, limit: int, niche_text: str | None = None) -> None:
-    """Send the file for a collector to the chat of this message: from /export_unknown and from the buttons."""
+async def send_enrich_request(
+    message: Message, limit: int, niche_text: str | None = None, user_id: int | None = None
+) -> None:
+    """
+    Send the file for a collector to the chat of this message: from /export_unknown and from the buttons.
+
+    The leads of the file are reserved for `user_id` (the person who asked) for EXPORT_RESERVE_HOURS:
+    another person's file and batches do not get them meanwhile.
+    """
+    if user_id is None:
+        sender = getattr(message.from_user, "id", None)
+        user_id = sender if isinstance(sender, int) else None
     niche: str | None = None
     async with async_session_maker() as session:
         if niche_text is not None:
@@ -102,7 +114,11 @@ async def send_enrich_request(message: Message, limit: int, niche_text: str | No
             if niche is None:
                 await _answer_all(message, format_unknown_niche(niche_text, niches))
                 return
-        plan = await choose_export(session, limit, niche)
+        if user_id is not None:
+            plan = await reserve_export(session, limit, niche, user_id, settings.EXPORT_RESERVE_HOURS)
+        else:
+            # Without a sender there is nobody to reserve for; a message an admin wrote always has one.
+            plan = await choose_export(session, limit, niche)
     if not plan.leads:
         where = f" в нише {html.escape(niche_title(niche))}" if niche is not None else ""
         await message.answer(f"Лидов с неизвестным статусом сайта и ссылкой на карточку 2ГИС{where} в запасе нет.")
