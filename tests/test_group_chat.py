@@ -891,15 +891,18 @@ async def test_stopping_the_bot_returns_the_leads_not_yet_sent(batch_env, monkey
     await _add_leads(batch_env, 3)
     sent: list[int] = []
     never = asyncio.Event()
+    hanging = asyncio.Event()
 
     async def send_one_then_hang(message, lead) -> None:
         if sent:
+            hanging.set()
             await never.wait()
         sent.append(lead.id)
 
     monkeypatch.setattr(issue, "_send_card", send_one_then_hang)
     await issue.handle_next_batch_request(_group_message(), _runner())
-    await _let_background_run()
+    # Wait for the batch itself, not a number of loop turns: the database works in a thread.
+    await asyncio.wait_for(hanging.wait(), timeout=10)
     assert len(sent) == 1
 
     await issue.stop_background_batches()
