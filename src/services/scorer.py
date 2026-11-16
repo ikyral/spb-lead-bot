@@ -62,6 +62,7 @@ HIGH_MARGIN_CATEGORY_KEYS: frozenset[str] = frozenset(
         "detailing",
         "cleaning",
         "renovation",
+        "furniture_custom",
     }
 )
 

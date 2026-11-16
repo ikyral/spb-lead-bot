@@ -20,7 +20,7 @@ from src.services.api_client import (
     ProviderQuotaError,
     ProviderTemporaryError,
 )
-from src.services.collector import MAX_CONSECUTIVE_FAILURES, collect_leads, load_collector_config
+from src.services.collector import MAX_CONSECUTIVE_FAILURES, _progress_key, collect_leads, load_collector_config
 from src.services.providers import OSMOverpassProvider, TwoGisProvider
 from src.services.providers.base import (
     SPB_DISTRICTS,
@@ -117,6 +117,26 @@ def test_default_targets_are_all_categories_in_all_districts() -> None:
     config = _config()
     assert len(config.targets) == len(TARGET_CATEGORIES) * len(SPB_DISTRICTS)
     assert config.providers == ["2gis", "osm"]  # 2GIS is the main source, the page reader is not listed
+    assert len(config.targets) == 220
+    assert {"pet_services", "fitness_studios", "furniture_custom", "kids_centers"} <= {
+        target.query.category for target in config.targets
+    }
+
+
+def test_progress_keys_are_unique_and_the_old_targets_keep_theirs(monkeypatch: pytest.MonkeyPatch) -> None:
+    new_niches = {"pet_services", "fitness_studios", "furniture_custom", "kids_centers"}
+    provider = FakeProvider([])
+    provider.name = "2gis"
+    targets = _config().targets
+    keys = [_progress_key(provider, target) for target in targets]
+    assert len(set(keys)) == len(targets) == 220
+    old_keys = {_progress_key(provider, t) for t in targets if t.query.category not in new_niches}
+    assert len(old_keys) == 180
+    # The same targets built without the new niches give the very same keys.
+    for key in new_niches:
+        monkeypatch.delitem(TARGET_CATEGORIES, key)
+    without_new = {_progress_key(provider, t) for t in _config().targets}
+    assert without_new == old_keys
 
 
 def test_targets_from_settings_with_free_text_query_and_bbox() -> None:

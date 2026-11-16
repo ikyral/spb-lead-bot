@@ -122,7 +122,7 @@ _SITE_STATUS_TITLES: dict[str, str] = {
     SITE_UNCERTAIN: "Возможно, сайт есть",
     SITE_UNKNOWN: "Статус неизвестен",
 }
-# Enough to see what prevails; a list of 18 niches would hide the rest of the message.
+# Enough to see what prevails; a long list of niches would hide the rest of the message.
 _NICHES_SHOWN: int = 8
 _CONTACT_STATUS_TITLES: dict[str, str] = {
     CONTACT_CONTACTED: "✍️ Написал",

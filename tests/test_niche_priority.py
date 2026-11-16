@@ -37,6 +37,7 @@ from src.services.niche_priority import (
     stats_from_counts,
     useful_share,
 )
+from src.services.providers.base import TARGET_CATEGORIES, niche_title
 from src.services.site_status import (
     CONFIDENCE_LOW,
     CONFIDENCE_MEDIUM,
@@ -329,6 +330,28 @@ def test_a_niche_is_found_by_a_title_without_the_picture() -> None:
 
 def test_a_free_text_niche_from_the_database_is_found() -> None:
     assert resolve_niche("Ремонт обуви", ["beauty", "ремонт обуви"]) == "ремонт обуви"
+
+
+@pytest.mark.parametrize("key", ["pet_services", "kids_centers"])
+def test_new_niches_are_found_by_key_title_and_title_without_the_picture(key: str) -> None:
+    niches = list(TARGET_CATEGORIES)
+    title = niche_title(key)
+    plain = "".join(char for char in title if char.isalnum() or char in " ,-").strip()
+    for text in (key, key.upper(), title, title.upper(), plain, plain.upper(), plain.lower()):
+        assert resolve_niche(text, niches) == key
+
+
+def test_titles_without_the_picture_of_new_niches_do_not_clash_with_others() -> None:
+    new = ("pet_services", "fitness_studios", "furniture_custom", "kids_centers")
+    plain = {}
+    for key in TARGET_CATEGORIES:
+        title = niche_title(key)
+        plain[key] = "".join(char for char in title if char.isalnum() or char in " ,-").strip().casefold()
+    for key in new:
+        assert plain[key] != key.casefold()
+        assert [
+            other for other in TARGET_CATEGORIES if other != key and plain[key] in (other.casefold(), plain[other])
+        ] == []
 
 
 def test_an_unknown_niche_is_not_found() -> None:
