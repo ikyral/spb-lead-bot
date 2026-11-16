@@ -119,6 +119,20 @@ class Settings(BaseSettings):
     # How many times collect_cli.py --check may look at the site within 24 hours.
     SCRAPER_CHECK_MAX_PER_DAY: int = Field(default=3, ge=1, le=10)
 
+    # Парсер 2gis_cdp: только ручной запуск на ПК с экраном (collect_cli.py --assisted), окно Chrome видно.
+    # Нижний предел паузы 3 с задан здесь: меньше поставить нельзя.
+    SCRAPER_CDP_MIN_DELAY_SECONDS: float = Field(default=3.0, ge=3.0)
+    SCRAPER_CDP_MAX_DELAY_SECONDS: float = Field(default=8.0, ge=3.0)
+    # Считаются открытия страниц, клики по пагинации и каждая открытая карточка.
+    SCRAPER_CDP_MAX_PAGES_PER_RUN: int = Field(default=60, ge=1, le=200)
+    SCRAPER_CDP_MAX_RESULTS_PER_RUN: int = Field(default=100, ge=1, le=300)
+    SCRAPER_CDP_MIN_HOURS_BETWEEN_RUNS: float = Field(default=20.0, ge=0.0)
+    SCRAPER_CDP_PAGE_TIMEOUT_SECONDS: float = Field(default=45.0, ge=5.0)
+    # Профиль Chrome сохраняется между запусками.
+    SCRAPER_CDP_PROFILE_DIR: str = "data/cdp_profile"
+    # Пусто = найти Chrome автоматически.
+    SCRAPER_CDP_CHROME_PATH: str = ""
+
     # Looking for the site and contacts of leads on Google, only with collect_cli.py --assisted --google.
     # The upper bounds keep it a person's pace whatever is configured; pauses are fixed in the code.
     GOOGLE_MAX_PER_RUN: int = Field(default=15, ge=1, le=20)
@@ -181,6 +195,12 @@ class Settings(BaseSettings):
     def _use_preferred_key_name(self) -> "Settings":
         if self.DGIS_API_KEY:
             self.TWOGIS_API_KEY = self.DGIS_API_KEY
+        return self
+
+    @model_validator(mode="after")
+    def _check_cdp_delays(self) -> "Settings":
+        if self.SCRAPER_CDP_MIN_DELAY_SECONDS > self.SCRAPER_CDP_MAX_DELAY_SECONDS:
+            raise ValueError("SCRAPER_CDP_MIN_DELAY_SECONDS не может быть больше SCRAPER_CDP_MAX_DELAY_SECONDS")
         return self
 
     @field_validator("ADMIN_TG_IDS")

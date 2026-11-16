@@ -38,6 +38,8 @@ from src.services.lead_file import EnrichRequest, LeadFileError, parse_enrich_re
 from src.services.lead_import import read_limited
 from src.services.providers.registry import build_providers
 from src.services.providers.twogis import TwoGisOptions
+from src.services.providers.twogis_cdp import PROVIDER_NAME as CDP_PROVIDER_NAME
+from src.services.providers.twogis_cdp import CdpOptions
 from src.services.providers.twogis_scraper import ScraperOptions, TwoGisScraperProvider
 from src.services.scheduler import STATUS_FAILED, TRIGGER_MANUAL, CollectorRunner, RunReport
 
@@ -215,11 +217,18 @@ async def _collect(
     """Run one pass of the usual collection. Returns the names of the providers configured here."""
     config = _collector_config(current)
     twogis_key = current.TWOGIS_API_KEY.get_secret_value() if current.TWOGIS_API_KEY else None
-    if assisted and SCRAPER_PROVIDER_NAME not in config.providers:
+    if assisted and SCRAPER_PROVIDER_NAME not in config.providers and CDP_PROVIDER_NAME not in config.providers:
         # Otherwise the run would quietly go without a browser and without the mode that was asked for.
         raise SettingsError(
-            f"режим с участием человека нужен парсеру: добавьте {SCRAPER_PROVIDER_NAME} в COLLECTOR_PROVIDERS"
+            f"режим с участием человека нужен парсеру: добавьте {SCRAPER_PROVIDER_NAME} или {CDP_PROVIDER_NAME} "
+            "в COLLECTOR_PROVIDERS"
         )
+    # 2gis_cdp is built only here, in a manual run with a screen; otherwise the registry explains why not.
+    cdp_options = (
+        CdpOptions.from_settings(current, ignore_interval=ignore_interval)
+        if assisted and CDP_PROVIDER_NAME in config.providers
+        else None
+    )
     if not current.SCRAPER_HEADLESS and not assisted:
         logger.warning("SCRAPER_HEADLESS=false is for manual debugging only: do not use it on a schedule")
     dgis_quota = (
@@ -229,12 +238,17 @@ async def _collect(
     )
     if dgis_quota is not None:
         await dgis_quota.sync_key()
-    provider_set = build_providers(
+    provider_args = (
         config.providers,
         twogis_key,
         replace(ScraperOptions.from_settings(current, assisted=assisted), ignore_interval=ignore_interval),
         TwoGisOptions.from_settings(current),
         dgis_quota.spend if dgis_quota else None,
+    )
+    provider_set = (
+        build_providers(*provider_args, cdp_options=cdp_options)
+        if cdp_options is not None
+        else build_providers(*provider_args)
     )
 
     async def keep_report(report: RunReport) -> None:
