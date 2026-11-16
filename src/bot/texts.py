@@ -151,7 +151,10 @@ PLAN_EXPIRING_TITLE: str = "<b>Истекают в ближайшие сутки
 PLAN_EXPIRING_LINE: str = "• {name} — до {until}"
 TEAM_TITLE: str = "👥 <b>Команда</b>"
 TEAM_EMPTY: str = "Ни у кого нет лидов в работе."
-TEAM_LINE: str = "• <b>{name}</b>: в работе {active}, ответили {replied}, истекают за сутки {expiring}"
+TEAM_LINE: str = "• <b>{name}</b>{role}: в работе {active}, ответили {replied}, истекают за сутки {expiring}"
+# Shown in /team only when ADMIN_TG_OWNER_IDS is set, i.e. when there is more than one owner.
+TEAM_OWNER_MARK: str = " (владелец)"
+TEAM_OPERATOR_MARK: str = " (оператор)"
 AREA_OWNED_LINE: str = "🔒 В работе в этом районе и нише: <b>{count}</b> — {owners}"
 AREA_OWNER_ITEM: str = "{name} ({count}{until})"
 
@@ -199,7 +202,7 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
                 "/today",
             ),
             CommandHelp("plan", "Мои лиды", "Ваши лиды по статусам и те, что скоро вернутся в пул", "/plan"),
-            CommandHelp("team", "Лиды команды", "Кто сколько лидов ведёт (только владелец бота)", "/team"),
+            CommandHelp("team", "Лиды команды", "Кто сколько лидов ведёт (только владельцы бота)", "/team"),
         ),
     ),
     HelpSection(

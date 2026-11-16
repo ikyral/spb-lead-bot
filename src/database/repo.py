@@ -483,7 +483,7 @@ def _may_work_clause(user_id: int, now: datetime, owner_role: bool) -> ColumnEle
     May this person set a status: nobody else works the lead now, and it was handed out to them.
 
     An operator is refused while someone else works the lead, and on a lead handed out to someone else
-    until its owner's time is over. The owner of the bot may act on any handed-out lead and takes it over.
+    until its owner's time is over. An owner of the bot may act on any handed-out lead and takes it over.
     """
     if owner_role:
         return true()
@@ -578,7 +578,7 @@ async def release_lead(session: AsyncSession, lead_id: int, user_id: int, *, own
     """
     The button '↩️ Вернуть в пул': the lead goes back to the pool at once.
 
-    Allowed to its owner, to the person it was handed out to while nobody owns it, and to the owner of the bot.
+    Allowed to its owner, to the person it was handed out to while nobody owns it, and to owners of the bot.
     """
     lead = await session.get(Lead, lead_id)
     if lead is None or lead.crm_status != STATUS_ISSUED:
@@ -605,7 +605,7 @@ async def migrate_legacy_ownership(
     session: AsyncSession, owner_id: int, now: datetime | None = None, days: int | None = None
 ) -> int:
     """
-    Give leads marked 'contacted' or 'replied' before ownership existed to the owner of the bot.
+    Give leads marked 'contacted' or 'replied' before ownership existed to the main owner of the bot.
 
     Runs at every start and touches only rows without an owner, so a second run changes nothing and
     never extends an expiry. 'Replied' gets no expiry, 'contacted' LEAD_OWNERSHIP_DAYS from now.
@@ -730,6 +730,7 @@ class TeamRow:
     active: int
     replied: int
     expiring: int
+    user_id: int
 
 
 async def get_team_stats(session: AsyncSession, now: datetime | None = None) -> list[TeamRow]:
@@ -747,8 +748,9 @@ async def get_team_stats(session: AsyncSession, now: datetime | None = None) -> 
         .group_by(Lead.owner_user_id)
     )
     team = [
-        TeamRow(str(name or user_id), int(active), int(replied), int(expiring))
+        TeamRow(str(name or user_id), int(active), int(replied), int(expiring), user_id)
         for user_id, name, active, replied, expiring in rows.all()
+        if user_id is not None  # always true here; narrows the type for mypy
     ]
     return sorted(team, key=lambda row: (-row.active, row.owner_name))
 
