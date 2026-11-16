@@ -501,6 +501,7 @@ async def test_owner_summary_team_and_the_marker_of_the_search(session_maker) ->
     assert (summary.active, summary.replied, summary.expiring_total) == (2, 1, 1)
     assert [lead.id for lead in summary.expiring] == [2]
     assert [(row.owner_name, row.active, row.replied, row.expiring) for row in team] == [(f"@user{ANNA}", 2, 1, 1)]
+    assert [row.user_id for row in team] == [ANNA]
     assert area == [(f"@user{ANNA}", 3, None)]  # 'replied' has no expiry
     assert nobody.by_status == {} and nobody.expiring == []
 
