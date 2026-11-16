@@ -1,0 +1,338 @@
+"""
+2GIS through its public pages in a visible Chrome window, driven over the DevTools protocol.
+
+Manual only: the provider is not in COLLECT_PROVIDERS or the schedule, and the registry builds it
+only for collect_cli.py --assisted on a computer with a screen. The browser keeps its own defaults:
+nothing changes how it presents itself or hides that it is driven.
+
+Every action that reaches the site goes through one gate, in this order: the limit of pages per
+run (each opened page, pagination click and card counts), robots.txt for the exact URL (a card by
+its canonical link, without stat=), a random pause of at least MIN_PAUSE_SECONDS before every
+action but the first of a run. Only then the action.
+
+At the first sign of a refusal (captcha, 401/403/429, an empty page, a page not of 2GIS, a search
+page that is not understood) it stops: nothing waits for the captcha or tries to pass it. The block
+is recorded by the collector like any other; a person may pass the check in the browser between runs.
+"""
+
+import logging
+import random
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol
+
+from src.config import Settings, resolve_path
+from src.services.api_client import (
+    NO_CONNECTION_TEXT,
+    ProviderBlockedError,
+    ProviderBudgetExhausted,
+    ProviderError,
+    ProviderNoConnectionError,
+    ProviderUnavailableError,
+)
+from src.services.providers.base import BaseMapProvider, RawPlace, SearchArea, SearchPage, SearchQuery
+from src.services.providers.twogis import parse_catalog_items
+from src.services.providers.twogis_scraper import ROBOTS_AGENT, call_owner, read_card_contacts
+from src.services.scraper import twogis_site
+from src.services.scraper.chrome.parsers import (
+    BlockChecker,
+    ChromeScraperSession,
+    Gate,
+    GateAction,
+    GateDecision,
+    ScrapedSearchResult,
+)
+from src.services.scraper.robots import RobotsNoConnectionError, RobotsRules, RobotsUnavailableError, fetch_robots
+from src.services.scraper.snapshot import PageSnapshot
+from src.services.twogis_links import build_card_url
+
+logger = logging.getLogger(__name__)
+
+PROVIDER_NAME: str = "2gis_cdp"
+# Below this no pause is possible, whatever the settings say.
+MIN_PAUSE_SECONDS: float = 3.0
+
+
+@dataclass(frozen=True)
+class CdpOptions:
+    """Limits of one manual run."""
+
+    city_slug: str = "spb"
+    min_delay_seconds: float = 3.0
+    max_delay_seconds: float = 8.0
+    max_pages_per_run: int = 60
+    max_results_per_run: int = 100
+    min_hours_between_runs: float = 20.0
+    page_timeout_seconds: float = 45.0
+    profile_dir: Path | None = None
+    chrome_path: Path | None = None
+    # Only the command line of the collector sets this, for one run: see --ignore-interval.
+    ignore_interval: bool = False
+
+    def __post_init__(self) -> None:
+        if self.min_delay_seconds < MIN_PAUSE_SECONDS:
+            raise ValueError(f"пауза перед действием не может быть меньше {MIN_PAUSE_SECONDS:g} с")
+        if self.min_delay_seconds > self.max_delay_seconds:
+            raise ValueError("минимальная пауза не может быть больше максимальной")
+        if self.max_pages_per_run < 1 or self.max_results_per_run < 1:
+            raise ValueError("лимиты страниц и результатов за запуск должны быть не меньше 1")
+
+    @classmethod
+    def from_settings(cls, settings: Settings, ignore_interval: bool = False) -> "CdpOptions":
+        chrome_path = settings.SCRAPER_CDP_CHROME_PATH.strip()
+        return cls(
+            city_slug=settings.SCRAPER_CITY_SLUG,
+            min_delay_seconds=settings.SCRAPER_CDP_MIN_DELAY_SECONDS,
+            max_delay_seconds=settings.SCRAPER_CDP_MAX_DELAY_SECONDS,
+            max_pages_per_run=settings.SCRAPER_CDP_MAX_PAGES_PER_RUN,
+            max_results_per_run=settings.SCRAPER_CDP_MAX_RESULTS_PER_RUN,
+            min_hours_between_runs=settings.SCRAPER_CDP_MIN_HOURS_BETWEEN_RUNS,
+            page_timeout_seconds=settings.SCRAPER_CDP_PAGE_TIMEOUT_SECONDS,
+            profile_dir=resolve_path(settings.SCRAPER_CDP_PROFILE_DIR),
+            chrome_path=Path(chrome_path) if chrome_path else None,
+            ignore_interval=ignore_interval,
+        )
+
+
+class CdpSession(Protocol):
+    async def start(self) -> None: ...
+
+    async def read_search(
+        self,
+        url: str,
+        page: int = 1,
+        *,
+        max_items: int | None = None,
+        block_checker: BlockChecker | None = None,
+        reset: bool = False,
+        continue_current: bool = False,
+    ) -> ScrapedSearchResult: ...
+
+    async def close(self) -> None: ...
+
+
+RobotsLoader = Callable[[], Awaitable[RobotsRules]]
+
+
+class TwoGisCdpProvider(BaseMapProvider):
+    """Reads organization cards by clicking them on 2GIS search pages in a visible Chrome window."""
+
+    name = PROVIDER_NAME
+
+    def __init__(
+        self,
+        options: CdpOptions | None = None,
+        session_factory: Callable[[Gate], CdpSession] | None = None,
+        robots_loader: RobotsLoader | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        notify: Callable[[str], None] = call_owner,
+    ) -> None:
+        self._options = options or CdpOptions()
+        self.min_hours_between_runs = self._options.min_hours_between_runs
+        self.ignore_interval = self._options.ignore_interval
+        self._session_factory = session_factory or self._chrome_session
+        self._robots_loader = robots_loader or (lambda: fetch_robots(twogis_site.BASE_URL, ROBOTS_AGENT))
+        # Called in the worker thread of the browser, so it is a plain blocking sleep.
+        self._sleep = sleep
+        self._notify = notify
+        self._session: CdpSession | None = None
+        self._robots: RobotsRules | None = None
+        self._pages = 0
+        self._results = 0
+        self._search_text = ""
+        self._stop_error: ProviderError | None = None
+        self._blocked: str | None = None
+        self._budget_ended = False
+        self.run_counted = False
+
+    async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:
+        """Not used for manual search in the bot: it runs only by hand on a computer with a screen."""
+        return []
+
+    async def search(self, query: SearchQuery, area: SearchArea, page: int = 1, page_size: int = 50) -> SearchPage:
+        """One page of search results: page 1 is opened, the next ones by their pagination link, then every card."""
+        if self._blocked is not None:
+            raise ProviderBlockedError(self._blocked)
+        if self._budget_ended:
+            raise ProviderBudgetExhausted("лимит страниц за запуск")
+        if self._results >= self._options.max_results_per_run:
+            raise ProviderBudgetExhausted("лимит результатов за запуск")
+
+        await self._robots_rules()  # before any page: unknown rules mean nothing is opened
+        session = await self._started_session()
+        self._search_text = f"{query.text} {area.district}" if area.district else query.text
+        self._stop_error = None
+        url = twogis_site.build_search_url(self._options.city_slug, self._search_text)
+        try:
+            result = await session.read_search(
+                url,
+                page,
+                max_items=self._options.max_results_per_run - self._results,
+                block_checker=self._block_reason,
+                continue_current=True,
+            )
+        except ProviderNoConnectionError:
+            raise
+        except ProviderError:
+            # The site did answer, if anything was opened at all.
+            self.run_counted = self.run_counted or self._pages > 0
+            raise
+        self.run_counted = self.run_counted or self._pages > 0
+
+        places = self._places(result.items, query, area)
+        reason = result.blocked_reason
+        if reason is None and not result.stopped:
+            reason = self._page_problem(result)
+        if reason is not None:
+            self._stop_on_block(reason)
+            raise ProviderBlockedError(reason, partial=places)
+
+        self._results += len(places)
+        stop = self._stop_error
+        if stop is not None:
+            if isinstance(stop, ProviderBudgetExhausted):
+                self._budget_ended = True
+                if places:
+                    return SearchPage(places=places, has_more=False)
+            raise stop
+        has_more = result.has_more and not result.stopped and self._results < self._options.max_results_per_run
+        return SearchPage(places=places, has_more=has_more)
+
+    async def close(self) -> None:
+        """End the run: the browser is closed and the limits start over next time."""
+        session, self._session = self._session, None
+        self._robots = None
+        self._pages = self._results = 0
+        self._stop_error = None
+        self._blocked = None
+        self._budget_ended = False
+        self.run_counted = False
+        if session is not None:
+            await session.close()
+
+    # ---------- the gate: called in the worker thread before every navigation and click ----------
+
+    def _gate(self, action: GateAction) -> GateDecision:
+        if self._pages >= self._options.max_pages_per_run:
+            self._stop_error = ProviderBudgetExhausted("лимит страниц за запуск")
+            return GateDecision.STOP
+
+        rules = self._robots
+        if rules is None:
+            self._stop_error = ProviderUnavailableError("robots.txt не прочитан")
+            return GateDecision.STOP
+        url = self._action_url(action)
+        if url is None or not rules.is_allowed(url):
+            if action.kind == "open":
+                self._stop_error = ProviderUnavailableError("robots.txt сайта запрещает открывать такие страницы")
+                return GateDecision.STOP
+            logger.info("robots.txt does not allow this %s, it is left out", action.kind)
+            return GateDecision.SKIP
+
+        if self._pages:
+            self._sleep(self._pause_seconds())
+        self._pages += 1
+        return GateDecision.GO
+
+    def _action_url(self, action: GateAction) -> str | None:
+        """The URL robots.txt is checked against: a card by its canonical link, without stat=."""
+        if action.kind == "card":
+            return build_card_url(self._options.city_slug, action.firm_id)
+        if action.kind == "page":
+            return twogis_site.build_search_url(self._options.city_slug, self._search_text, action.page)
+        return action.url
+
+    def _pause_seconds(self) -> float:
+        low = max(MIN_PAUSE_SECONDS, self._options.min_delay_seconds)
+        high = max(low, self._options.max_delay_seconds)
+        # Not cryptography: only spreads requests out in time.
+        return random.uniform(low, high)  # noqa: S311
+
+    # ---------- what the pages showed ----------
+
+    @staticmethod
+    def _block_reason(snapshot: PageSnapshot) -> str | None:
+        """Checked while a page loads too, so a refusal stops it before any card is clicked."""
+        reason = twogis_site.detect_block(snapshot.status, snapshot.final_url, snapshot.title, snapshot.html)
+        if reason is not None:
+            return reason
+        # about:blank and the like only mean that nothing has loaded yet.
+        if snapshot.final_url.startswith(("http://", "https://")) and not twogis_site.is_site_response(
+            snapshot.final_url
+        ):
+            return "открылась страница не с 2ГИС"
+        return None
+
+    def _page_problem(self, result: ScrapedSearchResult) -> str | None:
+        """A page that is not a normal search page of 2GIS counts as a refusal: reading stops."""
+        snapshot = result.snapshot
+        blocked = self._block_reason(snapshot)
+        if blocked is not None:
+            return blocked
+        if result.not_found:
+            return "сайт ответил кодом 404 на страницу поиска"
+        if not snapshot.title.strip():
+            return "страница пришла пустой"
+        if not twogis_site.is_site_response(snapshot.final_url):
+            return "открылась страница не с 2ГИС"
+        if result.links_found == 0 and not result.nothing_found:
+            return "страница поиска не распознана: нет ни организаций, ни ответа «ничего не найдено»"
+        return None
+
+    def _stop_on_block(self, reason: str) -> None:
+        self._blocked = reason
+        # The reason is a text of this code: no URLs, no keys.
+        logger.warning("2gis_cdp stopped: %s", reason)
+        self._notify(
+            f"2ГИС отказал ({reason}). Сбор 2gis_cdp остановлен, повтор только после паузы. "
+            "Проверку сайта можно пройти вручную в окне Chrome между запусками."
+        )
+
+    def _places(self, payloads: list[dict[str, Any]], query: SearchQuery, area: SearchArea) -> list[RawPlace]:
+        """Cards with recognized contacts, as places. A card that does not say its contacts is not returned."""
+        cards: list[dict[str, Any]] = []
+        for payload in payloads:
+            result = payload.get("result")
+            items = result.get("items") if isinstance(result, dict) else None
+            for item in items if isinstance(items, list) else []:
+                if not isinstance(item, dict) or item.get("type") not in (None, "branch"):
+                    continue
+                if read_card_contacts(item) is None:
+                    continue
+                cards.append(item)
+        return parse_catalog_items(
+            {"result": {"items": cards}},
+            area.district,
+            query.category,
+            query.high_margin,
+            city_slug=self._options.city_slug,
+        )
+
+    # ---------- the browser and the rules ----------
+
+    def _chrome_session(self, gate: Gate) -> CdpSession:
+        return ChromeScraperSession(
+            gate=gate,
+            page_timeout_seconds=self._options.page_timeout_seconds,
+            profile_dir=self._options.profile_dir,
+            chrome_path=self._options.chrome_path,
+        )
+
+    async def _started_session(self) -> CdpSession:
+        if self._session is None:
+            session = self._session_factory(self._gate)
+            self._session = session  # close() must find it even if starting fails halfway
+            await session.start()
+        return self._session
+
+    async def _robots_rules(self) -> RobotsRules:
+        if self._robots is None:
+            try:
+                self._robots = await self._robots_loader()
+            except RobotsNoConnectionError:
+                raise ProviderNoConnectionError(NO_CONNECTION_TEXT) from None
+            except RobotsUnavailableError as exc:
+                raise ProviderUnavailableError(f"не удалось прочитать robots.txt: {exc}") from None
+        return self._robots

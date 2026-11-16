@@ -7,10 +7,16 @@ from dataclasses import dataclass, field
 from src.services.providers.base import BaseMapProvider
 from src.services.providers.osm import OSMOverpassProvider
 from src.services.providers.twogis import TwoGisOptions, TwoGisProvider
+from src.services.providers.twogis_cdp import CdpOptions, TwoGisCdpProvider
 from src.services.providers.twogis_scraper import ScraperOptions, TwoGisScraperProvider
 from src.services.providers.yandex import YANDEX_DISABLED_REASON
 
-KNOWN_PROVIDERS: frozenset[str] = frozenset({"2gis_scraper", "2gis", "osm", "yandex"})
+KNOWN_PROVIDERS: frozenset[str] = frozenset({"2gis_scraper", "2gis_cdp", "2gis", "osm", "yandex"})
+CDP_MANUAL_ONLY_REASON: str = (
+    "запускается только вручную на компьютере с экраном: "
+    "python collect_cli.py --assisted (COLLECTOR_PROVIDERS=2gis_cdp)"
+)
+CDP_NOT_INSTALLED_REASON: str = "не установлен pychrome (pip install -r requirements-cdp.txt)"
 
 
 @dataclass
@@ -27,11 +33,23 @@ def build_providers(
     scraper_options: ScraperOptions | None = None,
     twogis_options: TwoGisOptions | None = None,
     twogis_spend_request: Callable[[], Awaitable[None]] | None = None,
+    cdp_options: CdpOptions | None = None,
 ) -> ProviderSet:
-    """Create providers from validated names, in the given order (the first source wins on merge)."""
+    """
+    Create providers from validated names, in the given order (the first source wins on merge).
+
+    2gis_cdp is built only when `cdp_options` is given: only the manual collector does that.
+    """
     result = ProviderSet()
     for name in enabled:
-        if name == "2gis_scraper":
+        if name == "2gis_cdp":
+            if cdp_options is None:
+                result.disabled[name] = CDP_MANUAL_ONLY_REASON
+            elif importlib.util.find_spec("pychrome") is None:
+                result.disabled[name] = CDP_NOT_INSTALLED_REASON
+            else:
+                result.providers.append(TwoGisCdpProvider(cdp_options))
+        elif name == "2gis_scraper":
             if importlib.util.find_spec("playwright") is not None:
                 result.providers.append(TwoGisScraperProvider(scraper_options))
             else:
