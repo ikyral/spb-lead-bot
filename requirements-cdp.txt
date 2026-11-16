@@ -1,0 +1,5 @@
+# Парсер 2gis_cdp: ручной запуск на ПК с экраном, не для сервера.
+# pip install -r requirements-cdp.txt
+pychrome==0.2.4
+websocket-client==1.9.2
+requests==2.34.2
