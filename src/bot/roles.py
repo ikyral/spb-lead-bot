@@ -1,5 +1,5 @@
 """
-What only the owner of the bot (ADMIN_TG_ID) may do; operators (ADMIN_TG_IDS) may do the rest.
+What only owners of the bot (settings.owner_ids) may do; operators (settings.operator_ids) may do the rest.
 
 Checked centrally by AdminOnlyMiddleware from the raw text and callback data, before any handler and
 its filters run, so a new handler of these commands cannot forget the check.
@@ -36,7 +36,7 @@ def is_owner_only_command(name: str | None) -> bool:
 
 
 def is_owner_only(event: TelegramObject) -> bool:
-    """Does this update ask for something only the owner may do?"""
+    """Does this update ask for something only owners may do?"""
     if isinstance(event, CallbackQuery):
         data = getattr(event, "data", None)
         return isinstance(data, str) and data.startswith(OWNER_ONLY_CALLBACK_PREFIXES)

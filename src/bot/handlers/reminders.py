@@ -184,7 +184,12 @@ async def handle_plan(message: Message) -> None:
 
 @router.message(Command("team"))
 async def handle_team(message: Message) -> None:
-    """Who works how many leads. Only the owner of the bot gets here (see src/bot/roles.py)."""
+    """Who works how many leads. Only owners of the bot get here (see src/bot/roles.py)."""
     async with async_session_maker() as session:
         rows = await get_team_stats(session)
-    await message.answer(format_team(rows), parse_mode="HTML")
+    # Roles are marked only with several owners: with one the list looks as it always did.
+    if settings.has_extra_owners:
+        text = format_team(rows, settings.owner_ids, settings.operator_ids)
+    else:
+        text = format_team(rows)
+    await message.answer(text, parse_mode="HTML")

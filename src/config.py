@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     # SecretStr masks the values in repr()/str(), logs and tracebacks; use .get_secret_value().
     # Required by main.py. The collector for a separate computer (collect_cli.py) works without them.
     BOT_TOKEN: SecretStr = SecretStr("")
+    # The main owner of the bot. Leads worked before ownership existed are given to this ID.
     ADMIN_TG_ID: int = 0
     # The main source of leads (provider 2gis) and manual search.
     # DGIS_API_KEY and the older name TWOGIS_API_KEY both work; DGIS_API_KEY wins.
@@ -41,8 +42,11 @@ class Settings(BaseSettings):
     DGIS_KEY_CREATED_AT: date | None = None
     DGIS_KEY_WARN_DAYS: int = Field(default=5, ge=1, le=29)
     DB_URL: str = "sqlite+aiosqlite:///./leads.db"
-    # Additional admins, comma-separated. ADMIN_TG_ID stays required and is always an admin.
+    # Additional admins (operators), comma-separated. ADMIN_TG_ID stays required and is always an admin.
     ADMIN_TG_IDS: str = ""
+    # Additional owners, comma-separated numeric Telegram IDs: the same rights as ADMIN_TG_ID.
+    # An ID in both lists is an owner.
+    ADMIN_TG_OWNER_IDS: str = ""
 
     # Group chats for collection results and alerts, comma-separated (groups have negative IDs).
     NOTIFY_CHAT_IDS: str = ""
@@ -206,9 +210,14 @@ class Settings(BaseSettings):
     @field_validator("ADMIN_TG_IDS")
     @classmethod
     def _validate_admin_ids(cls, value: str) -> str:
-        for part in value.split(","):
-            if part.strip() and not part.strip().isdecimal():
-                raise ValueError(f"ADMIN_TG_IDS must be comma-separated Telegram IDs, got {part.strip()!r}")
+        _check_user_ids("ADMIN_TG_IDS", value)
+        return value
+
+    @field_validator("ADMIN_TG_OWNER_IDS")
+    @classmethod
+    def _validate_owner_ids(cls, value: str) -> str:
+        # 0 is not a Telegram user: refused rather than dropped, so a typo does not go unnoticed.
+        _check_user_ids("ADMIN_TG_OWNER_IDS", value, allow_zero=False)
         return value
 
     @field_validator("NOTIFY_CHAT_IDS")
@@ -228,22 +237,34 @@ class Settings(BaseSettings):
         return tuple(dict.fromkeys(int(part) for part in self.NOTIFY_CHAT_IDS.split(",") if part.strip()))
 
     @property
+    def owner_ids(self) -> frozenset[int]:
+        """Owners of the bot: ADMIN_TG_ID (when set) and ADMIN_TG_OWNER_IDS."""
+        main_owner = {self.ADMIN_TG_ID} if self.ADMIN_TG_ID > 0 else set()
+        return frozenset({*main_owner, *_parse_user_ids(self.ADMIN_TG_OWNER_IDS)})
+
+    @property
     def admin_ids(self) -> frozenset[int]:
-        """Telegram IDs allowed to use the bot."""
-        return frozenset({self.ADMIN_TG_ID, *(int(part) for part in self.ADMIN_TG_IDS.split(",") if part.strip())})
+        """Telegram IDs allowed to use the bot: the owners and the operators."""
+        return frozenset({self.ADMIN_TG_ID, *self.owner_ids, *_parse_user_ids(self.ADMIN_TG_IDS)})
+
+    @property
+    def has_extra_owners(self) -> bool:
+        """ADMIN_TG_OWNER_IDS is set: the bot has more owners than ADMIN_TG_ID."""
+        return bool(_parse_user_ids(self.ADMIN_TG_OWNER_IDS))
 
     @property
     def owner_id(self) -> int:
-        """The owner of the bot (ADMIN_TG_ID): may do everything, including what operators may not."""
+        """The main owner (ADMIN_TG_ID): leads from before ownership existed go to them. See owner_ids for all."""
         return self.ADMIN_TG_ID
 
     @property
     def operator_ids(self) -> frozenset[int]:
         """The other admins (ADMIN_TG_IDS): they take and work leads, but do not manage the bot."""
-        return self.admin_ids - {self.ADMIN_TG_ID}
+        return self.admin_ids - self.owner_ids - {self.ADMIN_TG_ID}
 
     def is_owner(self, user_id: int | None) -> bool:
-        return user_id is not None and self.ADMIN_TG_ID > 0 and user_id == self.ADMIN_TG_ID
+        """May do everything, including what operators may not."""
+        return user_id is not None and user_id in self.owner_ids
 
     @field_validator("DB_URL")
     @classmethod
@@ -265,6 +286,18 @@ class Settings(BaseSettings):
         # URL-escaping a Windows drive ('C:' -> 'C%3A') that render_as_string would do.
         start = value.index(database)
         return value[:start] + resolved + value[start + len(database) :]
+
+
+def _parse_user_ids(value: str) -> list[int]:
+    """'1, ,2,' -> [1, 2]; the value has passed _check_user_ids."""
+    return [int(part) for part in value.split(",") if part.strip()]
+
+
+def _check_user_ids(name: str, value: str, allow_zero: bool = True) -> None:
+    for part in value.split(","):
+        user_id = part.strip()
+        if user_id and (not user_id.isdecimal() or (not allow_zero and int(user_id) == 0)):
+            raise ValueError(f"{name} must be comma-separated Telegram IDs, got {user_id!r}")
 
 
 def resolve_path(value: str) -> Path:

@@ -383,7 +383,7 @@ async def handle_lead_status(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("lr:"))
 async def handle_return_to_pool(callback: CallbackQuery) -> None:
-    """'↩️ Вернуть в пул': the owner of a lead gives it back; the owner of the bot may return anyone's."""
+    """'↩️ Вернуть в пул': the owner of a lead gives it back; an owner of the bot may return anyone's."""
     parts = (callback.data or "").split(":")
     if len(parts) != 2 or not parts[1].isdigit():
         await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
@@ -560,7 +560,7 @@ async def handle_leads_stats(
     """
     Show how many leads are in the pool, what happened to the handed-out ones and the API requests spent.
 
-    The CSV export under it is for the owner of the bot only (see src/bot/roles.py).
+    The CSV export under it is for owners of the bot only (see src/bot/roles.py).
     """
     if viewer_id is None and message.from_user is not None:
         viewer_id = message.from_user.id

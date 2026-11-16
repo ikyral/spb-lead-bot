@@ -43,6 +43,8 @@ from src.bot.texts import (
     REQUEST_FILE_HINT,
     TEAM_EMPTY,
     TEAM_LINE,
+    TEAM_OPERATOR_MARK,
+    TEAM_OWNER_MARK,
     TEAM_TITLE,
     TODAY_OWN_LINE,
     TODAY_OWN_TITLE,
@@ -414,14 +416,21 @@ def format_plan(summary: OwnerSummary) -> str:
     return "\n".join(lines)
 
 
-def format_team(rows: list[TeamRow]) -> str:
-    """/team: per owner, leads being worked, answered and running out within a day."""
+def format_team(
+    rows: list[TeamRow], owner_ids: frozenset[int] = frozenset(), operator_ids: frozenset[int] = frozenset()
+) -> str:
+    """
+    /team: per person, leads being worked, answered and running out within a day.
+
+    With owner_ids each person is marked as an owner or an operator of the bot.
+    """
     if not rows:
         return f"{TEAM_TITLE}\n\n{TEAM_EMPTY}"
     lines = [TEAM_TITLE, ""]
     lines += [
         TEAM_LINE.format(
             name=html.escape(row.owner_name[:_REPORT_FIELD_LIMIT]),
+            role=_team_role(row.user_id, owner_ids, operator_ids),
             active=row.active,
             replied=row.replied,
             expiring=row.expiring,
@@ -429,6 +438,16 @@ def format_team(rows: list[TeamRow]) -> str:
         for row in rows
     ]
     return "\n".join(lines)
+
+
+def _team_role(user_id: int, owner_ids: frozenset[int], operator_ids: frozenset[int]) -> str:
+    if not owner_ids:
+        return ""
+    if user_id in owner_ids:
+        return TEAM_OWNER_MARK
+    if user_id in operator_ids:
+        return TEAM_OPERATOR_MARK
+    return ""
 
 
 def format_owned_in_area(owners: list[tuple[str, int, datetime | None]]) -> str | None:

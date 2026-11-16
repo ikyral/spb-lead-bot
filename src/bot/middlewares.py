@@ -29,7 +29,7 @@ _MAX_REMEMBERED_REPLIES: int = 1000
 
 class AdminOnlyMiddleware(BaseMiddleware):
     """
-    Lets only configured admins (ADMIN_TG_ID and ADMIN_TG_IDS) through, in any chat.
+    Lets only configured admins (settings.admin_ids: owners and operators) through, in any chat.
 
     The ID of the user who pressed or wrote is checked, never the chat's. Registered as an inner
     middleware it runs only for updates a handler matched, so ordinary group chatter never gets here.
@@ -53,7 +53,7 @@ class AdminOnlyMiddleware(BaseMiddleware):
             from_user = data["event_from_user"]
 
         if from_user and from_user.id in settings.admin_ids:
-            # Operators (ADMIN_TG_IDS) work leads; managing the bot is left to its owner (ADMIN_TG_ID).
+            # Operators work leads; managing the bot is left to its owners (settings.owner_ids).
             if not settings.is_owner(from_user.id) and is_owner_only(event):
                 await self._refuse(event, from_user.id, operator=True)
                 return None
