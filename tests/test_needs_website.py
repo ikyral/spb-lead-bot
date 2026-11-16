@@ -38,7 +38,13 @@ from src.services.chains import (
 from src.services.pipeline import import_csv_harvest, save_collected_places
 from src.services.providers.base import TARGET_CATEGORIES, RawPlace
 from src.services.scheduler import TopupDecision, TopupOutcome
-from src.services.scorer import MIN_LEAD_SCORE, calculate_lead_score, has_mobile_phone, is_worth_saving
+from src.services.scorer import (
+    HIGH_MARGIN_CATEGORY_KEYS,
+    MIN_LEAD_SCORE,
+    calculate_lead_score,
+    has_mobile_phone,
+    is_worth_saving,
+)
 from src.services.site_status import (
     CONFIDENCE_HIGH,
     CONFIDENCE_LOW,
@@ -632,6 +638,13 @@ def test_every_niche_can_be_searched_in_both_sources() -> None:
         TARGET_CATEGORIES
     )
     assert {"pet_services", "fitness_studios", "furniture_custom", "kids_centers"} <= set(TARGET_CATEGORIES)
+
+
+def test_high_margin_niches_keep_their_bonus_when_rescored() -> None:
+    # Rescoring (verdict, enrichment, chains) has no place.high_margin, only the category key.
+    high_margin = {key for key, category in TARGET_CATEGORIES.items() if category["high_margin"]}
+    assert high_margin <= HIGH_MARGIN_CATEGORY_KEYS
+    assert "furniture_custom" in high_margin
 
 
 def test_buttons_of_the_longest_district_and_niche_fit_into_telegram() -> None:
