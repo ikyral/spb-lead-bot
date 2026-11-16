@@ -623,7 +623,7 @@ async def test_csv_import_goes_through_the_same_filter(session_maker, monkeypatc
 
 
 def test_every_niche_can_be_searched_in_both_sources() -> None:
-    assert len(TARGET_CATEGORIES) == 18
+    assert len(TARGET_CATEGORIES) == 22
     for key, category in TARGET_CATEGORIES.items():
         assert category["title"], key
         assert category["query_2gis"], key
@@ -631,6 +631,7 @@ def test_every_niche_can_be_searched_in_both_sources() -> None:
     assert {"barbershop", "tire_service", "cleaning", "renovation", "florists", "hotels", "horeca"} <= set(
         TARGET_CATEGORIES
     )
+    assert {"pet_services", "fitness_studios", "furniture_custom", "kids_centers"} <= set(TARGET_CATEGORIES)
 
 
 def test_buttons_of_the_longest_district_and_niche_fit_into_telegram() -> None:
