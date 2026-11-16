@@ -320,7 +320,7 @@
 
 Ключи: `dentist_clinic`, `auto_repair`, `beauty`, `legal_b2b`, `barbershop`, `nails`, `massage`, `tire_service`, `detailing`, `cleaning`, `renovation`, `appliance_repair`, `workshop`, `tutors`, `photographers`, `florists`, а также `hotels` и `horeca` с пониженным весом.
 
-Чтобы собирать только часть ниш, перечислите их в `.env`. **С демо-ключом это особенно стоит сделать:** при пустом `COLLECT_QUERIES` целей 18 ниш × 10 районов, а всего у ключа 1000 запросов.
+Чтобы собирать только часть ниш, перечислите их в `.env`. **С демо-ключом это особенно стоит сделать:** при пустом `COLLECT_QUERIES` целей 22 ниши × 10 районов, а всего у ключа 1000 запросов.
 
     COLLECT_QUERIES=barbershop,tire_service,cleaning,florists
 

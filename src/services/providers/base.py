@@ -127,6 +127,35 @@ TARGET_CATEGORIES: dict[str, dict[str, Any]] = {
         "query_2gis": "цветочный магазин",
         "high_margin": False,
     },
+    "pet_services": {
+        "title": "🐾 Зоосервисы и ветклиники",
+        "osm_tags": [("shop", "pet_grooming"), ("amenity", "veterinary"), ("shop", "pet")],
+        "query_2gis": "груминг ветклиника зоосалон",
+        "high_margin": False,
+    },
+    "fitness_studios": {
+        "title": "🧘 Фитнес- и йога-студии",
+        "osm_tags": [
+            ("leisure", "fitness_centre"),
+            ("leisure", "yoga"),
+            ("leisure", "dance"),
+            ("amenity", "dancing_school"),
+        ],
+        "query_2gis": "студия йоги пилатес танцы фитнес",
+        "high_margin": False,
+    },
+    "furniture_custom": {
+        "title": "🛋 Мебель на заказ",
+        "osm_tags": [("craft", "carpenter"), ("shop", "furniture"), ("shop", "kitchen")],
+        "query_2gis": "мебель на заказ кухни на заказ",
+        "high_margin": True,
+    },
+    "kids_centers": {
+        "title": "🧸 Детские центры и школы",
+        "osm_tags": [("amenity", "childcare"), ("amenity", "language_school"), ("amenity", "music_school")],
+        "query_2gis": "детский развивающий центр школа для детей",
+        "high_margin": False,
+    },
 }
 
 
