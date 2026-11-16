@@ -16,7 +16,6 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -27,6 +26,7 @@ from src.services.api_client import (
     ProviderTemporaryError,
     ProviderUnavailableError,
 )
+from src.services.scraper.snapshot import PageSnapshot
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext, Page, Playwright, Response
@@ -51,30 +51,6 @@ _READ_STATE_SCRIPT: str = """(names) => names.map((name) => {
     return {problem: "значение не сериализуется в JSON"};
   }
 })"""
-
-
-@dataclass
-class PageSnapshot:
-    """What a page showed: everything the site-specific code needs, no browser objects."""
-
-    status: int | None
-    final_url: str
-    title: str
-    html: str
-    json_bodies: list[dict[str, Any]] = field(default_factory=list)
-    # Where each of json_bodies came from, in the same order.
-    json_urls: list[str] = field(default_factory=list)
-    # The values of PAGE_STATE_VARIABLES, and why those that are missing here could not be read.
-    page_state: dict[str, Any] = field(default_factory=dict)
-    page_state_problems: dict[str, str] = field(default_factory=dict)
-
-    def bodies_from(self, wanted: Callable[[str], bool]) -> list[dict[str, Any]]:
-        """The bodies that came from the addresses of interest."""
-        return [body for url, body in zip(self.json_urls, self.json_bodies, strict=True) if wanted(url)]
-
-    def bodies_from_or_all(self, wanted: Callable[[str], bool]) -> list[dict[str, Any]]:
-        """The same, for a page whose addresses are not known: then only the wanted ones were read at all."""
-        return self.bodies_from(wanted) if self.json_urls else self.json_bodies
 
 
 class PlaywrightSession:
