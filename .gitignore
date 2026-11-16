@@ -19,6 +19,7 @@ data/samples/
 # Профиль браузера сборщика: cookies и другие личные данные
 data/browser_profile/
 data/google_profile/
+data/cdp_profile/
 
 # Кэш Python и тестов
 __pycache__/
