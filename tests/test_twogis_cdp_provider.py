@@ -728,6 +728,93 @@ def test_the_snapshot_folder_is_off_by_default_and_comes_from_the_settings() -> 
     assert options.snapshot_dir == PROJECT_ROOT / "data" / "snapshots"
 
 
+# ---------- the list of results is redrawn after the load: wait for it, take the link anew before the click ----------
+
+
+class ScriptedRemote(FakeRemote):
+    """A browser tab whose list of results is whatever `script(call_number)` says, and that remembers the clicks."""
+
+    def __init__(self, script: Any, cards: dict[str, dict[str, Any]]) -> None:
+        super().__init__(cards=cards)
+        self.script = script
+        self.document_reads = 0
+        self.clicked_generations: list[tuple[int, int]] = []
+
+    def get_document(self, full: bool = True) -> DOMNode:
+        self.document_reads += 1
+        stat = "?stat=c3RhdA%3D%3D"
+        generation = self.document_reads
+        hrefs = [f"/spb/firm/{firm_id}{stat}" for firm_id in self.script(generation)]
+        children = [_link(generation * 1000 + index, href) for index, href in enumerate(hrefs)]
+        return DOMNode(
+            nodeId=1, backendNodeId=10, nodeType=9, nodeName="#document", localName="", nodeValue="", children=children
+        )
+
+    def perform_click(self, node: DOMNode) -> None:
+        # The node must come from the latest read of the page, not from an earlier one.
+        self.clicked_generations.append((node.id // 1000, self.document_reads))
+        super().perform_click(node)
+
+
+def _cards(*ids: str) -> dict[str, dict[str, Any]]:
+    return {firm_id: _card(firm_id) for firm_id in ids}
+
+
+async def test_the_clicks_wait_until_the_list_has_settled(caplog: pytest.LogCaptureFixture) -> None:
+    # The list is one thing at first, then another (the page is sorted again), then it stays.
+    remote_ = ScriptedRemote(lambda n: ["201", "202"] if n <= 3 else ["101", "102"], _cards("101", "102", "201", "202"))
+    harness = Harness(remote_)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101", "2gis_102"]  # the settled list, not the first
+    assert "The list of results has settled: the same" in caplog.text
+
+
+async def test_a_list_that_never_settles_is_read_as_it_is_after_the_limit(caplog: pytest.LogCaptureFixture) -> None:
+    remote_ = ScriptedRemote(
+        lambda n: ["101", "102"] if n % 2 else ["102", "101"], _cards("101", "102")
+    )  # the order changes at every read
+    harness = Harness(remote_)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert "still changing after" in caplog.text and "read as it is" in caplog.text
+    assert {place.external_id for place in page.places} == {"2gis_101", "2gis_102"}
+
+
+async def test_the_link_is_taken_anew_right_before_every_click() -> None:
+    remote_ = ScriptedRemote(lambda n: ["101", "102", "103"], _cards("101", "102", "103"))
+    harness = Harness(remote_)
+    try:
+        await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert len(remote_.clicked_generations) == 3
+    assert all(generation == latest for generation, latest in remote_.clicked_generations)
+    # and the page was read again before each click: no two clicks come from the same read
+    reads = [latest for _generation, latest in remote_.clicked_generations]
+    assert reads == sorted(set(reads)) and len(set(reads)) == 3
+
+
+async def test_a_link_that_left_the_page_before_its_click_is_not_clicked(caplog: pytest.LogCaptureFixture) -> None:
+    # 101 is in the list when it is read, and gone when its turn comes (the list was redrawn once more).
+    remote_ = ScriptedRemote(lambda n: ["101", "102"] if n <= 6 else ["102"], _cards("101", "102"))
+    harness = Harness(remote_)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_102"]
+    assert len(remote_.clicks) == 1 and "/firm/102" in remote_.clicks[0]  # nothing was spent on the missing one
+    assert "Card 1/2 (firm 101): the link is no longer on the page" in caplog.text
+
+
 # ---------- 6. blocks recorded by the existing mechanism ----------
 
 

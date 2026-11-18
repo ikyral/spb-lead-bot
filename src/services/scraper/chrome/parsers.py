@@ -64,6 +64,11 @@ _MAX_CLICK_ATTEMPTS = 3
 # After so many cards in a row that could not be read the page is left: the rest would only spend the budget.
 _MAX_UNREAD_IN_A_ROW = 3
 _STALE_DOM_TIMEOUT_SECONDS = 15.0
+# The list of results is redrawn for a while after the page is loaded (2GIS sorts it again for the area of its map):
+# the clicks wait until it has not changed this many reads in a row, but not longer than the limit.
+_LINKS_STABLE_READS = 2
+_LINKS_POLL_SECONDS = 1.0
+_LINKS_SETTLE_TIMEOUT_SECONDS = 10.0
 _SETTLE_POLL_SECONDS = 0.2
 _NETWORK_ERROR_MARKERS: tuple[str, ...] = (
     "ERR_INTERNET_DISCONNECTED",
@@ -431,9 +436,9 @@ class _BaseChromePageReader:
             if max_items is not None and len(collected) >= max_items:
                 break
 
-            def _refetch(target_href: str = href) -> DOMNode | None:
+            def _refetch(target_href: str = href, initial: DOMNode = node) -> DOMNode | None:
                 if not refetch_on_stale:
-                    return None
+                    return initial
                 return self._find_node_by_href(find_links, target_href)
 
             attempted_hrefs.add(href)
@@ -499,8 +504,8 @@ class _BaseChromePageReader:
         label = f"Card {position}/{total} ({describe_link(href)})"
         failure = "no attempt was made"
         for attempt in range(_MAX_CLICK_ATTEMPTS):
-            if current_node is None or attempt > 0:
-                current_node = find_node()
+            # The node is taken anew right before the click: the page may have been redrawn since the list was read.
+            current_node = find_node()
             if current_node is None:
                 logger.info("%s: the link is no longer on the page", label)
                 return None, "", None, "the link is no longer on the page"
@@ -658,6 +663,36 @@ class SearchPageReader(_BaseChromePageReader):
         self._current_page = 1
         return None
 
+    def _wait_for_stable_links(self) -> None:
+        """
+        Wait until the links to organizations are the same, in the same order, `_LINKS_STABLE_READS` reads in a row.
+
+        Not longer than `_LINKS_SETTLE_TIMEOUT_SECONDS`: after that the page is read as it is.
+        """
+        deadline = time.monotonic() + _LINKS_SETTLE_TIMEOUT_SECONDS
+        previous: tuple[str, ...] | None = None
+        same_in_a_row = 0
+        reads = 0
+        while True:
+            document = self._remote.get_document(full=True)
+            reads += 1
+            current = tuple(
+                node.attributes.get("href", "")
+                for node in document.search(is_search_result_link)
+                if _FIRM_PATH_RE.search(node.attributes.get("href", ""))
+            )
+            same_in_a_row = same_in_a_row + 1 if current == previous else 0
+            previous = current
+            if same_in_a_row >= _LINKS_STABLE_READS:
+                logger.info(
+                    "The list of results has settled: the same %d reads in a row, %d links", reads, len(current)
+                )
+                return
+            if time.monotonic() >= deadline:
+                logger.info("The list of results was still changing after %d reads: it is read as it is", reads)
+                return
+            time.sleep(_LINKS_POLL_SECONDS)
+
     def _report_page(self, firm_links: list[DOMNode], all_links: list[DOMNode], pagination: int) -> None:
         """Say in the log what the page offers, and save it for a diagnostic run: the links are only listed by kind."""
         firm_hrefs = list(dict.fromkeys(node.attributes.get("href", "") for node in firm_links))
@@ -781,6 +816,7 @@ class SearchPageReader(_BaseChromePageReader):
         max_items: int | None,
         block_checker: BlockChecker | None,
     ) -> ScrapedSearchResult:
+        self._wait_for_stable_links()
         document = self._remote.get_document(full=True)
         all_nodes = self._find_search_links(document)
         all_hrefs = {node.attributes["href"] for node in all_nodes if "href" in node.attributes}
