@@ -283,7 +283,7 @@
        ExecStart=/usr/bin/xvfb-run -a --server-args="-screen 0 1920x1080x24 -nolisten tcp" КОМАНДА
 
 4. В `.env` сервера добавьте `TWOGIS_PROXY=...` (права файла `600`), перезапустите: `sudo systemctl restart spb-lead-bot`.
-5. Проверка: `/collect_status` показывает `2gis_cdp` среди источников; в логе при первом сборе строка `External IP: ... (RU)`. Первый сбор можно проверить отдельно, с малым лимитом, из папки проекта: `sudo -u leadbot env SCRAPER_CDP_MAX_PAGES_PER_RUN=1 SCRAPER_CDP_MAX_RESULTS_PER_RUN=3 xvfb-run -a .venv/bin/python collect_cli.py` (результат попадёт в `data/collector.db` и `exports/` сборщика, не в базу бота).
+5. Проверка: `/collect_status` показывает `2gis_cdp` среди источников; в логе при первом сборе строка `External IP: ... (RU)`. Первый сбор можно проверить отдельно, с малым лимитом (4 действия: страница поиска и 3 карточки), из папки проекта: `sudo -u leadbot env SCRAPER_CDP_MAX_PAGES_PER_RUN=4 SCRAPER_CDP_MAX_RESULTS_PER_RUN=3 xvfb-run -a .venv/bin/python collect_cli.py` (результат попадёт в `data/collector.db` и `exports/` сборщика, не в базу бота).
 
 **Откат:** `sudo systemctl revert spb-lead-bot` убирает запуск под Xvfb, а `COLLECT_PROVIDERS=osm` в `.env` выключает 2ГИС совсем. Накопленные лиды продолжают выдаваться.
 
