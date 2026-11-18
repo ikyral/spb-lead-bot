@@ -104,9 +104,10 @@ def test_invalid_settings_name_the_variable(overrides: dict, message: str) -> No
 
 def test_default_targets_are_all_categories_in_all_districts() -> None:
     config = _config()
-    assert len(config.targets) == len(TARGET_CATEGORIES) * len(SPB_DISTRICTS)
+    phrases = sum(len(category["queries_2gis"]) for category in TARGET_CATEGORIES.values())
+    assert len(config.targets) == phrases * len(SPB_DISTRICTS)
     assert config.providers == ["2gis_cdp", "osm"]  # the browser reader of 2GIS is the main source
-    assert len(config.targets) == 220
+    assert len(config.targets) == 370  # 37 searches (a niche may have several) in 10 districts
     assert {"pet_services", "fitness_studios", "furniture_custom", "kids_centers"} <= {
         target.query.category for target in config.targets
     }
@@ -118,9 +119,9 @@ def test_progress_keys_are_unique_and_the_old_targets_keep_theirs(monkeypatch: p
     provider.name = "2gis"
     targets = _config().targets
     keys = [_progress_key(provider, target) for target in targets]
-    assert len(set(keys)) == len(targets) == 220
+    assert len(set(keys)) == len(targets) == 370
     old_keys = {_progress_key(provider, t) for t in targets if t.query.category not in new_niches}
-    assert len(old_keys) == 180
+    assert len(old_keys) == 270
     # The same targets built without the new niches give the very same keys.
     for key in new_niches:
         monkeypatch.delitem(TARGET_CATEGORIES, key)
@@ -131,9 +132,11 @@ def test_progress_keys_are_unique_and_the_old_targets_keep_theirs(monkeypatch: p
 def test_targets_from_settings_with_free_text_query_and_bbox() -> None:
     config = _config(COLLECT_QUERIES="auto_repair, кондитерская", COLLECT_BBOX="59.9, 30.2, 60.0, 30.5")
     queries = [target.query for target in config.targets]
-    assert [query.category for query in queries] == ["auto_repair", "кондитерская"]
-    assert queries[0].text == TARGET_CATEGORIES["auto_repair"]["query_2gis"] and queries[0].osm_tags
-    assert queries[1].text == "кондитерская" and queries[1].osm_tags == ()
+    phrases = TARGET_CATEGORIES["auto_repair"]["queries_2gis"]
+    assert [query.category for query in queries] == ["auto_repair"] * len(phrases) + ["кондитерская"]
+    assert [query.text for query in queries[: len(phrases)]] == list(phrases)
+    assert queries[0].osm_tags and all(query.osm_tags == () for query in queries[1 : len(phrases)])
+    assert queries[-1].text == "кондитерская" and queries[-1].osm_tags == ()
     assert config.targets[0].area == SearchArea(bbox=(59.9, 30.2, 60.0, 30.5))
 
 
@@ -371,7 +374,7 @@ async def test_empty_results_are_not_an_error(session_maker, no_site_checks) -> 
 async def test_key_and_quota_errors_stop_the_provider_and_alert(session_maker, no_site_checks, error) -> None:
     failing = FakeProvider(error=error, name="2gis")
     healthy = FakeProvider(pages=[[_place(1)]], name="osm")
-    config = _config(COLLECT_QUERIES="dentist_clinic,beauty", COLLECT_DISTRICTS="Центральный")
+    config = _config(COLLECT_QUERIES="dentist_clinic,barbershop", COLLECT_DISTRICTS="Центральный")
 
     result = await collect_leads(session_maker, [failing, healthy], config)
 
@@ -420,7 +423,7 @@ async def test_results_before_a_failure_are_kept(session_maker, no_site_checks) 
 async def test_data_warning_becomes_a_single_alert(session_maker, no_site_checks, monkeypatch) -> None:
     monkeypatch.setattr(pipeline.settings, "LEADS_REQUIRE_CONTACT", True)
     provider = WarningProvider(_catalog_places("twogis_no_contacts.json"), "нет доступа к contact_groups")
-    config = _config(COLLECT_QUERIES="dentist_clinic,beauty", COLLECT_DISTRICTS="Центральный")
+    config = _config(COLLECT_QUERIES="dentist_clinic,barbershop", COLLECT_DISTRICTS="Центральный")
     result = await collect_leads(session_maker, [provider], config)
     assert len(result.alerts) == 1
     assert "contact_groups" in result.alerts[0]
@@ -497,3 +500,24 @@ def test_registry_explains_why_a_provider_is_off() -> None:
     result = build_providers(["osm", "yandex"])
     assert [provider.name for provider in result.providers] == ["osm"]
     assert "Яндекс" in result.disabled["yandex"]
+
+
+def test_every_niche_has_short_separate_searches() -> None:
+    seen: dict[str, str] = {}
+    for key, category in TARGET_CATEGORIES.items():
+        phrases = category["queries_2gis"]
+        assert isinstance(phrases, tuple) and phrases, key
+        for phrase in phrases:
+            assert phrase.strip() == phrase and 0 < len(phrase.split()) <= 3, (key, phrase)  # no glued-together lists
+            assert phrase not in seen, f"{phrase!r} is searched for both by {seen[phrase]} and {key}"
+            seen[phrase] = key
+
+
+def test_a_niche_gives_one_target_per_phrase_and_district_and_only_the_first_reads_osm() -> None:
+    config = _config(COLLECT_QUERIES="fitness_studios", COLLECT_DISTRICTS="Центральный,Невский")
+    phrases = TARGET_CATEGORIES["fitness_studios"]["queries_2gis"]
+    assert len(config.targets) == len(phrases) * 2
+    first_district = [target.query for target in config.targets if target.area.district == "Центральный"]
+    assert [query.text for query in first_district] == list(phrases)
+    assert first_district[0].osm_tags and all(query.osm_tags == () for query in first_district[1:])
+    assert {query.category for query in first_district} == {"fitness_studios"}

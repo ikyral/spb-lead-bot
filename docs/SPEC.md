@@ -70,40 +70,40 @@ Format: `(south_lat, west_lon, north_lat, east_lon)`
         "dentist_clinic": {
             "title": "🦷 Стоматологии и клиники",
             "osm_tags": [("amenity", "dentist"), ("amenity", "clinic"), ("amenity", "doctors")],
-            "query_2gis": "стоматология клиника",
+            "queries_2gis": ("стоматология",),
             "high_margin": True
         },
         "auto_repair": {
             "title": "🚗 Автосервисы и детейлинг",
             "osm_tags": [("shop", "car_repair"), ("craft", "car_painter")],
-            "query_2gis": "автосервис кузовной ремонт детейлинг",
+            "queries_2gis": ("автосервис", "кузовной ремонт"),
             "high_margin": True
         },
         "beauty": {
             "title": "💇‍♀️ Салоны красоты и косметология",
             "osm_tags": [("shop", "beauty"), ("shop", "hairdresser")],
-            "query_2gis": "салон красоты косметология",
+            "queries_2gis": ("салон красоты", "косметология"),
             "high_margin": True
         },
         "legal_b2b": {
             "title": "⚖️ Юристы, бухучет и B2B",
             "osm_tags": [("office", "lawyer"), ("office", "accountant"), ("office", "company")],
-            "query_2gis": "юридические услуги бухгалтерские услуги",
+            "queries_2gis": ("юридические услуги", "бухгалтерские услуги"),
             "high_margin": True
         },
         "horeca": {
             "title": "☕ Кафе, рестораны и пекарни",
             "osm_tags": [("amenity", "restaurant"), ("amenity", "cafe")],
-            "query_2gis": "ресторан кафе",
+            "queries_2gis": ("ресторан", "кафе"),
             "high_margin": False
         },
         "hotels": {
             "title": "🏨 Отели и базы отдыха",
             "osm_tags": [("tourism", "hotel"), ("tourism", "guest_house"), ("tourism", "chalet")],
-            "query_2gis": "отель гостиница база отдыха",
+            "queries_2gis": ("отель", "гостиница", "база отдыха"),
             "high_margin": False
         },
-        # And small businesses, with OSM tags and queries in src/services/providers/base.py:
+        # And small businesses, with OSM tags and queries in src/services/providers/base.py (every word or short phrase of queries_2gis is searched on its own, with the district as "<name> район"):
         # barbershop, nails, massage, tire_service, detailing, cleaning, renovation,
         # appliance_repair, workshop, tutors, photographers, florists.
     }

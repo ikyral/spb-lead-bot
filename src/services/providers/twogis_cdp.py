@@ -57,6 +57,9 @@ from src.services.twogis_links import build_card_url
 logger = logging.getLogger(__name__)
 
 PROVIDER_NAME: str = "2gis_cdp"
+# 2GIS takes a bare name of a district for a street or another city ("Калининский" finds Tver), so a district is
+# asked for as "<name> район".
+DISTRICT_WORD: str = "район"
 # Below this no pause is possible, whatever the settings say.
 MIN_PAUSE_SECONDS: float = 3.0
 
@@ -196,7 +199,7 @@ class TwoGisCdpProvider(BaseMapProvider):
             logger.error("2gis_cdp stopped, the proxy does not work: %s", exc)
             raise
         await self._robots_rules()  # before any page: unknown rules mean nothing is opened
-        self._search_text = f"{query.text} {area.district}" if area.district else query.text
+        self._search_text = f"{query.text} {area.district} {DISTRICT_WORD}" if area.district else query.text
         self._stop_error = None
         url = twogis_site.build_search_url(self._options.city_slug, self._search_text)
         try:

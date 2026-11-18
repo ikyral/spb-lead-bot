@@ -107,14 +107,17 @@ def _parse_queries(value: str) -> list[SearchQuery]:
         if category is None:
             queries.append(SearchQuery(text=item, category=item, high_margin=is_high_margin_category(item)))
         else:
-            queries.append(
-                SearchQuery(
-                    text=category["query_2gis"],
-                    category=item,
-                    high_margin=bool(category.get("high_margin", False)),
-                    osm_tags=tuple(category.get("osm_tags", ())),
+            # Every word or short phrase of a niche is its own search: glued together they find nothing. OSM reads
+            # by tags, the same for all phrases of a niche, so only the first query carries them.
+            for number, phrase in enumerate(category["queries_2gis"]):
+                queries.append(
+                    SearchQuery(
+                        text=phrase,
+                        category=item,
+                        high_margin=bool(category.get("high_margin", False)),
+                        osm_tags=tuple(category.get("osm_tags", ())) if number == 0 else (),
+                    )
                 )
-            )
     return queries
 
 

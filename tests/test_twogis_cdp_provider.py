@@ -479,6 +479,30 @@ async def test_nothing_found_is_not_a_refusal() -> None:
     assert harness.notes == []
 
 
+# ---------- the district is asked for as "<name> район" ----------
+
+
+async def test_a_district_goes_into_the_search_as_a_name_with_the_word_district() -> None:
+    fake = FakeRemote(page_info=("https://2gis.ru/spb/search/x", "Ничего не найдено — 2ГИС", "<html></html>"))
+    harness = Harness(fake)
+    try:
+        await harness.provider.search(QUERY, SearchArea(bbox=(59.9, 30.3, 59.95, 30.4), district="Калининский"))
+    finally:
+        await harness.provider.close()
+    assert fake.navigations == [twogis_site.build_search_url("spb", "стоматология Калининский район")]
+    assert "%D1%80%D0%B0%D0%B9%D0%BE%D0%BD" in fake.navigations[0]  # the word "район" itself
+
+
+async def test_an_area_without_a_district_adds_nothing() -> None:
+    fake = FakeRemote(page_info=("https://2gis.ru/spb/search/x", "Ничего не найдено — 2ГИС", "<html></html>"))
+    harness = Harness(fake)
+    try:
+        await harness.provider.search(QUERY, SearchArea(bbox=(59.9, 30.3, 59.95, 30.4)))
+    finally:
+        await harness.provider.close()
+    assert fake.navigations == [twogis_site.build_search_url("spb", "стоматология")]
+
+
 # ---------- 6. blocks recorded by the existing mechanism ----------
 
 
