@@ -14,3 +14,7 @@ apscheduler==3.11.3
 tzdata==2026.6
 # Headless browser for public pages of 2GIS; the browser itself: playwright install chromium.
 playwright==1.64.1
+# Chrome over the DevTools protocol for the provider 2gis_cdp (the main source of leads).
+pychrome==0.2.4
+websocket-client==1.9.2
+requests==2.34.2

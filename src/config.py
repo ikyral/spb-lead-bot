@@ -1,8 +1,12 @@
+import re
 from pathlib import Path, PurePosixPath
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
+
+from src.services.scraper.chrome.proxy import normalize_country, parse_proxy
 
 # Relative paths (.env, sqlite files) are resolved against the project root,
 # not the current working directory.
@@ -11,6 +15,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 class SettingsError(ValueError):
     """The settings cannot work. The message is meant for the owner; any other ValueError is a bug."""
+
+
+class ProxySettingsError(Exception):
+    """
+    TWOGIS_PROXY cannot be used. Not a ValueError on purpose: pydantic would print the whole input with
+    the error, and the input holds the password of the proxy.
+    """
 
 
 # OUTREACH_OFFER and OUTREACH_SIGNATURE are cut to this many characters.
@@ -107,7 +118,7 @@ class Settings(BaseSettings):
     # How many times collect_cli.py --check may look at the site within 24 hours.
     SCRAPER_CHECK_MAX_PER_DAY: int = Field(default=3, ge=1, le=10)
 
-    # Парсер 2gis_cdp: только ручной запуск на ПК с экраном (collect_cli.py --assisted), окно Chrome видно.
+    # Парсер 2gis_cdp (Chrome по протоколу DevTools): основной источник лидов, идёт и по расписанию.
     # Нижний предел паузы 3 с задан здесь: меньше поставить нельзя.
     SCRAPER_CDP_MIN_DELAY_SECONDS: float = Field(default=3.0, ge=3.0)
     SCRAPER_CDP_MAX_DELAY_SECONDS: float = Field(default=8.0, ge=3.0)
@@ -116,10 +127,21 @@ class Settings(BaseSettings):
     SCRAPER_CDP_MAX_RESULTS_PER_RUN: int = Field(default=100, ge=1, le=300)
     SCRAPER_CDP_MIN_HOURS_BETWEEN_RUNS: float = Field(default=20.0, ge=0.0)
     SCRAPER_CDP_PAGE_TIMEOUT_SECONDS: float = Field(default=45.0, ge=5.0)
-    # Профиль Chrome сохраняется между запусками.
-    SCRAPER_CDP_PROFILE_DIR: str = "data/cdp_profile"
     # Пусто = найти Chrome автоматически.
     SCRAPER_CDP_CHROME_PATH: str = ""
+    # Прокси с российским IP: схема://[логин:пароль@]хост:порт. SecretStr: пароль не попадает в repr, логи и ошибки.
+    TWOGIS_PROXY: SecretStr | None = None
+    # Страна внешнего IP, проверяется в самом браузере до первого запроса к 2ГИС. off = не проверять.
+    TWOGIS_PROXY_COUNTRY: str = "RU"
+    # Профиль Chrome сохраняется между запусками. Старое имя SCRAPER_CDP_PROFILE_DIR тоже читается.
+    TWOGIS_PROFILE_DIR: str = Field(
+        default="data/cdp_profile", validation_alias=AliasChoices("TWOGIS_PROFILE_DIR", "SCRAPER_CDP_PROFILE_DIR")
+    )
+    # Часовой пояс и язык браузера: под место прокси.
+    TWOGIS_TIMEZONE: str = "Europe/Moscow"
+    TWOGIS_LANG: str = "ru-RU"
+    # На сервере браузер идёт в обычном режиме под Xvfb; headless только если экрана нет совсем.
+    TWOGIS_HEADLESS: bool = False
 
     # Looking for the site and contacts of leads on Google, only with collect_cli.py --assisted --google.
     # The upper bounds keep it a person's pace whatever is configured; pauses are fixed in the code.
@@ -169,6 +191,11 @@ class Settings(BaseSettings):
             raise ValueError(f"DIGEST_TIME must be HH:MM, for example 09:30, got {value!r}")
         return f"{int(hours):02d}:{int(minutes):02d}"
 
+    def secret_values(self) -> list[str]:
+        """Every secret of the settings that is set: for hiding them in texts that are printed or stored."""
+        secrets = (self.BOT_TOKEN, self.TWOGIS_PROXY)
+        return [value for secret in secrets if secret and (value := secret.get_secret_value().strip())]
+
     @property
     def digest_hour_minute(self) -> tuple[int, int]:
         hours, minutes = self.DIGEST_TIME.split(":")
@@ -178,6 +205,40 @@ class Settings(BaseSettings):
     @classmethod
     def _trim_outreach(cls, value: str) -> str:
         return " ".join(value.split())[:OUTREACH_TEXT_MAX]
+
+    @field_validator("TWOGIS_PROXY_COUNTRY")
+    @classmethod
+    def _check_proxy_country(cls, value: str) -> str:
+        return normalize_country(value)
+
+    @field_validator("TWOGIS_TIMEZONE")
+    @classmethod
+    def _check_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value.strip())
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            raise ValueError("неизвестный часовой пояс, пример: Europe/Moscow") from None
+        return value.strip()
+
+    @field_validator("TWOGIS_LANG")
+    @classmethod
+    def _check_lang(cls, value: str) -> str:
+        text = value.strip()
+        if not re.fullmatch(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*", text):
+            raise ValueError("язык браузера вида ru-RU")
+        return text
+
+    @model_validator(mode="after")
+    def _check_twogis_proxy(self) -> "Settings":
+        # A ProxySettingsError, not a ValueError: the text of a pydantic error repeats the input with the password.
+        if self.TWOGIS_PROXY is not None and not self.TWOGIS_PROXY.get_secret_value().strip():
+            self.TWOGIS_PROXY = None
+        if self.TWOGIS_PROXY is not None:
+            try:
+                parse_proxy(self.TWOGIS_PROXY.get_secret_value())
+            except ValueError as exc:
+                raise ProxySettingsError(f"TWOGIS_PROXY: {exc}") from None
+        return self
 
     @model_validator(mode="after")
     def _check_cdp_delays(self) -> "Settings":

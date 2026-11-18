@@ -1,12 +1,14 @@
 """
 Chrome process management over temporary or persistent user data directories.
 
-The browser starts with its own defaults and a visible window: nothing here changes how it
-presents itself to sites or hides that it is driven over the DevTools protocol.
+The browser starts with its own defaults, in a visible window unless `headless` is asked for: nothing
+here changes how it presents itself to sites or hides that it is driven over the DevTools protocol.
+A proxy, the language and the profile only say where the browser goes out from and what it keeps.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -14,10 +16,13 @@ import tempfile
 from typing import TYPE_CHECKING
 
 from .exceptions import ChromePathNotFound
+from .proxy import parse_proxy
 from .utils import free_port, locate_chrome_path, wait_until_finished
 
 if TYPE_CHECKING:
     from .options import ChromeOptions
+
+logger = logging.getLogger(__name__)
 
 _TERMINATE_TIMEOUT_SECONDS: int = 5
 
@@ -51,8 +56,28 @@ class ChromeBrowser:
             f"--js-flags=--expose-gc --max-old-space-size={chrome_options.memory_limit}",
         ]
 
+        if chrome_options.proxy is not None:
+            proxy = parse_proxy(chrome_options.proxy.get_secret_value())
+            logger.info("Chrome goes out through the proxy %s", proxy.masked())
+            self._chrome_cmd += [
+                # No credentials here: Chrome ignores them in this flag. The login is given over CDP.
+                f"--proxy-server={proxy.server}",
+                # Nothing but the local debugging port bypasses the proxy.
+                "--proxy-bypass-list=<-loopback>",
+                # Otherwise WebRTC could show the real IP of the server over UDP.
+                "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+            ]
+
+        if chrome_options.lang:
+            self._chrome_cmd += [f"--lang={chrome_options.lang}", f"--accept-lang={chrome_options.lang}"]
+
         if chrome_options.start_maximized:
             self._chrome_cmd.append("--start-maximized")
+
+        if chrome_options.headless:
+            # The new headless mode draws the WebGL map of 2GIS; the old one does not.
+            self._chrome_cmd += ["--headless=new", "--window-size=1920,1080"]
 
         if chrome_options.silent_browser:
             # Launches verified browser binary without a shell.

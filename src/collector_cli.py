@@ -205,12 +205,7 @@ async def _collect(
             f"режим с участием человека нужен парсеру: добавьте {SCRAPER_PROVIDER_NAME} или {CDP_PROVIDER_NAME} "
             "в COLLECTOR_PROVIDERS"
         )
-    # 2gis_cdp is built only here, in a manual run with a screen; otherwise the registry explains why not.
-    cdp_options = (
-        CdpOptions.from_settings(current, ignore_interval=ignore_interval)
-        if assisted and CDP_PROVIDER_NAME in config.providers
-        else None
-    )
+    cdp_options = CdpOptions.from_settings(current, ignore_interval=ignore_interval and assisted)
     if not current.SCRAPER_HEADLESS and not assisted:
         logger.warning("SCRAPER_HEADLESS=false is for manual debugging only: do not use it on a schedule")
     provider_set = build_providers(
@@ -490,8 +485,7 @@ async def _run(args: argparse.Namespace, current: Settings) -> int:
 
 def _without_secrets(text: str, current: Settings) -> str:
     """What an error says may repeat a key or a link with it, and this text is printed and stays in a file."""
-    for secret in (current.BOT_TOKEN,):
-        value = secret.get_secret_value().strip() if secret else ""
+    for value in current.secret_values():
         if value:
             text = text.replace(value, _HIDDEN)
     text = _URL_PASSWORD_RE.sub(f"://{_HIDDEN}@", text)

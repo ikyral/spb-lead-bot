@@ -28,6 +28,7 @@ from src.services.collector import load_collector_config
 from src.services.lead_import import ImportService
 from src.services.ownership import RELEASE_INTERVAL_SECONDS, RELEASE_JOB_ID, release_expired_job
 from src.services.providers.registry import build_providers
+from src.services.providers.twogis_cdp import CdpOptions
 from src.services.providers.twogis_scraper import ScraperOptions
 from src.services.scheduler import CollectorRunner
 
@@ -87,7 +88,11 @@ async def main() -> None:
 
     if settings.SCRAPER_ASSISTED:
         logger.warning("SCRAPER_ASSISTED is ignored by the bot: it works only in the collector on a computer")
-    provider_set = build_providers(collector_config.providers, ScraperOptions.from_settings(settings))
+    provider_set = build_providers(
+        collector_config.providers,
+        ScraperOptions.from_settings(settings),
+        CdpOptions.from_settings(settings),
+    )
     for name, reason in provider_set.disabled.items():
         logger.warning("Provider %s is disabled: %s", name, reason)
 

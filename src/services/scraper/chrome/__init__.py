@@ -7,6 +7,7 @@ from .exceptions import (
     ChromePathNotFound,
     ChromeRuntimeException,
     ChromeUserAbortException,
+    ProxyError,
 )
 from .filters import (
     FIRM_URL_PATTERN,
@@ -29,6 +30,7 @@ from .parsers import (
     is_search_result_link,
     strip_page_number,
 )
+from .proxy import ProxySettings, parse_proxy
 from .remote import ChromeRemote, patch_pychrome
 from .utils import ensure_local_cdp_url, floor_to_hundreds, free_port, locate_chrome_path, wait_until_finished
 
@@ -51,6 +53,8 @@ __all__ = [
     "GateAction",
     "GateDecision",
     "InBuildingPageReader",
+    "ProxyError",
+    "ProxySettings",
     "ScrapedSearchResult",
     "SearchPageReader",
     "classify_2gis_url",
@@ -62,6 +66,7 @@ __all__ = [
     "is_in_building_firm_link",
     "is_search_result_link",
     "locate_chrome_path",
+    "parse_proxy",
     "patch_pychrome",
     "strip_page_number",
     "wait_until_finished",

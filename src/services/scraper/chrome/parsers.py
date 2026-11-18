@@ -20,17 +20,20 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from urllib.parse import unquote, urlsplit, urlunsplit
 
+from pydantic import SecretStr
+
 from src.services.api_client import (
     MAX_RESPONSE_BYTES,
     NO_CONNECTION_TEXT,
     ProviderNoConnectionError,
+    ProviderProxyError,
     ProviderStoppedError,
     ProviderTemporaryError,
     ProviderUnavailableError,
 )
 from src.services.scraper.snapshot import PageSnapshot
 
-from .exceptions import ChromeException, ChromePathNotFound, ChromeRuntimeException
+from .exceptions import ChromeException, ChromePathNotFound, ChromeRuntimeException, ProxyError
 from .filters import IN_BUILDING_URL_PATTERN, ITEM_RESPONSE_PATTERN
 from .options import ChromeOptions, ChromeParserOptions
 from .remote import ChromeRemote
@@ -101,6 +104,8 @@ class _GateStopped(Exception):
 
 def _translate_chrome_error(exc: ChromeException) -> Exception:
     """Map low-level Chrome CDP exceptions to the provider error hierarchy."""
+    if isinstance(exc, ProxyError):
+        return ProviderProxyError(str(exc))
     if isinstance(exc, ChromePathNotFound):
         return ProviderUnavailableError(str(exc))
     if isinstance(exc, ChromeRuntimeException):
@@ -818,6 +823,11 @@ class ChromeScraperSession:
         silent_browser: bool = True,
         use_gc: bool = False,
         remote_factory: Callable[[ChromeOptions, list[str]], ChromeRemote] | None = None,
+        proxy: SecretStr | None = None,
+        proxy_country: str = "OFF",
+        timezone: str | None = None,
+        lang: str | None = None,
+        headless: bool = False,
     ) -> None:
         self._gate = gate
         self._page_timeout_seconds = page_timeout_seconds
@@ -827,6 +837,11 @@ class ChromeScraperSession:
             profile_dir=profile_dir,
             start_maximized=True,
             silent_browser=silent_browser,
+            headless=headless,
+            proxy=proxy,
+            proxy_country=proxy_country,
+            timezone=timezone,
+            lang=lang,
         )
         self._parser_options = ChromeParserOptions(use_gc=use_gc)
         self._remote_factory = remote_factory or ChromeRemote

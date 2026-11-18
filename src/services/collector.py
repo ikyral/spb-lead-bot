@@ -31,6 +31,7 @@ from src.services.api_client import (
     ProviderBlockedError,
     ProviderBudgetExhausted,
     ProviderError,
+    ProviderProxyError,
     ProviderQuotaError,
     ProviderStoppedError,
     ProviderUnavailableError,
@@ -292,6 +293,9 @@ class _Collection:
                 self._add_places(exc.partial, collected)
                 await self._handle_block(provider, exc)
                 return
+            except ProviderProxyError as exc:
+                self._stop_on_proxy(provider, exc)
+                return
             except ProviderStoppedError as exc:
                 self._add_places(exc.partial, collected)
                 self._stop_provider(provider, exc)
@@ -358,6 +362,21 @@ class _Collection:
         logger.error("Provider %s stopped for this run: %s", provider.name, error)
         self.record_error(str(error))
         self.alert(str(error))
+        self.drop_provider(provider)
+
+    def _stop_on_proxy(self, provider: BaseMapProvider, error: ProviderProxyError) -> None:
+        """
+        The proxy does not work or has the wrong country: the source stops for this run, the admins are told.
+
+        This is not a block of the site: no pause and no counter of blocks, the next run tries again.
+        """
+        logger.error("Provider %s stopped, the proxy does not work: %s", provider.name, error)
+        self.record_error(str(error))
+        self.alert(
+            f"🌐 Прокси для {provider.name}: {error}. Сбор из этого источника остановлен, к 2ГИС ничего не "
+            "отправлено. Это не блокировка 2ГИС: паузы и счётчик блокировок не менялись. Проверьте TWOGIS_PROXY "
+            "и TWOGIS_PROXY_COUNTRY, следующий запуск попробует снова"
+        )
         self.drop_provider(provider)
 
     async def _handle_rejected_key(self, provider: BaseMapProvider, error: ProviderError, hint: str) -> None:

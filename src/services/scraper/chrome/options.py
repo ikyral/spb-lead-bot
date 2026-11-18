@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, PositiveInt
+from pydantic import BaseModel, ConfigDict, PositiveInt, SecretStr, model_validator
 
+from .proxy import COUNTRY_CHECK_OFF, normalize_country, parse_proxy
 from .utils import floor_to_hundreds
 
 _FALLBACK_MEMORY_LIMIT_MB: int = 2000
@@ -34,15 +35,41 @@ def default_memory_limit() -> int:
 
 
 class ChromeOptions(BaseModel):
-    """Chrome launch options. The window is always visible: a person sits at the computer."""
+    """
+    Chrome launch options.
 
-    model_config = ConfigDict(validate_assignment=True)
+    The window is visible by default: a person sits at the computer, or the server gives it a virtual screen
+    (Xvfb). `headless` is an option for the cases without one.
+    """
+
+    # An error of validation must not print the input: it may hold the password of the proxy.
+    model_config = ConfigDict(validate_assignment=True, hide_input_in_errors=True)
 
     binary_path: Path | None = None
     profile_dir: Path | None = None
     start_maximized: bool = True
     silent_browser: bool = True
     memory_limit: PositiveInt = default_memory_limit()
+    headless: bool = False
+    # scheme://[login:password@]host:port. SecretStr keeps the password out of repr() and logs.
+    proxy: SecretStr | None = None
+    # Required country of the exit IP, checked in the browser before the first request to 2GIS; "OFF" = no check.
+    proxy_country: str = COUNTRY_CHECK_OFF
+    # Timezone and language of the browser: they should fit the place of the proxy.
+    timezone: str | None = None
+    lang: str | None = None
+
+    @model_validator(mode="after")
+    def _check_proxy_and_country(self) -> ChromeOptions:
+        if self.proxy is not None:
+            parse_proxy(self.proxy.get_secret_value())
+        object.__setattr__(self, "proxy_country", normalize_country(self.proxy_country))
+        return self
+
+    @property
+    def country_to_check(self) -> str | None:
+        """The country the exit IP must be from, or None if it is not checked."""
+        return None if self.proxy_country == COUNTRY_CHECK_OFF else self.proxy_country
 
 
 class ChromeParserOptions(BaseModel):

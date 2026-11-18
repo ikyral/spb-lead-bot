@@ -15,11 +15,7 @@ logger = logging.getLogger(__name__)
 KNOWN_PROVIDERS: frozenset[str] = frozenset({"2gis_scraper", "2gis_cdp", "osm", "yandex"})
 # The API of 2GIS is gone: the old name of the provider now means the browser one.
 LEGACY_PROVIDER_ALIASES: dict[str, str] = {"2gis": "2gis_cdp"}
-CDP_MANUAL_ONLY_REASON: str = (
-    "запускается только вручную на компьютере с экраном: "
-    "python collect_cli.py --assisted (COLLECTOR_PROVIDERS=2gis_cdp)"
-)
-CDP_NOT_INSTALLED_REASON: str = "не установлен pychrome (pip install -r requirements-cdp.txt)"
+CDP_NOT_INSTALLED_REASON: str = "не установлен pychrome (pip install -r requirements.txt)"
 
 
 def resolve_provider_aliases(names: list[str], setting: str) -> list[str]:
@@ -50,14 +46,13 @@ def build_providers(
     """
     Create providers from validated names, in the given order (the first source wins on merge).
 
-    2gis_cdp is built only when `cdp_options` is given: only the manual collector does that.
+    2gis_cdp works on the schedule and by hand alike. Without `cdp_options` it gets the defaults (no proxy);
+    without the package pychrome it is left out with a reason.
     """
     result = ProviderSet()
     for name in enabled:
         if name == "2gis_cdp":
-            if cdp_options is None:
-                result.disabled[name] = CDP_MANUAL_ONLY_REASON
-            elif importlib.util.find_spec("pychrome") is None:
+            if importlib.util.find_spec("pychrome") is None:
                 result.disabled[name] = CDP_NOT_INSTALLED_REASON
             else:
                 result.providers.append(TwoGisCdpProvider(cdp_options))

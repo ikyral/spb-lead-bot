@@ -338,9 +338,8 @@ async def test_unreadable_robots_opens_nothing(error: Exception, expected: type[
     with pytest.raises(expected):
         await harness.provider.search(QUERY, AREA)
     await harness.provider.close()
-    assert fake.navigations == []
+    assert fake.navigations == []  # no page of 2GIS is opened (the browser only checks the exit IP at start)
     assert fake.clicks == []
-    assert harness.sessions == 0  # the browser was not even started
 
 
 async def test_search_page_forbidden_by_robots_is_not_opened() -> None:
@@ -383,32 +382,39 @@ async def test_limit_reached_before_anything_is_read_ends_the_provider() -> None
     assert fake.actions() == 1
 
 
-# ---------- 4. off by default ----------
+# ---------- 4. on the schedule ----------
 
 
-def test_provider_is_off_by_default() -> None:
+def test_provider_is_on_by_default_and_on_the_schedule() -> None:
     settings = _settings()
-    assert "2gis_cdp" not in settings.COLLECT_PROVIDERS
-    assert "2gis_cdp" not in load_collector_config(settings).providers
+    assert settings.COLLECT_PROVIDERS.split(",") == ["2gis_cdp", "osm"]
+    assert load_collector_config(settings).providers == ["2gis_cdp", "osm"]
     env_lines = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
     collect_line = next(line for line in env_lines if line.startswith("COLLECT_PROVIDERS="))
-    assert "2gis_cdp" not in collect_line
-
-    built = build_providers(["2gis_cdp"], None)
-    assert built.providers == []
-    assert "--assisted" in built.disabled["2gis_cdp"]
+    assert "2gis_cdp" in collect_line
 
 
-def test_registry_builds_it_only_with_options_and_pychrome(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(registry.importlib.util, "find_spec", lambda name: None)
-    missing = build_providers(["2gis_cdp"], None, cdp_options=CdpOptions())
-    assert missing.providers == []
-    assert "requirements-cdp.txt" in missing.disabled["2gis_cdp"]
-
+def test_registry_lets_it_into_the_schedule_with_pychrome(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(registry.importlib.util, "find_spec", lambda name: object())
-    built = build_providers(["2gis_cdp"], None, cdp_options=CdpOptions(min_hours_between_runs=12))
+    built = build_providers(["2gis_cdp"])  # no options at all: what the schedule may do with defaults
     assert [provider.name for provider in built.providers] == ["2gis_cdp"]
+
+    built = build_providers(["2gis_cdp"], cdp_options=CdpOptions(min_hours_between_runs=12))
     assert built.providers[0].min_hours_between_runs == 12
+
+
+def test_registry_leaves_it_out_without_pychrome(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry.importlib.util, "find_spec", lambda name: None)
+    missing = build_providers(["2gis_cdp", "osm"], cdp_options=CdpOptions())
+    assert [provider.name for provider in missing.providers] == ["osm"]
+    assert "pychrome" in missing.disabled["2gis_cdp"]
+
+
+def test_the_old_name_of_the_api_provider_is_an_alias(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING"):
+        config = load_collector_config(_settings(COLLECT_PROVIDERS="2gis,osm,2gis_cdp"))
+    assert config.providers == ["2gis_cdp", "osm"]  # one 2gis_cdp, in the place of the first name
+    assert "COLLECT_PROVIDERS" in caplog.text and "2gis_cdp" in caplog.text
 
 
 # ---------- 5. refusals stop everything ----------
@@ -590,10 +596,9 @@ FORBIDDEN_WORDS = (
     "automationcontrolled",
     "humanize",
     "fingerprint",
-    "proxy",
+    "rotat",  # no rotation of proxies: one fixed proxy of the right country, nothing more
     "google.com",
     "dispatchmouse",
-    "headless",
 )
 
 
