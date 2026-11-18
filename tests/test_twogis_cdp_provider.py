@@ -1268,6 +1268,80 @@ def test_a_link_belongs_to_an_organization_by_the_whole_number() -> None:
     assert not parsers.is_link_of_firm("/spb/firm/7000?stat=x", "")
 
 
+# ---------- the quick search of a link that says "could not find node" is tried once more ----------
+
+NODE_GONE = "quick search of a link failed: calling method: DOM.describeNode error: Could not find node with given id"
+
+
+class FlakyFinder(QuickFinderRemote):
+    """The first quick searches fail with the given errors, in order; then they work."""
+
+    def __init__(self, script: Any, cards: dict[str, dict[str, Any]], errors: list[Exception]) -> None:
+        super().__init__(script, cards)
+        self.errors = errors
+
+    def find_link_by_firm_id(self, firm_id: str) -> DOMNode | None:
+        if self.errors:
+            self.quick_lookups += 1
+            raise self.errors.pop(0)
+        return super().find_link_by_firm_id(firm_id)
+
+
+async def _search_with(remote_: FakeRemote, caplog: pytest.LogCaptureFixture) -> list[str]:
+    harness = Harness(remote_)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    return [place.external_id for place in page.places]
+
+
+async def test_one_more_quick_search_helps_and_the_whole_page_is_not_read(caplog: pytest.LogCaptureFixture) -> None:
+    from src.services.scraper.chrome.exceptions import ChromeRuntimeException
+
+    ids = ["101", "102", "103"]
+    clean = QuickFinderRemote(lambda n: ids, _cards(*ids))
+    flaky = FlakyFinder(lambda n: ids, _cards(*ids), [ChromeRuntimeException(NODE_GONE)])
+    await _search_with(clean, caplog)
+    caplog.clear()
+    assert await _search_with(flaky, caplog) == ["2gis_101", "2gis_102", "2gis_103"]
+    assert flaky.quick_lookups == clean.quick_lookups + 1  # one more search, for the link that was gone
+    assert flaky.document_reads == clean.document_reads  # and not one more read of the whole page
+    assert "the node was gone at once, once more" in caplog.text
+    assert "the whole page is read instead" not in caplog.text
+
+
+async def test_when_the_second_quick_search_fails_too_the_whole_page_is_read(caplog: pytest.LogCaptureFixture) -> None:
+    from src.services.scraper.chrome.exceptions import ChromeRuntimeException
+
+    ids = ["101", "102"]
+    clean = QuickFinderRemote(lambda n: ids, _cards(*ids))
+    flaky = FlakyFinder(
+        lambda n: ids, _cards(*ids), [ChromeRuntimeException(NODE_GONE), ChromeRuntimeException(NODE_GONE)]
+    )
+    await _search_with(clean, caplog)
+    caplog.clear()
+    assert await _search_with(flaky, caplog) == ["2gis_101", "2gis_102"]  # still read: by the whole page
+    assert flaky.document_reads == clean.document_reads + 1
+    assert caplog.text.count("once more") == 1  # only one more try, not a loop
+    assert "Quick search of the link failed" in caplog.text and "the whole page is read instead" in caplog.text
+
+
+async def test_any_other_failure_of_the_quick_search_is_not_repeated(caplog: pytest.LogCaptureFixture) -> None:
+    from src.services.scraper.chrome.exceptions import ChromeRuntimeException
+
+    ids = ["101", "102"]
+    flaky = FlakyFinder(lambda n: ids, _cards(*ids), [ChromeRuntimeException("quick search of a link failed: boom")])
+    clean = QuickFinderRemote(lambda n: ids, _cards(*ids))
+    await _search_with(clean, caplog)
+    caplog.clear()
+    assert await _search_with(flaky, caplog) == ["2gis_101", "2gis_102"]
+    assert flaky.quick_lookups == clean.quick_lookups  # the failed search replaced one, and no second try was made
+    assert flaky.document_reads == clean.document_reads + 1  # the whole page was read for that link instead
+    assert "once more" not in caplog.text and "the whole page is read instead" in caplog.text
+
+
 # ---------- 6. blocks recorded by the existing mechanism ----------
 
 
