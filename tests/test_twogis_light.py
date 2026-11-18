@@ -443,3 +443,33 @@ def test_a_failure_of_the_browser_command_is_a_runtime_error_the_reader_can_fall
     tab.DOM.querySelector.side_effect = pychrome.CallMethodException("DOM.querySelector error: bad selector")
     with pytest.raises(ChromeRuntimeException, match="quick search of a link failed"):
         _remote_for_lookup(tab).find_link_by_href("/spb/firm/101")
+
+
+def test_a_link_is_found_by_the_number_of_the_organization_whatever_its_stat_is() -> None:
+    tab = _tab_with_link()
+    node = _remote_for_lookup(tab).find_link_by_firm_id("70000001042840758")
+    assert node is not None
+    tab.DOM.getDocument.assert_called_once_with(depth=0)
+    tab.DOM.querySelector.assert_called_once_with(
+        nodeId=1, selector='a[href*="/firm/70000001042840758"][href*="stat="]'
+    )
+
+
+def test_only_digits_get_into_the_selector_of_the_number() -> None:
+    tab = _tab_with_link()
+    remote = _remote_for_lookup(tab)
+    for bad in ("", "12 34", '1"] , a[href', "abc", "12-34"):
+        assert remote.find_link_by_firm_id(bad) is None
+    tab.DOM.querySelector.assert_not_called()
+
+
+def test_a_number_that_is_not_on_the_page_is_none_and_a_failure_is_a_runtime_error() -> None:
+    import pychrome
+
+    from src.services.scraper.chrome.exceptions import ChromeRuntimeException
+
+    assert _remote_for_lookup(_tab_with_link(node_id=0)).find_link_by_firm_id("101") is None
+    tab = _tab_with_link()
+    tab.DOM.querySelector.side_effect = pychrome.CallMethodException("DOM.querySelector error: boom")
+    with pytest.raises(ChromeRuntimeException, match="quick search of a link failed"):
+        _remote_for_lookup(tab).find_link_by_firm_id("101")

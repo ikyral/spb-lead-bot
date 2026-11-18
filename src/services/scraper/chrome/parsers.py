@@ -202,6 +202,11 @@ def link_city(href: str) -> str | None:
     return match.group(1) if match else None
 
 
+def is_link_of_firm(href: str, firm_id: str) -> bool:
+    """Is this link the one of that organization: `/firm/<id>` followed by the end, `/`, `?` or `#` of the address."""
+    return bool(firm_id) and re.search(rf"/firm/{re.escape(firm_id)}(?:[/?#]|$)", href) is not None
+
+
 def firm_id_from_href(href: str) -> str:
     """The number of the organization in a card link, or '' if the link has none."""
     match = _FIRM_ID_RE.search(urlsplit(href).path)
@@ -609,22 +614,31 @@ class _BaseChromePageReader:
         return CollectedCards(collected, collected_urls, attempted_hrefs, None, False)
 
     def _find_node_by_href(self, find_links: Callable[[DOMNode], list[DOMNode]], target_href: str) -> DOMNode | None:
-        # The browser finds a link by its address at once; reading the whole page for every click is slow and heavy.
-        finder = getattr(self._remote, "find_link_by_href", None)
+        """
+        The link of the same organization as `target_href`, as it is on the page now.
+
+        The address of a link is not stable: its `stat=` holds the state of the page (a counter of events, the tab),
+        and the links of the list are drawn anew with other values after a click. So the link is found by the number
+        of the organization, not by the whole address.
+        """
+        firm_id = firm_id_from_href(target_href)
+        # The browser finds a link by a selector at once; reading the whole page for every click is slow and heavy.
+        finder = getattr(self._remote, "find_link_by_firm_id", None) if firm_id else None
         if finder is not None:
             started = time.monotonic()
             try:
-                found = finder(target_href)
+                found = finder(firm_id)
             except ChromeException as exc:
                 logger.info("Quick search of the link failed (%s): the whole page is read instead", exc)
             else:
                 self._lookup_seconds.append(time.monotonic() - started)
-                if found is not None:
+                if found is not None and is_link_of_firm(found.attributes.get("href", ""), firm_id):
                     return found
                 # Not found: the whole page is read to be sure, and it tells what the page looks like now.
         document = self._read_document()
         for node in find_links(document):
-            if node.attributes.get("href") == target_href:
+            href = node.attributes.get("href", "")
+            if href == target_href or (firm_id and is_link_of_firm(href, firm_id)):
                 return node
         return None
 
@@ -843,7 +857,8 @@ class SearchPageReader(_BaseChromePageReader):
         while True:
             self._read_document()
             reads += 1
-            current = tuple(self._last_firm_hrefs)
+            # The same organizations in the same order: the state in the addresses changes without the list changing.
+            current = tuple(firm_id_from_href(href) or href for href in self._last_firm_hrefs)
             same_in_a_row = same_in_a_row + 1 if current == previous else 0
             previous = current
             if same_in_a_row >= _LINKS_STABLE_READS:
