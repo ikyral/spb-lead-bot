@@ -93,3 +93,12 @@ async def test_the_pipeline_writes_lines_the_script_can_read(
     stats = niche_stats.collect(caplog.text.splitlines())["tire_service"]
     assert (stats.found, stats.selected) == (2, 1)
     assert stats.reasons == {"the site works": 1}
+
+
+def test_a_log_cut_in_the_middle_of_a_letter_is_still_read(tmp_path: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    good = b"Place [nails] new (2gis_1): site status no_site, score 40\n"
+    cut = "Place [nails] not-a-lead (2gis_2): the site works (http://сайт".encode()[:-1]  # half of a letter
+    log = tmp_path / "cut.log"
+    log.write_bytes(good + cut + b"\n")
+    assert niche_stats.main([str(log)]) == 0
+    assert "nails" in capsys.readouterr().out

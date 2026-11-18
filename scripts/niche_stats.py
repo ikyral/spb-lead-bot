@@ -71,9 +71,11 @@ def main(argv: list[str]) -> int:
     if argv:
         lines: list[str] = []
         for path in argv:
-            with open(path, encoding="utf-8") as file:
+            # A log cut in the middle of a letter must not stop the count: such a line is only not read.
+            with open(path, encoding="utf-8", errors="replace") as file:
                 lines.extend(file)
     else:
+        sys.stdin.reconfigure(errors="replace")  # type: ignore[union-attr]
         lines = list(sys.stdin)
     stats = collect(lines)
     if not stats:
