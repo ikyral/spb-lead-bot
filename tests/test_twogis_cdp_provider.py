@@ -479,6 +479,97 @@ async def test_nothing_found_is_not_a_refusal() -> None:
     assert harness.notes == []
 
 
+# ---------- 404 of a search: nothing found, not a block ----------
+
+NOTHING_FOUND_404 = ("https://2gis.ru/spb/search/x", "Точных совпадений нет — 2ГИС", "<html></html>")
+
+
+def _query(number: int) -> SearchQuery:
+    return SearchQuery(text=f"запрос {number}", category="dentist_clinic", high_margin=True)
+
+
+async def test_404_of_a_search_without_a_captcha_is_an_empty_result(caplog: pytest.LogCaptureFixture) -> None:
+    fake = FakeRemote(doc_status=404, page_info=NOTHING_FOUND_404)
+    harness = Harness(fake)
+    try:
+        with caplog.at_level("INFO", logger="src.services.providers.twogis_cdp"):
+            page = await harness.provider.search(_query(1), AREA)
+        # The target is left out, and the next one is read: nothing is stopped, nobody is told about a refusal.
+        fake.doc_status = 200
+        fake.pages = {1: _doc(["101"])}
+        fake.cards = {"101": _card("101")}
+        next_page = await harness.provider.search(_query(2), AREA)
+    finally:
+        await harness.provider.close()
+    assert page.places == [] and page.has_more is False
+    assert harness.notes == []
+    assert [place.external_id for place in next_page.places] == ["2gis_101"]
+    assert "taken as nothing found: https://2gis.ru/spb/search/x, title 'Точных совпадений нет — 2ГИС'" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("page_info", "reason"),
+    [
+        (CAPTCHA_PAGE, "капч"),
+        (("https://2gis.ru/spb/search/x", "Проверка", "<div class='g-recaptcha'></div>"), "капч"),
+        (("https://2gis.ru/spb/search/x", "", ""), "пустой"),
+        (FOREIGN_PAGE, "не с 2ГИС"),
+    ],
+)
+async def test_404_with_a_sign_of_a_captcha_or_an_odd_page_is_still_a_refusal(
+    page_info: tuple[str, str, str], reason: str
+) -> None:
+    harness = Harness(FakeRemote(doc_status=404, page_info=page_info))
+    try:
+        with pytest.raises(ProviderBlockedError, match=reason):
+            await harness.provider.search(_query(1), AREA)
+        assert harness.notes and reason in harness.notes[0]
+    finally:
+        await harness.provider.close()
+
+
+@pytest.mark.parametrize("status", [401, 403, 429])
+async def test_refusing_statuses_are_not_taken_for_an_empty_search(status: int) -> None:
+    harness = Harness(FakeRemote(doc_status=status, page_info=NOTHING_FOUND_404))
+    try:
+        with pytest.raises(ProviderBlockedError, match=str(status)):
+            await harness.provider.search(_query(1), AREA)
+    finally:
+        await harness.provider.close()
+
+
+async def test_five_empty_404_searches_in_a_row_are_a_refusal() -> None:
+    fake = FakeRemote(doc_status=404, page_info=NOTHING_FOUND_404)
+    harness = Harness(fake)
+    try:
+        for number in range(1, 5):
+            assert (await harness.provider.search(_query(number), AREA)).places == []
+        with pytest.raises(ProviderBlockedError, match="5-й раз подряд"):
+            await harness.provider.search(_query(5), AREA)
+        assert harness.notes and "404" in harness.notes[0]
+    finally:
+        await harness.provider.close()
+
+
+async def test_a_search_that_found_something_resets_the_count_of_empty_ones() -> None:
+    fake = FakeRemote(doc_status=404, page_info=NOTHING_FOUND_404)
+    harness = Harness(fake)
+    try:
+        for number in range(1, 5):  # four empty ones: one short of a refusal
+            await harness.provider.search(_query(number), AREA)
+        fake.doc_status = 200
+        fake.pages = {1: _doc(["101"])}
+        fake.cards = {"101": _card("101")}
+        assert len((await harness.provider.search(_query(5), AREA)).places) == 1
+        fake.doc_status = 404
+        for number in range(6, 10):  # four empty ones again, not five in a row
+            await harness.provider.search(_query(number), AREA)
+        with pytest.raises(ProviderBlockedError):
+            await harness.provider.search(_query(10), AREA)
+    finally:
+        await harness.provider.close()
+
+
 # ---------- 6. blocks recorded by the existing mechanism ----------
 
 
