@@ -20,6 +20,7 @@ from src.services.api_client import (
     ProviderTemporaryError,
     ProviderUnavailableError,
 )
+from src.services.scraper.chrome import parsers as parsers_module
 from src.services.scraper.chrome import utils as chrome_utils
 from src.services.scraper.chrome.browser import ChromeBrowser
 from src.services.scraper.chrome.dom import DOMNode
@@ -42,6 +43,12 @@ from src.services.scraper.chrome.parsers import (
 )
 from src.services.scraper.chrome.remote import ChromeRemote
 from src.services.scraper.chrome.utils import floor_to_hundreds, free_port, locate_chrome_path, wait_until_finished
+
+
+@pytest.fixture(autouse=True)
+def _no_wait_for_the_list_to_settle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reads of the result list are not spaced out by a real second here."""
+    monkeypatch.setattr(parsers_module, "_LINKS_POLL_SECONDS", 0.0)
 
 
 def _b64(text: str) -> str:
