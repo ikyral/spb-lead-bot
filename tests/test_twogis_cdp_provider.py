@@ -210,7 +210,9 @@ class Harness:
 
         def session_factory(gate: Gate) -> ChromeScraperSession:
             self.sessions += 1
-            return ChromeScraperSession(gate=gate, remote_factory=lambda _o, _p: fake)  # type: ignore[arg-type,return-value]
+            return ChromeScraperSession(  # type: ignore[arg-type,return-value]
+                gate=gate, remote_factory=lambda _o, _p: fake, city_slug=CdpOptions(**options).city_slug
+            )
 
         self.provider = TwoGisCdpProvider(
             CdpOptions(**options),
@@ -1006,6 +1008,185 @@ async def test_the_wait_for_the_list_counts_reads_and_seconds_and_has_a_longer_l
         await harness.provider.close()
     line = next(line for line in caplog.text.splitlines() if "The list of results has settled" in line)
     assert "the same 3 reads in a row, 3 reads in all" in line and re.search(r"[\d.]+ s, 1 links", line)
+
+
+# ---------- links of other cities are not clicked; a click that leaves the search ends the page ----------
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+SPB_SEARCH = "https://2gis.ru/spb/search/автосервис Невский район"
+
+
+def _doc_from_html(name: str) -> DOMNode:
+    """The links of a saved page as a tree of nodes: the page itself is made anonymous, only the links are there."""
+    import html as html_module
+
+    text = (FIXTURES_DIR / name).read_text(encoding="utf-8")
+    hrefs = [html_module.unescape(href) for href in re.findall(r'href="([^"]+)"', text)]
+    return _doc_with(hrefs)
+
+
+class UrlRemote(FakeRemote):
+    """A tab that knows its address: it is the page that was opened until a click on a link of `leave_on`."""
+
+    def __init__(self, *args: Any, leave_on: tuple[str, ...] = (), **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.url = ""
+        self.leave_on = leave_on
+
+    def navigate(self, url: str, timeout: int = 60) -> None:
+        super().navigate(url, timeout)
+        self.url = url
+
+    def perform_click(self, node: DOMNode) -> None:
+        super().perform_click(node)
+        if any(marker in node.attributes["href"] for marker in self.leave_on):
+            self.url = "https://2gis.ru/spb/firm/70000001999999999?m=30.5,59.9/15"
+
+    def execute_script(self, expression: str) -> Any:
+        if expression.startswith("String(location.href)"):
+            return self.url or None
+        return super().execute_script(expression)
+
+
+class FixtureRemote(UrlRemote):
+    def get_document(self, full: bool = True) -> DOMNode:
+        return _doc_from_html("twogis_search_cities.html")
+
+
+@pytest.mark.parametrize(
+    ("href", "city"),
+    [
+        ("/spb/firm/70000001?stat=c3RhdA%3D%3D", "spb"),
+        ("/kudrovo/firm/70000001?stat=c3RhdA%3D%3D", "kudrovo"),
+        ("https://2gis.ru/murino/firm/70000001?stat=x", "murino"),
+        ("/spb-region/firm/70000001", "spb-region"),
+        ("/firm/70000001", None),
+        ("/spb/search/query", None),
+        ("/spb/station/55", None),
+    ],
+)
+def test_the_city_of_a_link_is_its_whole_first_segment(href: str, city: str | None) -> None:
+    assert parsers.link_city(href) == city
+
+
+async def test_on_a_saved_page_only_the_links_of_the_city_are_clicked(caplog: pytest.LogCaptureFixture) -> None:
+    ids = [f"7000000100000{number:04d}" for number in range(1, 13)]
+    fake = FixtureRemote(cards=_cards(*ids))
+    fake.url = SPB_SEARCH
+    harness = Harness(fake)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    clicked = fake.clicks
+    assert len(clicked) == 10 and all(href.startswith("/spb/firm/") for href in clicked)
+    assert not any("/kudrovo/" in href for href in clicked)  # no click, no attempt, no card spent on them
+    assert len(page.places) == 10
+    assert "Card 10/10" in caplog.text and "Card 11/" not in caplog.text
+    other = next(line for line in caplog.text.splitlines() if "of other cities, left alone" in line)
+    assert "left alone: 2 (kudrovo: 2)" in other
+    assert not re.search(r"\d{6,}", other.split("left alone")[1])  # only the slug, no numbers of organizations
+    assert harness.notes == []
+
+
+async def test_a_city_is_compared_by_the_whole_segment_not_by_a_part_of_it(caplog: pytest.LogCaptureFixture) -> None:
+    stat = "?stat=c3RhdA%3D%3D"
+    fake = UrlRemote(
+        pages={1: _doc_with([f"/spb/firm/101{stat}", f"/spbx/firm/102{stat}", f"/spb-region/firm/103{stat}"])},
+        cards=_cards("101", "102", "103"),
+    )
+    fake.url = SPB_SEARCH
+    harness = Harness(fake)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101"]
+    assert "left alone: 2 (spb-region: 1, spbx: 1)" in caplog.text
+
+
+async def test_a_click_that_leaves_the_search_ends_the_page_and_keeps_what_the_click_gave(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stat = "?stat=c3RhdA%3D%3D"
+    fake = UrlRemote(
+        pages={1: _doc_with([f"/spb/firm/101{stat}", f"/spb/firm/102{stat}", f"/spb/firm/103{stat}"])},
+        cards=_cards("101", "102", "103"),
+        leave_on=("/firm/102",),
+    )
+    fake.url = SPB_SEARCH
+    harness = Harness(fake)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101", "2gis_102"]  # the card of the click is kept
+    assert page.has_more is False and len(fake.clicks) == 2  # the third is not clicked: no way back
+    assert "the click led away from the search page, to /spb/firm" in caplog.text
+    assert "not read after" not in caplog.text and harness.notes == []  # not an unreadable card, not a refusal
+
+
+async def test_a_click_that_leaves_without_an_answer_of_the_catalog_still_ends_the_page_quietly() -> None:
+    stat = "?stat=c3RhdA%3D%3D"
+    fake = UrlRemote(
+        pages={1: _doc_with([f"/spb/firm/101{stat}", f"/spb/firm/102{stat}"])},
+        cards=_cards("101"),  # nothing answers to the second one
+        leave_on=("/firm/102",),
+    )
+    fake.url = SPB_SEARCH
+    harness = Harness(fake)
+    try:
+        page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101"]
+    assert len(fake.clicks) == 2  # not three attempts on the second: it is over at once
+
+
+async def test_the_run_goes_on_with_the_next_query_after_a_page_was_left() -> None:
+    stat = "?stat=c3RhdA%3D%3D"
+    fake = UrlRemote(
+        pages={1: _doc_with([f"/spb/firm/101{stat}", f"/spb/firm/102{stat}"])},
+        cards=_cards("101", "102"),
+        leave_on=("/firm/102",),
+    )
+    harness = Harness(fake)
+    try:
+        first = await harness.provider.search(AUTO, KALININSKY)
+        assert [place.external_id for place in first.places] == ["2gis_101", "2gis_102"]
+        fake.leave_on = ()  # the next query is read as usual: the page is opened anew
+        second = await harness.provider.search(_query(2), KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert len(second.places) == 2
+
+
+async def test_two_pages_left_in_one_run_stop_the_run_with_a_clear_reason() -> None:
+    stat = "?stat=c3RhdA%3D%3D"
+    fake = UrlRemote(
+        pages={1: _doc_with([f"/spb/firm/101{stat}", f"/spb/firm/102{stat}"])},
+        cards=_cards("101", "102"),
+        leave_on=("/firm/102",),
+    )
+    harness = Harness(fake)
+    try:
+        await harness.provider.search(AUTO, KALININSKY)  # the first time: the page is over, the run goes on
+        with pytest.raises(ProviderFormatError, match="клик увёл со страницы поиска 2-й раз за сбор") as stopped:
+            await harness.provider.search(_query(2), KALININSKY)
+        assert [place.external_id for place in stopped.value.partial] == ["2gis_101", "2gis_102"]
+        assert harness.notes == []  # not a refusal of the site
+    finally:
+        await harness.provider.close()
+    # a new run starts the count anew
+    fake.leave_on = ()
+    again = Harness(fake)
+    try:
+        assert len((await again.provider.search(_query(3), KALININSKY)).places) == 2
+    finally:
+        await again.provider.close()
 
 
 # ---------- 6. blocks recorded by the existing mechanism ----------

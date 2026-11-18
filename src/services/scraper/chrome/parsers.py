@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import time
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -56,6 +57,7 @@ _PAGE_NUMBER_RE = re.compile(r"/page/(\d+)(?=/|\?|#|$)")
 _SEARCH_LINK_RE = re.compile(r"/(firm|station)/[^/?#]+.*[?&]stat=([^&#]+)")
 _FIRM_PATH_RE = re.compile(r"/firm/[^/?#]+")
 _FIRM_ID_RE = re.compile(r"/firm/([0-9]+)")
+_FIRM_CITY_RE = re.compile(r"^/([^/?#]+)/firm/")
 _IN_BUILDING_FIRM_RE = re.compile(r"/firm/[^/?#]+/?$")
 _NO_RESULTS_TITLE_RE = re.compile(r"Ничего не найдено|Не найдено", re.IGNORECASE)
 _IN_BUILDING_PATTERN = re.compile(IN_BUILDING_URL_PATTERN)
@@ -142,6 +144,18 @@ class ScrapedSearchResult:
     nothing_found: bool = False
     # Reading was stopped because several cards in a row could not be read; the text says why. Not a block.
     unreadable: str | None = None
+    # A click led away from the search page (to a page of another kind or another city): where to, without the number.
+    left_search: str | None = None
+
+
+class _LeftSearchPage(Exception):
+    """After a click the browser is no longer on a search page of the city. `payload` is the card read by that click."""
+
+    def __init__(self, where: str, payload: dict[str, Any] | None, url: str) -> None:
+        super().__init__(where)
+        self.where = where
+        self.payload = payload
+        self.url = url
 
 
 class CollectedCards(NamedTuple):
@@ -153,6 +167,7 @@ class CollectedCards(NamedTuple):
     blocked_reason: str | None
     stopped: bool
     unreadable: str | None = None
+    left_search: str | None = None
 
 
 def describe_link(href: str) -> str:
@@ -179,6 +194,12 @@ def classify_2gis_url(url: str) -> UrlKind:
     if re.match(r"^(?:/[^/]+)?/firm/[^/?#]+", path):
         return "firm"
     return "search"
+
+
+def link_city(href: str) -> str | None:
+    """The city of a link to an organization (`/<city>/firm/<id>`): the whole first segment of the path, or None."""
+    match = _FIRM_CITY_RE.match(urlsplit(href).path)
+    return match.group(1) if match else None
 
 
 def firm_id_from_href(href: str) -> str:
@@ -341,10 +362,13 @@ class _BaseChromePageReader:
         gate: Gate,
         page_timeout_seconds: float = 45.0,
         snapshot_dir: Path | None = None,
+        city_slug: str | None = None,
     ) -> None:
         self._remote = remote
         self._options = parser_options
         self._gate = gate
+        # Only organizations of this city are clicked: the link of another one leads away from the search page.
+        self._city_slug = city_slug
         self._page_timeout_seconds = max(10.0, page_timeout_seconds)
         # For a diagnostic run: every search page is saved here, to see what the code saw.
         self._snapshot_dir = snapshot_dir
@@ -382,6 +406,21 @@ class _BaseChromePageReader:
                 len(self._lookup_seconds),
                 sum(self._lookup_seconds),
             )
+
+    def _search_page_left(self) -> str | None:
+        """Where the browser is if it is no longer on a search page of the city (kind of page only), else None."""
+        if self._city_slug is None:
+            return None
+        try:
+            raw = self._remote.execute_script("String(location.href)")
+        except ChromeException:
+            return None
+        if not isinstance(raw, str) or not raw:
+            return None  # the address is not known: nothing is said about it
+        path = urlsplit(raw).path
+        if re.match(rf"^/{re.escape(self._city_slug)}/search/", path):
+            return None
+        return "/".join(path.split("/")[:3]) or "/"
 
     def _log_page_state(self, why: str) -> None:
         """What the page looks like now: the address, the links the last read showed, and how slow the reads were."""
@@ -541,6 +580,12 @@ class _BaseChromePageReader:
                 )
             except _GateStopped:
                 return CollectedCards(collected, collected_urls, attempted_hrefs, None, True)
+            except _LeftSearchPage as left:
+                if left.payload is not None:
+                    collected.append(left.payload)
+                    if left.url:
+                        collected_urls.append(left.url)
+                return CollectedCards(collected, collected_urls, attempted_hrefs, None, False, None, left.where)
 
             if blocked_reason is not None:
                 return CollectedCards(collected, collected_urls, attempted_hrefs, blocked_reason, False)
@@ -632,6 +677,16 @@ class _BaseChromePageReader:
                 continue
 
             response = self._remote.wait_response(ITEM_RESPONSE_PATTERN)
+            where = self._search_page_left()
+            if where is not None:
+                # No way back (neither history nor a new load): the page is left, what the click gave is kept.
+                payload_here = None
+                url_here = ""
+                if response is not None and response.get("status") == 200:
+                    payload_here = _parse_byid_payload(self._remote.get_response_body(response))
+                    url_here = str(response.get("url") or "")
+                logger.warning("%s: the click led away from the search page, to %s", label, where)
+                raise _LeftSearchPage(where, payload_here, url_here)
             if response is None:
                 _, blocked_reason = _check_snapshot_block(
                     self._remote,
@@ -690,9 +745,15 @@ class SearchPageReader(_BaseChromePageReader):
         gate: Gate,
         page_timeout_seconds: float = 45.0,
         snapshot_dir: Path | None = None,
+        city_slug: str | None = None,
     ) -> None:
         super().__init__(
-            remote, parser_options, gate=gate, page_timeout_seconds=page_timeout_seconds, snapshot_dir=snapshot_dir
+            remote,
+            parser_options,
+            gate=gate,
+            page_timeout_seconds=page_timeout_seconds,
+            snapshot_dir=snapshot_dir,
+            city_slug=city_slug,
         )
         self._active_base_url: str | None = None
         self._current_page: int = 0
@@ -802,6 +863,26 @@ class SearchPageReader(_BaseChromePageReader):
                 )
                 return
             time.sleep(_LINKS_POLL_SECONDS)
+
+    def _is_own_city(self, node: DOMNode) -> bool:
+        """A link to an organization of the city that is searched (or one that names no city at all)."""
+        if self._city_slug is None:
+            return True
+        city = link_city(node.attributes.get("href", ""))
+        return city is None or city == self._city_slug
+
+    def _report_other_cities(self, document: DOMNode) -> None:
+        """One line per page: how many links lead to organizations of other cities, and which cities. Not clicked."""
+        if self._city_slug is None:
+            return
+        cities = Counter(
+            city
+            for node in document.search(is_search_result_link)
+            if _FIRM_PATH_RE.search(node.attributes.get("href", ""))
+            and (city := link_city(node.attributes.get("href", ""))) not in (None, self._city_slug)
+        )
+        listed = ", ".join(f"{city}: {count}" for city, count in sorted(cities.items())) or "none"
+        logger.info("Links to organizations of other cities, left alone: %d (%s)", sum(cities.values()), listed)
 
     def _report_page(self, firm_links: list[DOMNode], all_links: list[DOMNode], pagination: int) -> None:
         """Say in the log what the page offers, and save it for a diagnostic run: the links are only listed by kind."""
@@ -932,9 +1013,10 @@ class SearchPageReader(_BaseChromePageReader):
             return [
                 node
                 for node in doc.search(is_search_result_link)
-                if _FIRM_PATH_RE.search(node.attributes.get("href", ""))
+                if _FIRM_PATH_RE.search(node.attributes.get("href", "")) and self._is_own_city(node)
             ]
 
+        self._report_other_cities(document)
         self._report_page(_firm_links_only(document), all_nodes, len(pages_ahead))
 
         collected = self._collect_items_from_links(
@@ -950,12 +1032,13 @@ class SearchPageReader(_BaseChromePageReader):
             collected.blocked_reason,
             collected.stopped,
         )
+        left_search = collected.left_search
         self._visited_links.update(all_hrefs)
 
         if self._options.use_gc and self._current_page % self._options.gc_pages_interval == 0:
             self._remote.execute_script("window.gc && window.gc()")
 
-        if not items and blocked_reason is None and not stopped:
+        if not items and blocked_reason is None and not stopped and left_search is None:
             items, item_urls = _collect_json_responses(
                 self._remote,
                 lambda resp_url: "api.2gis." in resp_url,
@@ -973,12 +1056,13 @@ class SearchPageReader(_BaseChromePageReader):
         return ScrapedSearchResult(
             snapshot=snapshot,
             items=items,
-            has_more=False if blocked_reason is not None or stopped else has_more,
+            has_more=False if blocked_reason is not None or stopped or left_search is not None else has_more,
             blocked_reason=blocked_reason,
             stopped=stopped,
             links_found=len(all_hrefs),
             nothing_found=not all_hrefs and bool(_NO_RESULTS_TITLE_RE.search(snapshot.title)),
             unreadable=collected.unreadable,
+            left_search=left_search,
         )
 
 
@@ -1088,6 +1172,7 @@ class ChromeScraperSession:
         use_gc: bool = False,
         remote_factory: Callable[[ChromeOptions, list[str]], ChromeRemote] | None = None,
         snapshot_dir: Path | None = None,
+        city_slug: str | None = None,
         proxy: SecretStr | None = None,
         proxy_country: str = "OFF",
         timezone: str | None = None,
@@ -1118,6 +1203,7 @@ class ChromeScraperSession:
         self._restart_every_cards = restart_every_cards
         self._cards_since_start = 0
         self._snapshot_dir = snapshot_dir
+        self._city_slug = city_slug
         self._parser_options = ChromeParserOptions(use_gc=use_gc)
         self._remote_factory = remote_factory or ChromeRemote
         self._remote: ChromeRemote | None = None
@@ -1151,6 +1237,7 @@ class ChromeScraperSession:
             gate=self._gate,
             page_timeout_seconds=self._page_timeout_seconds,
             snapshot_dir=self._snapshot_dir,
+            city_slug=self._city_slug,
         )
         self._in_building_reader = InBuildingPageReader(
             remote,
