@@ -44,6 +44,17 @@ def _contacts_unknown(place: RawPlace) -> bool:
     return not place.contacts_known and not (place.phone or place.raw_website or place.socials)
 
 
+def _log_place(place: RawPlace, outcome: str, reason: str) -> None:
+    """
+    One line for every organization that was found, in a fixed form: scripts/niche_stats.py reads it.
+    The name is not logged (the log must not hold the content of leads, imports go this way too): the id is enough.
+
+    Outcomes: new (saved as a lead), known (a lead already in the database), chain (saved aside),
+    not-a-lead (the site works, or the score is low).
+    """
+    logger.info("Place [%s] %s (%s): %s", place.category, outcome, place.external_id, reason)
+
+
 def _why_not(site_status: str, score: int, place: RawPlace) -> str:
     """The reason a place is not a lead, for the log."""
     if site_status in (SITE_HAS_SITE, SITE_FOUND):
@@ -141,21 +152,21 @@ async def _process_and_save_places(
         )
 
         if not is_worth_saving(site_status, score):
-            logger.info("Not a lead: %r (%s): %s", place.name, place.external_id, _why_not(site_status, score, place))
+            _log_place(place, "not-a-lead", _why_not(site_status, score, place))
             continue
 
         qualified += 1
 
         if known_leads.find(place.name, place.phone, place.map_url, place.address) is not None:
-            logger.info("Not new: %r (%s): the lead is already in the database", place.name, place.external_id)
+            _log_place(place, "known", "the lead is already in the database")
             duplicates_skipped += 1
             continue
 
         is_chain = chains.is_chain(place.name)
         if is_chain:
-            logger.info(
-                "Not issued: %r (%s): a chain, saved aside to count its branches", place.name, place.external_id
-            )
+            _log_place(place, "chain", "a chain, saved aside to count its branches")
+        else:
+            _log_place(place, "new", f"site status {site_status}, score {score}")
         (chains_to_save if is_chain else leads_to_save).append(
             {
                 "external_id": place.external_id,

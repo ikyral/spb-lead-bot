@@ -296,7 +296,8 @@ async def test_a_working_site_is_named_as_the_reason(
     with caplog.at_level(logging.INFO, logger="src.services.pipeline"):
         stats = await pipeline._process_and_save_places(session, [_place()])
     assert stats["qualified"] == 0
-    assert "Not a lead: 'Улыбка' (2gis_1): the site works (https://smile.example), status site_found" in caplog.text
+    expected = "Place [dentist_clinic] not-a-lead (2gis_1): the site works (https://smile.example), status site_found"
+    assert expected in caplog.text
 
 
 async def test_a_low_score_is_named_with_the_numbers(
@@ -341,7 +342,7 @@ async def test_a_duplicate_found_after_the_check_is_named(
     with caplog.at_level(logging.INFO, logger="src.services.pipeline"):
         stats = await pipeline._process_and_save_places(session, [place])
     assert stats["duplicates_skipped"] == 1
-    assert "Not new: 'Улыбка' (2gis_1): the lead is already in the database" in caplog.text
+    assert "Place [dentist_clinic] known (2gis_1): the lead is already in the database" in caplog.text
 
 
 def test_cards_the_provider_leaves_out_are_named(caplog: pytest.LogCaptureFixture) -> None:
