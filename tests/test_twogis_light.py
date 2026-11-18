@@ -383,3 +383,63 @@ def test_a_stale_node_is_an_error_the_reader_can_retry() -> None:
     )
     with pytest.raises(ChromeRuntimeException, match="No node with given id"):
         remote.perform_click(node)
+
+
+# ---------- finding a link by a selector instead of reading the whole page ----------
+
+
+def _remote_for_lookup(tab: MagicMock) -> ChromeRemote:
+    remote = ChromeRemote(ChromeOptions(), [])
+    tab._stopped.is_set.return_value = False
+    remote._chrome_tab = tab
+    return remote
+
+
+def _tab_with_link(node_id: int = 7, backend_id: int = 70, href: str = "/spb/firm/101?stat=c3RhdA%3D%3D") -> MagicMock:
+    tab = MagicMock()
+    tab.DOM.getDocument.return_value = {"root": {"nodeId": 1}}
+    tab.DOM.querySelector.return_value = {"nodeId": node_id}
+    tab.DOM.describeNode.return_value = {
+        "node": {
+            "backendNodeId": backend_id,
+            "nodeType": 1,
+            "nodeName": "A",
+            "localName": "a",
+            "nodeValue": "",
+            "attributes": ["href", href],
+        }
+    }
+    return tab
+
+
+def test_a_link_is_found_by_its_address_without_reading_the_tree_of_the_page() -> None:
+    href = "/spb/firm/101?stat=c3RhdA%3D%3D"
+    tab = _tab_with_link(href=href)
+    node = _remote_for_lookup(tab).find_link_by_href(href)
+    assert node is not None
+    assert (node.id, node.backend_id, node.attributes["href"]) == (7, 70, href)
+    tab.DOM.getDocument.assert_called_once_with(depth=0)  # the root only, not the whole tree
+    tab.DOM.querySelector.assert_called_once_with(nodeId=1, selector=f'a[href="{href}"]')
+
+
+def test_quotes_and_backslashes_of_the_address_are_escaped_in_the_selector() -> None:
+    tab = _tab_with_link()
+    _remote_for_lookup(tab).find_link_by_href('/a"b\\c')
+    assert tab.DOM.querySelector.call_args.kwargs["selector"] == 'a[href="/a\\"b\\\\c"]'
+
+
+def test_a_link_that_is_not_there_is_none_and_nothing_more_is_asked() -> None:
+    tab = _tab_with_link(node_id=0)
+    assert _remote_for_lookup(tab).find_link_by_href("/spb/firm/9") is None
+    tab.DOM.describeNode.assert_not_called()
+
+
+def test_a_failure_of_the_browser_command_is_a_runtime_error_the_reader_can_fall_back_from() -> None:
+    import pychrome
+
+    from src.services.scraper.chrome.exceptions import ChromeRuntimeException
+
+    tab = _tab_with_link()
+    tab.DOM.querySelector.side_effect = pychrome.CallMethodException("DOM.querySelector error: bad selector")
+    with pytest.raises(ChromeRuntimeException, match="quick search of a link failed"):
+        _remote_for_lookup(tab).find_link_by_href("/spb/firm/101")

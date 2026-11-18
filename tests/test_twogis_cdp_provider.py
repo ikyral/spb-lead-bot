@@ -815,6 +815,199 @@ async def test_a_link_that_left_the_page_before_its_click_is_not_clicked(caplog:
     assert "Card 1/2 (firm 101): the link is no longer on the page" in caplog.text
 
 
+# ---------- a link is found by the browser itself, not by reading the whole page; what a failure looks like ----------
+
+PAGE_URL = "https://2gis.ru/spb/search/автосервис Калининский район?m=30.607964,60.009023/10"
+
+
+class QuickFinderRemote(ScriptedRemote):
+    """A tab that finds a link by its address at once (like ChromeRemote.find_link_by_href) and says its address."""
+
+    def __init__(self, script: Any, cards: dict[str, dict[str, Any]], *, missing: set[str] | None = None) -> None:
+        super().__init__(script, cards)
+        self.missing = missing or set()
+        self.quick_lookups = 0
+        self.fail_with: Exception | None = None
+
+    def find_link_by_href(self, href: str) -> DOMNode | None:
+        self.quick_lookups += 1
+        if self.fail_with is not None:
+            raise self.fail_with
+        if any(firm_id in href for firm_id in self.missing):
+            return None
+        return _link(900_000 + self.quick_lookups, href)
+
+    def execute_script(self, expression: str) -> Any:
+        if expression.startswith("String(location.href)"):
+            return PAGE_URL
+        return super().execute_script(expression)
+
+
+class SlowRemote(ScriptedRemote):
+    """The same tab without the quick search: every click needs a read of the whole page."""
+
+    def execute_script(self, expression: str) -> Any:
+        if expression.startswith("String(location.href)"):
+            return PAGE_URL
+        return super().execute_script(expression)
+
+
+async def test_a_quick_search_saves_a_read_of_the_whole_page_for_every_click(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ids = ["101", "102", "103"]
+    slow = SlowRemote(lambda n: ids, _cards(*ids))
+    quick = QuickFinderRemote(lambda n: ids, _cards(*ids))
+    for remote_ in (slow, quick):
+        harness = Harness(remote_)
+        try:
+            with caplog.at_level("INFO"):
+                page = await harness.provider.search(AUTO, KALININSKY)
+        finally:
+            await harness.provider.close()
+        assert [place.external_id for place in page.places] == ["2gis_101", "2gis_102", "2gis_103"]
+    assert slow.document_reads - quick.document_reads == 3  # one read of the whole page less for each click
+    assert quick.quick_lookups == 3
+    assert "quick searches of a link: 3" in caplog.text  # the line about the time of the reads, per page
+
+
+async def test_the_line_about_the_reads_of_the_page_has_the_count_the_least_the_most_and_the_sum(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    remote_ = QuickFinderRemote(lambda n: ["101"], _cards("101"))
+    harness = Harness(remote_)
+    try:
+        with caplog.at_level("INFO"):
+            await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    line = next(line for line in caplog.text.splitlines() if "Reads of the whole page:" in line)
+    assert re.search(
+        r"Reads of the whole page: \d+, the shortest [\d.]+ s, the longest [\d.]+ s, [\d.]+ s in all", line
+    )
+
+
+async def test_when_the_quick_search_fails_the_whole_page_is_read_instead(caplog: pytest.LogCaptureFixture) -> None:
+    from src.services.scraper.chrome.exceptions import ChromeRuntimeException
+
+    remote_ = QuickFinderRemote(lambda n: ["101", "102"], _cards("101", "102"))
+    remote_.fail_with = ChromeRuntimeException("quick search of a link failed: boom")
+    harness = Harness(remote_)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101", "2gis_102"]  # the old way still works
+    assert "Quick search of the link failed" in caplog.text and "the whole page is read instead" in caplog.text
+
+
+async def test_a_link_the_quick_search_misses_is_looked_for_in_the_whole_page_before_it_is_given_up(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The quick search says 101 is not there, but the whole page still lists it: the click goes on with that link.
+    remote_ = QuickFinderRemote(lambda n: ["101", "102"], _cards("101", "102"), missing={"101"})
+    harness = Harness(remote_)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101", "2gis_102"]
+    assert "no longer on the page" not in caplog.text
+
+
+async def test_the_state_of_the_page_is_logged_when_a_link_has_left_it(caplog: pytest.LogCaptureFixture) -> None:
+    remote_ = QuickFinderRemote(lambda n: ["101", "102"] if n <= 6 else ["102", "103"], _cards("101", "102", "103"))
+    remote_.missing = {"101"}
+    harness = Harness(remote_)
+    try:
+        with caplog.at_level("INFO"):
+            await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    text = caplog.text
+    assert "Card 1/2 (firm 101): the link is no longer on the page" in text
+    state = next(line for line in text.splitlines() if "Page state (the link is no longer on the page)" in line)
+    assert "address https://2gis.ru/spb/search/автосервис Калининский район?m=30.607964" in state
+    assert "/firm/ in the address: False" in state and "map position (m=) in the address: True" in state
+    assert "2 links to organizations" in state and "'firm 102'" in state and "'firm 103'" in state
+    assert "the last read of the whole page took" in state
+
+
+async def test_three_cards_in_a_row_that_were_not_read_describe_the_page_and_save_a_snapshot_when_asked(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake = SlowRemote(lambda n: ["101", "102", "103", "104"], {})  # nothing answers to any click
+    provider = TwoGisCdpProvider(
+        CdpOptions(),
+        session_factory=lambda gate: ChromeScraperSession(  # type: ignore[arg-type,return-value]
+            gate=gate, remote_factory=lambda _o, _p: fake, snapshot_dir=tmp_path / "snap"
+        ),
+        robots_loader=lambda: _rules(),
+        sleep=lambda _seconds: None,
+        notify=lambda _text: None,
+    )
+    try:
+        with caplog.at_level("INFO"), pytest.raises(ProviderFormatError):
+            await provider.search(AUTO, KALININSKY)
+    finally:
+        await provider.close()
+    assert "Page state (several cards in a row could not be read)" in caplog.text
+    failures = list((tmp_path / "snap").glob("failure_*.html"))
+    assert len(failures) == 1
+    summary = json.loads(failures[0].with_suffix(".json").read_text(encoding="utf-8"))
+    assert summary["reason"].startswith("3 карточки подряд") and summary["links_in_the_last_read"][0] == "firm 101"
+
+
+async def test_without_a_snapshot_folder_nothing_is_saved_when_the_page_is_left(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = SlowRemote(lambda n: ["101", "102", "103"], {})
+    harness = Harness(fake)
+    try:
+        with caplog.at_level("INFO"), pytest.raises(ProviderFormatError):
+            await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert "Page state (several cards in a row could not be read)" in caplog.text  # the log still says what it saw
+    assert "Snapshot of the page saved" not in caplog.text
+
+
+def test_only_the_three_latest_snapshots_are_kept(tmp_path: Path) -> None:
+    import os
+
+    for number in range(5):
+        for suffix in (".html", ".json"):
+            path = tmp_path / f"search_{number}{suffix}"
+            path.write_text("x", encoding="utf-8")
+            os.utime(path, (1_000_000 + number, 1_000_000 + number))
+    parsers._BaseChromePageReader._prune_snapshots(tmp_path)
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "search_2.html",
+        "search_2.json",
+        "search_3.html",
+        "search_3.json",
+        "search_4.html",
+        "search_4.json",
+    ]
+
+
+async def test_the_wait_for_the_list_counts_reads_and_seconds_and_has_a_longer_limit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    assert parsers._LINKS_SETTLE_TIMEOUT_SECONDS == 30.0
+    remote_ = SlowRemote(lambda n: ["101"], _cards("101"))
+    harness = Harness(remote_)
+    try:
+        with caplog.at_level("INFO"):
+            await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    line = next(line for line in caplog.text.splitlines() if "The list of results has settled" in line)
+    assert "the same 3 reads in a row, 3 reads in all" in line and re.search(r"[\d.]+ s, 1 links", line)
+
+
 # ---------- 6. blocks recorded by the existing mechanism ----------
 
 

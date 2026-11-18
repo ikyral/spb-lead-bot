@@ -68,7 +68,9 @@ _STALE_DOM_TIMEOUT_SECONDS = 15.0
 # the clicks wait until it has not changed this many reads in a row, but not longer than the limit.
 _LINKS_STABLE_READS = 2
 _LINKS_POLL_SECONDS = 1.0
-_LINKS_SETTLE_TIMEOUT_SECONDS = 10.0
+_LINKS_SETTLE_TIMEOUT_SECONDS = 30.0
+# Snapshots of a diagnostic run: only the latest ones are kept, the disk of a small server is nearly full.
+_SNAPSHOTS_KEPT = 3
 _SETTLE_POLL_SECONDS = 0.2
 _NETWORK_ERROR_MARKERS: tuple[str, ...] = (
     "ERR_INTERNET_DISCONNECTED",
@@ -346,6 +348,91 @@ class _BaseChromePageReader:
         self._page_timeout_seconds = max(10.0, page_timeout_seconds)
         # For a diagnostic run: every search page is saved here, to see what the code saw.
         self._snapshot_dir = snapshot_dir
+        # How long the reads of the whole page took (a slow read says that the machine is short of memory), and what
+        # links to organizations the last read showed.
+        self._document_seconds: list[float] = []
+        self._lookup_seconds: list[float] = []
+        self._last_document_seconds = 0.0
+        self._last_firm_hrefs: list[str] = []
+
+    def _read_document(self) -> DOMNode:
+        """The whole tree of the page, with the time it took and the links to organizations it showed."""
+        started = time.monotonic()
+        document = self._remote.get_document(full=True)
+        self._last_document_seconds = time.monotonic() - started
+        self._document_seconds.append(self._last_document_seconds)
+        self._last_firm_hrefs = [
+            node.attributes.get("href", "")
+            for node in document.search(is_search_result_link)
+            if _FIRM_PATH_RE.search(node.attributes.get("href", ""))
+        ]
+        return document
+
+    def _log_reading_time(self) -> None:
+        """One line for a page: how many reads of the whole page, how long they took, and the quick searches."""
+        seconds = self._document_seconds
+        if seconds:
+            logger.info(
+                "Reads of the whole page: %d, the shortest %.1f s, the longest %.1f s, %.1f s in all; "
+                "quick searches of a link: %d, %.1f s in all",
+                len(seconds),
+                min(seconds),
+                max(seconds),
+                sum(seconds),
+                len(self._lookup_seconds),
+                sum(self._lookup_seconds),
+            )
+
+    def _log_page_state(self, why: str) -> None:
+        """What the page looks like now: the address, the links the last read showed, and how slow the reads were."""
+        try:
+            raw = self._remote.execute_script("String(location.href)")
+        except ChromeException:
+            raw = None
+        url = str(raw or "")
+        parts = urlsplit(url)
+        logger.warning(
+            "Page state (%s): address %s; /firm/ in the address: %s; map position (m=) in the address: %s; "
+            "%d links to organizations in the last read of the page, the first ones: %s; "
+            "the last read of the whole page took %.1f s",
+            why,
+            unquote(url) or "unknown",
+            "/firm/" in parts.path,
+            "m=" in parts.query,
+            len(self._last_firm_hrefs),
+            [describe_link(href) for href in self._last_firm_hrefs[:3]],
+            self._last_document_seconds,
+        )
+
+    def _write_snapshot(self, prefix: str, extra: dict[str, Any], suffix: str = "") -> None:
+        """The page (HTML) and a JSON next to it in the folder of a diagnostic run; only the latest ones are kept."""
+        directory = self._snapshot_dir
+        if directory is None:
+            return
+        try:
+            url, title, html = self._remote.read_current_page()
+            directory.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")  # a name of a file, the local time
+            stem = directory / f"{prefix}_{stamp}{suffix}"
+            stem.with_suffix(".html").write_text(html, encoding="utf-8")
+            summary = {"url": url, "title": title, **extra}
+            stem.with_suffix(".json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+            logger.info("Snapshot of the page saved: %s", stem)
+            self._prune_snapshots(directory)
+        except (OSError, ChromeException):
+            logger.warning("Could not save the snapshot of the page", exc_info=True)
+
+    @staticmethod
+    def _prune_snapshots(directory: Path) -> None:
+        """Delete all but the latest `_SNAPSHOTS_KEPT` snapshots (HTML with its JSON)."""
+        pages = sorted(directory.glob("*.html"), key=lambda path: (path.stat().st_mtime_ns, path.name))
+        for old in pages[:-_SNAPSHOTS_KEPT]:
+            old.unlink(missing_ok=True)
+            old.with_suffix(".json").unlink(missing_ok=True)
+
+    def _save_failure_snapshot(self, reason: str) -> None:
+        links = [describe_link(href) for href in self._last_firm_hrefs]
+        self._write_snapshot("failure", {"reason": reason, "links_in_the_last_read": links})
 
     def _open(self, url: str) -> int | None:
         """Navigate to `url` if the gate allows it, clearing stale network records first."""
@@ -413,7 +500,7 @@ class _BaseChromePageReader:
         A card that could not be read after its attempts is left and the next one is tried; after
         `_MAX_UNREAD_IN_A_ROW` such cards in a row the page is left (`unreadable`), so the rest of the budget is kept.
         """
-        document = self._remote.get_document(full=True)
+        document = self._read_document()
         nodes = find_links(document)
         target_items: list[tuple[str, DOMNode]] = []
         seen_hrefs: set[str] = set()
@@ -470,12 +557,27 @@ class _BaseChromePageReader:
                         "страницу или код надо проверить, это не блокировка"
                     )
                     logger.warning("Search page left: %s", reason)
+                    self._log_page_state("several cards in a row could not be read")
+                    self._save_failure_snapshot(reason)
                     return CollectedCards(collected, collected_urls, attempted_hrefs, None, False, reason)
 
         return CollectedCards(collected, collected_urls, attempted_hrefs, None, False)
 
     def _find_node_by_href(self, find_links: Callable[[DOMNode], list[DOMNode]], target_href: str) -> DOMNode | None:
-        document = self._remote.get_document(full=True)
+        # The browser finds a link by its address at once; reading the whole page for every click is slow and heavy.
+        finder = getattr(self._remote, "find_link_by_href", None)
+        if finder is not None:
+            started = time.monotonic()
+            try:
+                found = finder(target_href)
+            except ChromeException as exc:
+                logger.info("Quick search of the link failed (%s): the whole page is read instead", exc)
+            else:
+                self._lookup_seconds.append(time.monotonic() - started)
+                if found is not None:
+                    return found
+                # Not found: the whole page is read to be sure, and it tells what the page looks like now.
+        document = self._read_document()
         for node in find_links(document):
             if node.attributes.get("href") == target_href:
                 return node
@@ -508,6 +610,7 @@ class _BaseChromePageReader:
             current_node = find_node()
             if current_node is None:
                 logger.info("%s: the link is no longer on the page", label)
+                self._log_page_state("the link is no longer on the page")
                 return None, "", None, "the link is no longer on the page"
 
             decision = self._gate(GateAction("card", firm_id=firm_id))
@@ -667,29 +770,36 @@ class SearchPageReader(_BaseChromePageReader):
         """
         Wait until the links to organizations are the same, in the same order, `_LINKS_STABLE_READS` reads in a row.
 
-        Not longer than `_LINKS_SETTLE_TIMEOUT_SECONDS`: after that the page is read as it is.
+        That is at least three reads, however fast. Not longer than `_LINKS_SETTLE_TIMEOUT_SECONDS`: after that the
+        page is read as it is. On a machine short of memory one read takes seconds, so the count matters as much as
+        the time: both are written to the log.
         """
-        deadline = time.monotonic() + _LINKS_SETTLE_TIMEOUT_SECONDS
+        started = time.monotonic()
+        deadline = started + _LINKS_SETTLE_TIMEOUT_SECONDS
         previous: tuple[str, ...] | None = None
         same_in_a_row = 0
         reads = 0
         while True:
-            document = self._remote.get_document(full=True)
+            self._read_document()
             reads += 1
-            current = tuple(
-                node.attributes.get("href", "")
-                for node in document.search(is_search_result_link)
-                if _FIRM_PATH_RE.search(node.attributes.get("href", ""))
-            )
+            current = tuple(self._last_firm_hrefs)
             same_in_a_row = same_in_a_row + 1 if current == previous else 0
             previous = current
             if same_in_a_row >= _LINKS_STABLE_READS:
                 logger.info(
-                    "The list of results has settled: the same %d reads in a row, %d links", reads, len(current)
+                    "The list of results has settled: the same %d reads in a row, %d reads in all, %.1f s, %d links",
+                    same_in_a_row + 1,
+                    reads,
+                    time.monotonic() - started,
+                    len(current),
                 )
                 return
             if time.monotonic() >= deadline:
-                logger.info("The list of results was still changing after %d reads: it is read as it is", reads)
+                logger.info(
+                    "The list of results was still changing after %d reads, %.1f s: it is read as it is",
+                    reads,
+                    time.monotonic() - started,
+                )
                 return
             time.sleep(_LINKS_POLL_SECONDS)
 
@@ -717,28 +827,21 @@ class SearchPageReader(_BaseChromePageReader):
 
     def _save_snapshot(self, firm_hrefs: list[str], all_hrefs: list[str], pagination: int) -> None:
         """The page as it is (HTML) and the list of its result links, in a folder of a diagnostic run."""
-        directory = self._snapshot_dir
-        if directory is None:
+        if self._snapshot_dir is None:
             return
-        try:
-            url, title, html = self._remote.read_current_page()
-            directory.mkdir(parents=True, exist_ok=True)
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # a name of a file, the local time
-            stem = directory / f"search_{stamp}_p{self._current_page}"
-            stem.with_suffix(".html").write_text(html, encoding="utf-8")
-            links = [
-                {"position": number, "link": describe_link(href), "clicked": href in firm_hrefs}
-                for number, href in enumerate(dict.fromkeys(all_hrefs), start=1)
-            ]
-            summary = {"url": url, "title": title, "page": self._current_page, "next_pages": pagination, "links": links}
-            stem.with_suffix(".json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-            logger.info("Snapshot of the search page saved: %s", stem)
-        except (OSError, ChromeException):
-            logger.warning("Could not save the snapshot of the search page", exc_info=True)
+        links = [
+            {"position": number, "link": describe_link(href), "clicked": href in firm_hrefs}
+            for number, href in enumerate(dict.fromkeys(all_hrefs), start=1)
+        ]
+        self._write_snapshot(
+            "search",
+            {"page": self._current_page, "next_pages": pagination, "links": links},
+            suffix=f"_p{self._current_page}",
+        )
 
     def _page_has_search_links_or_empty(self) -> bool:
         try:
-            doc = self._remote.get_document(full=True)
+            doc = self._read_document()
         except ChromeException:
             return False
         if doc.search(is_search_result_link):
@@ -750,7 +853,7 @@ class SearchPageReader(_BaseChromePageReader):
         return document.search(is_search_result_link)
 
     def _all_search_hrefs(self) -> set[str]:
-        document = self._remote.get_document(full=True)
+        document = self._read_document()
         return {node.attributes["href"] for node in self._find_search_links(document) if "href" in node.attributes}
 
     def _wait_new_links_loaded(self, block_checker: BlockChecker | None) -> tuple[PageSnapshot | None, str | None]:
@@ -776,7 +879,7 @@ class SearchPageReader(_BaseChromePageReader):
         return None, None
 
     def _advance_one_page(self, *, block_checker: BlockChecker | None) -> tuple[bool, ScrapedSearchResult | None]:
-        document = self._remote.get_document(full=True)
+        document = self._read_document()
         current_hrefs = {
             node.attributes["href"] for node in self._find_search_links(document) if "href" in node.attributes
         }
@@ -816,8 +919,10 @@ class SearchPageReader(_BaseChromePageReader):
         max_items: int | None,
         block_checker: BlockChecker | None,
     ) -> ScrapedSearchResult:
+        self._document_seconds = []
+        self._lookup_seconds = []
         self._wait_for_stable_links()
-        document = self._remote.get_document(full=True)
+        document = self._read_document()
         all_nodes = self._find_search_links(document)
         all_hrefs = {node.attributes["href"] for node in all_nodes if "href" in node.attributes}
         pages_ahead = _extract_pagination_links(document, self._current_page)
@@ -864,6 +969,7 @@ class SearchPageReader(_BaseChromePageReader):
             json_urls=item_urls,
             include_state=True,
         )
+        self._log_reading_time()
         return ScrapedSearchResult(
             snapshot=snapshot,
             items=items,
@@ -942,7 +1048,7 @@ class InBuildingPageReader(_BaseChromePageReader):
             if stopped:
                 break
 
-            doc_after = self._remote.get_document(full=True)
+            doc_after = self._read_document()
             remaining_new = {
                 node.attributes["href"]
                 for node in doc_after.search(is_in_building_firm_link)
