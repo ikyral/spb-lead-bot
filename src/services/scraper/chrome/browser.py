@@ -75,6 +75,15 @@ class ChromeBrowser:
         if chrome_options.start_maximized:
             self._chrome_cmd.append("--start-maximized")
 
+        if chrome_options.light:
+            self._chrome_cmd += [
+                "--renderer-process-limit=1",
+                "--disable-extensions",
+                # /dev/shm is small on a server: Chrome would keep its shared memory in /tmp instead.
+                "--disable-dev-shm-usage",
+                "--blink-settings=imagesEnabled=false",
+            ]
+
         if chrome_options.headless:
             # The new headless mode draws the WebGL map of 2GIS; the old one does not.
             self._chrome_cmd += ["--headless=new", "--window-size=1920,1080"]

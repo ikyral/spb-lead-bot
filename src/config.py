@@ -124,7 +124,7 @@ class Settings(BaseSettings):
     SCRAPER_CDP_MAX_DELAY_SECONDS: float = Field(default=8.0, ge=3.0)
     # Считаются открытия страниц, клики по пагинации и каждая открытая карточка.
     SCRAPER_CDP_MAX_PAGES_PER_RUN: int = Field(default=60, ge=1, le=200)
-    SCRAPER_CDP_MAX_RESULTS_PER_RUN: int = Field(default=100, ge=1, le=300)
+    SCRAPER_CDP_MAX_RESULTS_PER_RUN: int = Field(default=30, ge=1, le=300)
     SCRAPER_CDP_MIN_HOURS_BETWEEN_RUNS: float = Field(default=20.0, ge=0.0)
     SCRAPER_CDP_PAGE_TIMEOUT_SECONDS: float = Field(default=45.0, ge=5.0)
     # Пусто = найти Chrome автоматически.
@@ -142,6 +142,12 @@ class Settings(BaseSettings):
     TWOGIS_LANG: str = "ru-RU"
     # На сервере браузер идёт в обычном режиме под Xvfb; headless только если экрана нет совсем.
     TWOGIS_HEADLESS: bool = False
+    # Память Chrome. Лимит кучи V8 в МБ (0 = как в Chrome: 75% оперативной памяти) и облегчённый режим: без картинок,
+    # без шрифтов, тайлов карты и стилей, один процесс отрисовки, без расширений.
+    TWOGIS_CHROME_MEMORY_MB: int = Field(default=300, ge=0, le=64000)
+    TWOGIS_LIGHT_MODE: bool = True
+    # Через сколько прочитанных карточек перезапускать Chrome (профиль остаётся), 0 = не перезапускать.
+    TWOGIS_RESTART_EVERY_CARDS: int = Field(default=20, ge=0, le=1000)
 
     # Looking for the site and contacts of leads on Google, only with collect_cli.py --assisted --google.
     # The upper bounds keep it a person's pace whatever is configured; pauses are fixed in the code.
@@ -210,6 +216,13 @@ class Settings(BaseSettings):
     @classmethod
     def _check_proxy_country(cls, value: str) -> str:
         return normalize_country(value)
+
+    @field_validator("TWOGIS_CHROME_MEMORY_MB")
+    @classmethod
+    def _check_chrome_memory(cls, value: int) -> int:
+        if 0 < value < 100:
+            raise ValueError("лимит памяти Chrome: от 100 МБ или 0 (по умолчанию Chrome)")
+        return value
 
     @field_validator("TWOGIS_TIMEZONE")
     @classmethod

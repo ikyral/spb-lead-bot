@@ -51,6 +51,8 @@ class ChromeOptions(BaseModel):
     silent_browser: bool = True
     memory_limit: PositiveInt = default_memory_limit()
     headless: bool = False
+    # The light mode for a small machine: no images, fonts and map tiles, one renderer, no extensions.
+    light: bool = False
     # scheme://[login:password@]host:port. SecretStr keeps the password out of repr() and logs.
     proxy: SecretStr | None = None
     # Required country of the exit IP, checked in the browser before the first request to 2GIS; "OFF" = no check.

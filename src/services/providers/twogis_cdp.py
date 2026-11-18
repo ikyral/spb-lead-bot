@@ -69,7 +69,7 @@ class CdpOptions:
     min_delay_seconds: float = 3.0
     max_delay_seconds: float = 8.0
     max_pages_per_run: int = 60
-    max_results_per_run: int = 100
+    max_results_per_run: int = 30
     min_hours_between_runs: float = 20.0
     page_timeout_seconds: float = 45.0
     profile_dir: Path | None = None
@@ -80,6 +80,11 @@ class CdpOptions:
     timezone: str | None = None
     lang: str | None = None
     headless: bool = False
+    # The memory of Chrome: the limit of the V8 heap in MB (0 = what Chrome takes by itself), the light mode
+    # (no images, fonts, map tiles), and after how many read cards Chrome is started anew (0 = never).
+    chrome_memory_mb: int = 0
+    light: bool = False
+    restart_every_cards: int = 0
     # Only the command line of the collector sets this, for one run: see --ignore-interval.
     ignore_interval: bool = False
 
@@ -109,6 +114,9 @@ class CdpOptions:
             timezone=settings.TWOGIS_TIMEZONE,
             lang=settings.TWOGIS_LANG,
             headless=settings.TWOGIS_HEADLESS,
+            chrome_memory_mb=settings.TWOGIS_CHROME_MEMORY_MB,
+            light=settings.TWOGIS_LIGHT_MODE,
+            restart_every_cards=settings.TWOGIS_RESTART_EVERY_CARDS,
             ignore_interval=ignore_interval,
         )
 
@@ -324,9 +332,15 @@ class TwoGisCdpProvider(BaseMapProvider):
             result = payload.get("result")
             items = result.get("items") if isinstance(result, dict) else None
             for item in items if isinstance(items, list) else []:
-                if not isinstance(item, dict) or item.get("type") not in (None, "branch"):
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") not in (None, "branch"):
+                    logger.info(
+                        "2gis_cdp: %r is left out: not an organization (type %r)", item.get("name"), item.get("type")
+                    )
                     continue
                 if read_card_contacts(item) is None:
+                    logger.info("2gis_cdp: %r is left out: the card does not say its contacts", item.get("name"))
                     continue
                 cards.append(item)
         return parse_catalog_items(
@@ -350,6 +364,9 @@ class TwoGisCdpProvider(BaseMapProvider):
             timezone=self._options.timezone,
             lang=self._options.lang,
             headless=self._options.headless,
+            memory_limit_mb=self._options.chrome_memory_mb,
+            light=self._options.light,
+            restart_every_cards=self._options.restart_every_cards,
         )
 
     async def _started_session(self) -> CdpSession:

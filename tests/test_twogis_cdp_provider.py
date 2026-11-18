@@ -268,7 +268,7 @@ def test_pause_below_three_seconds_cannot_be_configured() -> None:
     defaults = CdpOptions.from_settings(_settings())
     assert (defaults.min_delay_seconds, defaults.max_delay_seconds) == (3.0, 8.0)
     assert defaults.max_pages_per_run == 60
-    assert defaults.max_results_per_run == 100
+    assert defaults.max_results_per_run == 30
 
 
 async def test_every_click_and_page_change_waits_three_to_eight_seconds() -> None:

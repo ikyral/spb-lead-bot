@@ -23,6 +23,7 @@ from src.services.api_client import MAX_RESPONSE_BYTES
 from .browser import ChromeBrowser
 from .dom import DOMNode
 from .exceptions import ChromeException, ChromeRuntimeException, ProxyError
+from .filters import HEAVY_RESOURCE_PATTERNS
 from .proxy import IP_CHECK_SERVICES, ProxySettings, extract_ip_info, parse_proxy
 from .utils import ensure_local_cdp_url, wait_until_finished
 
@@ -109,6 +110,8 @@ class ChromeRemote:
         # What the check before the first request found out: the IP the sites see, and its country.
         self.exit_ip: str | None = None
         self.exit_country: str | None = None
+        # How many requests for heavy resources the browser refused (the light mode), for the log.
+        self.blocked_count = 0
 
     @wait_until_finished(timeout=_CONNECT_TIMEOUT_SECONDS)
     def _connect_interface(self) -> bool:
@@ -238,6 +241,9 @@ class ChromeRemote:
                     self._response_queues[pattern].put(response)
 
         def loading_failed(**kwargs: Any) -> None:
+            if kwargs.get("blockedReason") == "inspector":
+                self.blocked_count += 1
+                return  # our own refusal, not a failure of the site
             error_text = kwargs.get("errorText")
             blocked_reason = kwargs.get("blockedReason")
             bits = []
@@ -306,12 +312,24 @@ class ChromeRemote:
         self._chrome_tab.Runtime.enable()
         self._chrome_tab.Log.enable()
         self._apply_locale()
+        self._block_heavy_resources()
 
         # Chrome ignores the login in --proxy-server, so the proxy's request for it is answered here.
         if self._proxy is not None and self._proxy.has_auth:
             self._chrome_tab.Fetch.requestPaused = fetch_request_paused
             self._chrome_tab.Fetch.authRequired = fetch_auth_required
             self._chrome_tab.Fetch.enable(handleAuthRequests=True, patterns=[{"urlPattern": "*"}])
+
+    def _block_heavy_resources(self) -> None:
+        """The light mode: the browser does not even ask for what only draws the page."""
+        if not self._chrome_options.light:
+            return
+        import pychrome
+
+        try:
+            self._chrome_tab.Network.setBlockedURLs(urls=list(HEAVY_RESOURCE_PATTERNS))
+        except pychrome.CallMethodException as exc:
+            logger.warning("Could not block the heavy resources, the browser stays heavier: %s", exc)
 
     def _apply_locale(self) -> None:
         """The timezone of the browser follows the place of the proxy; in headless mode the window gets a size."""
@@ -539,6 +557,8 @@ class ChromeRemote:
         """Close CDP tab, stop Chrome browser process, and release queues."""
         from requests.exceptions import RequestException
 
+        if self.blocked_count:
+            logger.info("The browser refused %d requests for heavy resources", self.blocked_count)
         tab, self._chrome_tab = self._chrome_tab, None
         browser, self._chrome_browser = self._chrome_browser, None
         self._chrome_interface = None

@@ -828,6 +828,9 @@ class ChromeScraperSession:
         timezone: str | None = None,
         lang: str | None = None,
         headless: bool = False,
+        memory_limit_mb: int = 0,
+        light: bool = False,
+        restart_every_cards: int = 0,
     ) -> None:
         self._gate = gate
         self._page_timeout_seconds = page_timeout_seconds
@@ -838,11 +841,17 @@ class ChromeScraperSession:
             start_maximized=True,
             silent_browser=silent_browser,
             headless=headless,
+            light=light,
             proxy=proxy,
             proxy_country=proxy_country,
             timezone=timezone,
             lang=lang,
         )
+        if memory_limit_mb > 0:
+            self._chrome_options.memory_limit = memory_limit_mb
+        # Chrome is started anew after so many read cards (its memory grows with every page); 0 = never.
+        self._restart_every_cards = restart_every_cards
+        self._cards_since_start = 0
         self._parser_options = ChromeParserOptions(use_gc=use_gc)
         self._remote_factory = remote_factory or ChromeRemote
         self._remote: ChromeRemote | None = None
@@ -869,6 +878,7 @@ class ChromeScraperSession:
         remote = self._remote_factory(self._chrome_options, [ITEM_RESPONSE_PATTERN])
         remote.start()
         self._remote = remote
+        self._cards_since_start = 0
         self._search_reader = SearchPageReader(
             remote,
             self._parser_options,
@@ -881,6 +891,16 @@ class ChromeScraperSession:
             gate=self._gate,
             page_timeout_seconds=self._page_timeout_seconds,
         )
+
+    def _restart_sync(self) -> None:
+        """Close Chrome and start it again. The profile stays, so the cookies stay too."""
+        logger.info("Chrome is started anew after %d cards", self._cards_since_start)
+        remote, self._remote = self._remote, None
+        self._search_reader = None
+        self._in_building_reader = None
+        if remote is not None:
+            remote.stop()
+        self._start_sync()
 
     def _require_remote(self) -> ChromeRemote:
         if self._remote is None:
@@ -961,7 +981,12 @@ class ChromeScraperSession:
 
         if self._search_reader is None:
             raise ChromeRuntimeException("ChromeScraperSession не запущена")
-        return self._search_reader.read_page(
+        if self._restart_every_cards and self._cards_since_start >= self._restart_every_cards:
+            # The reader of the new browser opens the search page anew and walks to the asked page.
+            self._restart_sync()
+            if self._search_reader is None:
+                raise ChromeRuntimeException("ChromeScraperSession не запущена")
+        result = self._search_reader.read_page(
             url,
             page=page,
             max_items=max_items,
@@ -969,6 +994,8 @@ class ChromeScraperSession:
             reset=reset,
             continue_current=continue_current,
         )
+        self._cards_since_start += len(result.items)
+        return result
 
     async def read_page(self) -> PageSnapshot | None:
         """Read current page URL/title/HTML/state without navigating."""
