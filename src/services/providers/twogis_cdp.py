@@ -59,6 +59,9 @@ logger = logging.getLogger(__name__)
 PROVIDER_NAME: str = "2gis_cdp"
 # Below this no pause is possible, whatever the settings say.
 MIN_PAUSE_SECONDS: float = 3.0
+# 2GIS answers 404 to a search that found nothing ("Точных совпадений нет"). That is an empty result, but a ban could
+# look the same, so this many such answers in a row, with nothing found in between, are taken for a refusal.
+MAX_EMPTY_SEARCHES_IN_A_ROW: int = 3
 
 
 @dataclass(frozen=True)
@@ -171,6 +174,7 @@ class TwoGisCdpProvider(BaseMapProvider):
         self._blocked: str | None = None
         self._budget_ended = False
         self._proxy_failure: ProviderProxyError | None = None
+        self._empty_in_a_row = 0
         self.run_counted = False
 
     async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:
@@ -219,6 +223,8 @@ class TwoGisCdpProvider(BaseMapProvider):
         reason = result.blocked_reason
         if reason is None and not result.stopped:
             reason = self._page_problem(result)
+        if reason is None:
+            reason = self._count_empty_searches(result)
         if reason is not None:
             self._stop_on_block(reason)
             raise ProviderBlockedError(reason, partial=places)
@@ -243,6 +249,7 @@ class TwoGisCdpProvider(BaseMapProvider):
         self._blocked = None
         self._budget_ended = False
         self._proxy_failure = None
+        self._empty_in_a_row = 0
         self.run_counted = False
         if session is not None:
             await session.close()
@@ -306,14 +313,30 @@ class TwoGisCdpProvider(BaseMapProvider):
         blocked = self._block_reason(snapshot)
         if blocked is not None:
             return blocked
-        if result.not_found:
-            return "сайт ответил кодом 404 на страницу поиска"
         if not snapshot.title.strip():
             return "страница пришла пустой"
         if not twogis_site.is_site_response(snapshot.final_url):
             return "открылась страница не с 2ГИС"
+        if result.not_found:
+            # A page of 2GIS itself, with no sign of a captcha: the search found nothing. The target is left out.
+            logger.info(
+                "2gis_cdp: the search answered 404, taken as nothing found: %s, title %r",
+                snapshot.final_url,
+                snapshot.title,
+            )
+            return None
         if result.links_found == 0 and not result.nothing_found:
             return "страница поиска не распознана: нет ни организаций, ни ответа «ничего не найдено»"
+        return None
+
+    def _count_empty_searches(self, result: ScrapedSearchResult) -> str | None:
+        """Several 404 searches in a row are not a coincidence of empty niches: that is a refusal."""
+        if not result.not_found:
+            self._empty_in_a_row = 0
+            return None
+        self._empty_in_a_row += 1
+        if self._empty_in_a_row >= MAX_EMPTY_SEARCHES_IN_A_ROW:
+            return f"сайт ответил кодом 404 на {self._empty_in_a_row} поиска подряд, ничего не найдено"
         return None
 
     def _stop_on_block(self, reason: str) -> None:
