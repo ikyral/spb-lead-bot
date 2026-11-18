@@ -66,6 +66,8 @@ MIN_PAUSE_SECONDS: float = 3.0
 # 2GIS answers 404 to a search that found nothing ("Точных совпадений нет"). That is an empty result, but a ban could
 # look the same, so this many such answers in a row, with nothing found in between, are taken for a refusal.
 MAX_EMPTY_SEARCHES_IN_A_ROW: int = 5
+# A click that led away from the search page ends that page; this many times in a run stop the run.
+MAX_LEFT_SEARCH_PAGES: int = 2
 
 
 @dataclass(frozen=True)
@@ -182,6 +184,7 @@ class TwoGisCdpProvider(BaseMapProvider):
         self._budget_ended = False
         self._proxy_failure: ProviderProxyError | None = None
         self._empty_in_a_row = 0
+        self._left_search_pages = 0
         self.run_counted = False
 
     async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:
@@ -241,6 +244,21 @@ class TwoGisCdpProvider(BaseMapProvider):
             # Cards of this page could not be read, one after another: not a refusal of the site, but not to go on.
             logger.warning("2gis_cdp stopped: %s", result.unreadable)
             raise ProviderFormatError(result.unreadable, partial=places)
+        if result.left_search is not None:
+            # Not a refusal and not a card that could not be read: the page is over, the next query goes on.
+            self._left_search_pages += 1
+            logger.warning(
+                "2gis_cdp: a click led away from the search page (to %s), the page is left (%d in this run)",
+                result.left_search,
+                self._left_search_pages,
+            )
+            if self._left_search_pages >= MAX_LEFT_SEARCH_PAGES:
+                reason = (
+                    f"клик увёл со страницы поиска {self._left_search_pages}-й раз за сбор (на {result.left_search}): "
+                    "страницу или код надо проверить, это не блокировка"
+                )
+                raise ProviderFormatError(reason, partial=places)
+            return SearchPage(places=places, has_more=False)
         stop = self._stop_error
         if stop is not None:
             if isinstance(stop, ProviderBudgetExhausted):
@@ -261,6 +279,7 @@ class TwoGisCdpProvider(BaseMapProvider):
         self._budget_ended = False
         self._proxy_failure = None
         self._empty_in_a_row = 0
+        self._left_search_pages = 0
         self.run_counted = False
         if session is not None:
             await session.close()
@@ -402,6 +421,7 @@ class TwoGisCdpProvider(BaseMapProvider):
             light=self._options.light,
             restart_every_cards=self._options.restart_every_cards,
             snapshot_dir=self._options.snapshot_dir,
+            city_slug=self._options.city_slug,
         )
 
     async def _started_session(self) -> CdpSession:
