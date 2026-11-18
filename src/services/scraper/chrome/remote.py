@@ -476,6 +476,31 @@ class ChromeRemote:
         tree = tab.DOM.getDocument(depth=-1 if full else 1)
         return DOMNode(**tree["root"])
 
+    def find_link_by_href(self, href: str) -> DOMNode | None:
+        """
+        Find the link with exactly this `href` without reading the whole page.
+
+        The whole tree of a page of 2GIS is a lot of nodes and takes seconds to read and to turn into objects on
+        a small machine; the browser itself finds one element by a selector at once. Returns None if there is no
+        such link. A failure of the browser's command is a ChromeRuntimeException: the caller may read the whole
+        page instead.
+        """
+        import pychrome
+
+        tab = self._require_tab()
+        # The value sits in double quotes of the selector: a backslash and a quote of its own are escaped.
+        escaped = href.replace("\\", "\\\\").replace('"', '\\"')
+        try:
+            root = tab.DOM.getDocument(depth=0)["root"]["nodeId"]
+            node_id = tab.DOM.querySelector(nodeId=root, selector=f'a[href="{escaped}"]')["nodeId"]
+            if not node_id:
+                return None
+            described = dict(tab.DOM.describeNode(nodeId=node_id)["node"])
+        except (pychrome.CallMethodException, KeyError) as exc:
+            raise ChromeRuntimeException(f"quick search of a link failed: {str(exc)[:80]}") from exc
+        described["nodeId"] = node_id
+        return DOMNode(**described)
+
     def execute_script(self, expression: str) -> Any:
         """Evaluate JavaScript expression in page context and return its JSON value."""
         tab = self._require_tab()
