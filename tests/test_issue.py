@@ -54,10 +54,8 @@ from src.database.repo import (
     return_undelivered_leads,
     set_contact_status,
 )
-from src.services.collector import CollectResult, load_collector_config
-from src.services.dgis_key import DgisKeyPolicy, DgisQuota
-from src.services.providers.registry import ProviderSet
-from src.services.scheduler import CollectorRunner, DgisKeyStatus, RequestUsage, TopupDecision, TopupOutcome
+from src.services.collector import CollectResult
+from src.services.scheduler import RequestUsage, TopupDecision, TopupOutcome
 
 
 def _lead(number: int, **fields) -> Lead:
@@ -649,43 +647,6 @@ def test_collection_report_escapes_error_text() -> None:
     assert "В запасе: <b>7</b>" in text_
 
 
-def test_collector_status_before_the_first_run_and_after_it() -> None:
-    state = CollectorState(id=1, found=0, qualified=0, saved_new=0, duplicates=0, errors=0)
-    status = MagicMock(
-        state=state,
-        auto_enabled=True,
-        is_running=False,
-        next_run_at=datetime(2026, 11, 6, 1, 0, tzinfo=UTC),
-        schedule_text="cron 0 4 * * * (Europe/Moscow)",
-        pool_size=10,
-        active_providers=["osm"],
-        disabled_providers={"2gis": "не задан TWOGIS_API_KEY"},
-        requests_today=3,
-        max_requests_per_day=200,
-        provider_states={},
-        external_mode=False,
-        last_import=None,
-        imported_total=0,
-        pool_with_contacts=4,
-        batch_size=3,
-        dgis_key=None,
-    )
-    text_ = format_collector_status(status)
-    assert "В запасе: <b>10</b> (с контактами: <b>4</b>, без контактов: <b>6</b>)" in text_
-    assert "примерно на <b>3</b> дн." in text_
-    assert "06.11.2026 04:00 МСК" in text_
-    assert "не задан TWOGIS_API_KEY" in text_
-    assert "Сбор ещё не запускался" in text_
-
-    state.last_started_at = datetime(2026, 11, 5, 1, 0, tzinfo=UTC)
-    state.last_status, state.last_trigger, state.saved_new = "ok", "schedule", 4
-    state.found, state.duplicates, state.errors = 9, 2, 1
-    state.last_error = "<сеть>"
-    text_ = format_collector_status(status)
-    assert "по расписанию" in text_ and "успешно" in text_
-    assert "новых: <b>4</b>" in text_ and "&lt;сеть&gt;" in text_
-
-
 async def test_notifier_sends_alerts_and_summary_to_all_admins_silently_at_night() -> None:
     bot = MagicMock()
     bot.send_message = AsyncMock()
@@ -733,48 +694,6 @@ async def test_provider_on_command() -> None:
     await collector_handlers.handle_provider_on(message, MagicMock(args="<b>что-то</b>"), runner)
     runner.enable_provider.assert_not_awaited()
     assert "&lt;b&gt;что-то" in _final_text(message)
-
-
-def test_status_shows_paused_and_switched_off_providers() -> None:
-    now = datetime.now(UTC)
-    paused = ProviderState(
-        name="2gis_scraper",
-        consecutive_blocks=1,
-        last_block_reason="сайт показал капчу",
-        blocked_until=now + timedelta(hours=6),
-    )
-    off = ProviderState(
-        name="other",
-        consecutive_blocks=3,
-        last_block_reason="сайт ответил кодом 429",
-        disabled_at=now,
-    )
-    status = MagicMock(
-        state=CollectorState(id=1, found=0, qualified=0, saved_new=0, duplicates=0, errors=0),
-        auto_enabled=True,
-        is_running=False,
-        next_run_at=None,
-        schedule_text="cron",
-        pool_size=0,
-        active_providers=["2gis_scraper", "other", "osm"],
-        disabled_providers={},
-        requests_today=0,
-        max_requests_per_day=200,
-        provider_states={"2gis_scraper": paused, "other": off},
-        external_mode=False,
-        last_import=None,
-        imported_total=0,
-        pool_with_contacts=0,
-        batch_size=30,
-        dgis_key=None,
-    )
-    text_ = format_collector_status(status)
-    assert "Запас пуст" in text_
-    assert "⏸ 2gis_scraper: пауза до" in text_
-    assert "сайт показал капчу" in text_
-    assert "⛔ other: отключён" in text_
-    assert "/provider_on other" in text_
-    assert "✅ osm" in text_
 
 
 async def test_collect_commands_answer_and_switch() -> None:
@@ -1118,54 +1037,99 @@ async def test_rollback_leaves_no_new_site_status_for_the_old_version(old_databa
     assert "is_chain" not in await _columns(old_database)
 
 
-# ---------- API requests in the statistics ----------
+# ---------- requests of the collector in the statistics ----------
 
 
-def _usage(key: DgisKeyStatus | None) -> RequestUsage:
-    return RequestUsage(collector_today=12, collector_day_limit=200, dgis_key=key)
+def _usage() -> RequestUsage:
+    return RequestUsage(collector_today=12, collector_day_limit=200)
 
 
-def _key(used: int, limit: int) -> DgisKeyStatus:
-    return DgisKeyStatus(used=used, limit=limit, reserve=50, expires_on=None, days_left=None, request_contacts=False)
-
-
-def test_request_usage_shows_the_day_the_total_and_what_is_left() -> None:
-    text_ = format_request_usage(_usage(_key(used=640, limit=1000)))
-
-    assert "Сбор за сутки (2ГИС и OSM): <b>12</b> из 200" in text_
-    assert "2ГИС всего с этим ключом: <b>640</b>" in text_
-    assert "Осталось по лимиту ключа: <b>360</b> из 1000" in text_
-    assert "резерв 50" in text_
-
-
-def test_request_usage_without_a_limit_or_a_key() -> None:
-    assert "Лимит ключа не задан" in format_request_usage(_usage(_key(used=5, limit=0)))
-    assert "ключ не задан" in format_request_usage(_usage(None))
-    assert "<b>0</b> из 1000" in format_request_usage(_usage(_key(used=1200, limit=1000)))
+def test_request_usage_shows_the_day() -> None:
+    assert "За сутки: <b>12</b> из 200" in format_request_usage(_usage())
 
 
 async def test_stats_command_adds_the_requests_when_the_runner_is_there(batch_env) -> None:
     runner = MagicMock()
-    runner.get_request_usage = AsyncMock(return_value=_usage(_key(used=10, limit=1000)))
+    runner.get_request_usage = AsyncMock(return_value=_usage())
     message = _message()
 
     await issue.handle_leads_stats(message, runner)
 
-    assert "Осталось по лимиту ключа: <b>990</b>" in message.answer.await_args.args[0]
+    assert "За сутки: <b>12</b> из 200" in message.answer.await_args.args[0]
 
 
-async def test_the_runner_counts_requests_from_the_database(session_maker) -> None:
-    quota = DgisQuota(session_maker, "KEY", DgisKeyPolicy(limit=1000, reserve=50))
-    await quota.sync_key()
-    for _ in range(3):
-        await quota.spend()
-    config = load_collector_config(Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=1))
-    runner = CollectorRunner(
-        session_maker, ProviderSet(providers=[], disabled={}), config, AsyncMock(), dgis_quota=quota
+def test_collector_status_before_the_first_run_and_after_it() -> None:
+    state = CollectorState(id=1, found=0, qualified=0, saved_new=0, duplicates=0, errors=0)
+    status = MagicMock(
+        state=state,
+        auto_enabled=True,
+        is_running=False,
+        next_run_at=datetime(2026, 11, 6, 1, 0, tzinfo=UTC),
+        schedule_text="cron 0 4 * * * (Europe/Moscow)",
+        pool_size=10,
+        active_providers=["osm"],
+        disabled_providers={"2gis_cdp": "не установлен pychrome"},
+        requests_today=3,
+        max_requests_per_day=200,
+        provider_states={},
+        external_mode=False,
+        last_import=None,
+        imported_total=0,
+        pool_with_contacts=4,
+        batch_size=3,
     )
+    text_ = format_collector_status(status)
+    assert "В запасе: <b>10</b> (с контактами: <b>4</b>, без контактов: <b>6</b>)" in text_
+    assert "примерно на <b>3</b> дн." in text_
+    assert "06.11.2026 04:00 МСК" in text_
+    assert "не установлен pychrome" in text_
+    assert "Сбор ещё не запускался" in text_
 
-    usage = await runner.get_request_usage()
+    state.last_started_at = datetime(2026, 11, 5, 1, 0, tzinfo=UTC)
+    state.last_status, state.last_trigger, state.saved_new = "ok", "schedule", 4
+    state.found, state.duplicates, state.errors = 9, 2, 1
+    state.last_error = "<сеть>"
+    text_ = format_collector_status(status)
+    assert "по расписанию" in text_ and "успешно" in text_
+    assert "новых: <b>4</b>" in text_ and "&lt;сеть&gt;" in text_
 
-    assert usage.dgis_key is not None and usage.dgis_key.used == 3 and usage.dgis_key.limit == 1000
-    assert usage.collector_today == 0
-    assert usage.collector_day_limit == config.max_requests_per_day
+
+def test_status_shows_paused_and_switched_off_providers() -> None:
+    now = datetime.now(UTC)
+    paused = ProviderState(
+        name="2gis_scraper",
+        consecutive_blocks=1,
+        last_block_reason="сайт показал капчу",
+        blocked_until=now + timedelta(hours=6),
+    )
+    off = ProviderState(
+        name="other",
+        consecutive_blocks=3,
+        last_block_reason="сайт ответил кодом 429",
+        disabled_at=now,
+    )
+    status = MagicMock(
+        state=CollectorState(id=1, found=0, qualified=0, saved_new=0, duplicates=0, errors=0),
+        auto_enabled=True,
+        is_running=False,
+        next_run_at=None,
+        schedule_text="cron",
+        pool_size=0,
+        active_providers=["2gis_scraper", "other", "osm"],
+        disabled_providers={},
+        requests_today=0,
+        max_requests_per_day=200,
+        provider_states={"2gis_scraper": paused, "other": off},
+        external_mode=False,
+        last_import=None,
+        imported_total=0,
+        pool_with_contacts=0,
+        batch_size=30,
+    )
+    text_ = format_collector_status(status)
+    assert "Запас пуст" in text_
+    assert "⏸ 2gis_scraper: пауза до" in text_
+    assert "сайт показал капчу" in text_
+    assert "⛔ other: отключён" in text_
+    assert "/provider_on other" in text_
+    assert "✅ osm" in text_

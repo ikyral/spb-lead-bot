@@ -7,18 +7,16 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.database.repo import find_existing_external_ids, get_lead_fingerprints, save_new_leads
 from src.services.chains import load_chain_index, refresh_chain_flags
 from src.services.checker import analyze_website, create_check_client
 from src.services.dedup import DuplicateIndex, merge_duplicate_places
-from src.services.dgis_key import DgisKeyPolicy, DgisQuota
 from src.services.providers.base import RawPlace
 from src.services.providers.csv_loader import parse_csv_leads
 from src.services.providers.osm import OSMOverpassProvider
-from src.services.providers.twogis import TwoGisOptions, TwoGisProvider
 from src.services.scorer import calculate_lead_score, is_worth_saving
 from src.services.site_status import SITE_DEAD, SITE_UNKNOWN, confidence_of_check, source_of_status
 
@@ -206,46 +204,21 @@ async def save_collected_places(
     return stats
 
 
-def _manual_search_quota(session: AsyncSession, api_key: str) -> DgisQuota:
-    """Manual searches spend the same requests of the key as collection."""
-    session_maker = async_sessionmaker(session.bind, expire_on_commit=False, class_=AsyncSession)
-    return DgisQuota(session_maker, api_key, DgisKeyPolicy.from_settings(settings))
-
-
 async def run_lead_harvest(
     session: AsyncSession,
     district_name: str,
     category_key: str,
-    twogis_api_key: str | None = None,
     progress: ProgressCallback | None = None,
 ) -> dict[str, int]:
-    """Harvest leads from OSM and optionally 2GIS (queried concurrently), then verify and save them."""
+    """Harvest leads from OSM, then verify and save them; places already in the database are skipped."""
 
-    async def _search_osm() -> list[RawPlace]:
-        try:
-            return await OSMOverpassProvider().search_places(district_name, category_key)
-        except Exception:
-            # Providers handle network/API errors themselves; this only catches bugs, with a traceback.
-            logger.exception("OSM lead harvest failed for district %s", district_name)
-            return []
-
-    async def _search_2gis() -> list[RawPlace]:
-        if not twogis_api_key or not twogis_api_key.strip():
-            return []
-        try:
-            provider = TwoGisProvider(
-                twogis_api_key.strip(),
-                options=TwoGisOptions.from_settings(settings),
-                spend_request=_manual_search_quota(session, twogis_api_key).spend,
-            )
-            return await provider.search_places(district_name, category_key)
-        except Exception:
-            logger.exception("2GIS lead harvest failed for district %s", district_name)
-            return []
-
-    # gather keeps the order (OSM first), so duplicate merging keeps the OSM identity as before.
-    osm_places, twogis_places = await asyncio.gather(_search_osm(), _search_2gis())
-    return await _process_and_save_places(session, osm_places + twogis_places, progress=progress)
+    try:
+        places = await OSMOverpassProvider().search_places(district_name, category_key)
+    except Exception:
+        # Providers handle network/API errors themselves; this only catches bugs, with a traceback.
+        logger.exception("OSM lead harvest failed for district %s", district_name)
+        places = []
+    return await _process_and_save_places(session, places, progress=progress)
 
 
 async def import_csv_harvest(

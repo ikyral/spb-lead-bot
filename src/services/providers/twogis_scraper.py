@@ -37,7 +37,7 @@ from src.services.api_client import (
     ProviderUnavailableError,
 )
 from src.services.providers.base import BaseMapProvider, RawPlace, SearchArea, SearchPage, SearchQuery
-from src.services.providers.twogis import extract_contacts, parse_catalog_items
+from src.services.providers.twogis_catalog import extract_contacts, parse_catalog_items
 from src.services.scraper import twogis_site
 from src.services.scraper.browser import PageSnapshot, PlaywrightSession
 from src.services.scraper.robots import RobotsNoConnectionError, RobotsRules, RobotsUnavailableError, fetch_robots

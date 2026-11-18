@@ -29,7 +29,6 @@ from src.services.api_client import (
 from src.services.collector import collect_leads, load_collector_config, unavailable_reason
 from src.services.providers import ScraperOptions, TwoGisScraperProvider
 from src.services.providers.base import BaseMapProvider, RawPlace, SearchArea, SearchPage, SearchQuery
-from src.services.providers.registry import build_providers
 from src.services.scraper import twogis_site
 from src.services.scraper.browser import PageSnapshot, PlaywrightSession
 from src.services.scraper.robots import RobotsRules, RobotsUnavailableError, fetch_robots, parse_robots
@@ -743,28 +742,3 @@ async def test_budget_end_is_not_an_error(session_maker) -> None:
 
 def test_unavailable_reason_without_state() -> None:
     assert unavailable_reason(BlockingProvider(), None, datetime.now(UTC)) is None
-
-
-def test_registry_knows_the_scraper_and_explains_what_is_off() -> None:
-    result = build_providers(["2gis_scraper", "2gis", "osm"], twogis_api_key=None)
-    assert [provider.name for provider in result.providers] == ["2gis_scraper", "osm"]
-    assert result.disabled == {"2gis": "не задан DGIS_API_KEY"}
-
-    with_key = build_providers(["2gis_scraper", "2gis"], twogis_api_key="key")
-    assert with_key.providers[1].fallback_for is None  # the API is the main source and does not wait for the reader
-
-
-def test_registry_without_playwright_installed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
-    result = build_providers(["2gis_scraper"], twogis_api_key=None)
-    assert result.providers == []
-    assert "playwright" in result.disabled["2gis_scraper"]
-
-
-@pytest.mark.parametrize("name", ["DGIS_API_KEY", "TWOGIS_API_KEY"])
-def test_api_key_can_use_either_name(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
-    monkeypatch.delenv("DGIS_API_KEY", raising=False)
-    monkeypatch.delenv("TWOGIS_API_KEY", raising=False)
-    monkeypatch.setenv(name, "ключ")
-    settings = Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=1)
-    assert settings.TWOGIS_API_KEY.get_secret_value() == "ключ"

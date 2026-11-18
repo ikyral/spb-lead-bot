@@ -1214,38 +1214,6 @@ async def disable_provider(session: AsyncSession, name: str, reason: str) -> Pro
     return state
 
 
-async def sync_provider_key(session: AsyncSession, name: str, fingerprint: str) -> None:
-    """A new key starts with an empty counter, and what happened to the old key does not apply to it."""
-    try:
-        state = await _provider_state(session, name)
-    except IntegrityError:
-        # A parallel call has just created the row: a manual search and a collection can meet here.
-        await session.rollback()
-        state = await _provider_state(session, name)
-    if state.key_fingerprint != fingerprint:
-        if state.key_fingerprint is not None:
-            state.requests_total = 0
-            state.disabled_at = None
-            state.blocked_until = None
-            state.consecutive_blocks = 0
-        state.key_fingerprint = fingerprint
-    await session.commit()
-
-
-async def spend_provider_request(session: AsyncSession, name: str, fingerprint: str, ceiling: int | None) -> bool:
-    """Count one API request, unless the ceiling is reached. One UPDATE: parallel searches cannot overrun it."""
-    await sync_provider_key(session, name, fingerprint)
-    stmt = update(ProviderState).where(ProviderState.name == name)
-    if ceiling is not None:
-        stmt = stmt.where(ProviderState.requests_total < ceiling)
-    result = cast(
-        "CursorResult[Any]",
-        await session.execute(stmt.values(requests_total=ProviderState.requests_total + 1)),
-    )
-    await session.commit()
-    return result.rowcount > 0
-
-
 async def spend_daily_request(session: AsyncSession, name: str, day: str, ceiling: int) -> int | None:
     """
     Count one request of `day`, unless `ceiling` of them were sent that day already.

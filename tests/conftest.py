@@ -7,13 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from src.database.models import Base
 from src.services.api_client import RateLimiter
-from src.services.providers import osm, twogis
+from src.services.providers import osm
 
 
 @pytest.fixture(autouse=True)
 def _no_rate_limit_waits(monkeypatch: pytest.MonkeyPatch) -> None:
     """Providers share real rate limiters; tests talk to mock transports and must not wait."""
-    monkeypatch.setattr(twogis, "_RATE_LIMITER", RateLimiter(0))
     monkeypatch.setattr(osm, "_RATE_LIMITER", RateLimiter(0))
 
 

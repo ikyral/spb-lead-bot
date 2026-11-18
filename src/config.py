@@ -1,4 +1,3 @@
-from datetime import date
 from pathlib import Path, PurePosixPath
 
 from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
@@ -26,21 +25,6 @@ class Settings(BaseSettings):
     BOT_TOKEN: SecretStr = SecretStr("")
     # The main owner of the bot. Leads worked before ownership existed are given to this ID.
     ADMIN_TG_ID: int = 0
-    # The main source of leads (provider 2gis) and manual search.
-    # DGIS_API_KEY and the older name TWOGIS_API_KEY both work; DGIS_API_KEY wins.
-    TWOGIS_API_KEY: SecretStr | None = None
-    DGIS_API_KEY: SecretStr | None = None
-    # Demo keys allow 10 items on a page and 5 pages per query. false only for a paid key.
-    DGIS_DEMO_KEY: bool = True
-    # Ask for items.contact_groups. It needs paid access; without it organizations come without contacts.
-    DGIS_REQUEST_CONTACTS: bool = False
-    # Requests allowed for one key, 0 = no limit. A demo key has 1000 in total.
-    # Collection stops DGIS_REQUEST_RESERVE requests short of the limit.
-    DGIS_REQUEST_LIMIT: int = Field(default=1000, ge=0)
-    DGIS_REQUEST_RESERVE: int = Field(default=50, ge=0)
-    # Optional. A demo key lives 30 days from this date; admins are warned DGIS_KEY_WARN_DAYS before.
-    DGIS_KEY_CREATED_AT: date | None = None
-    DGIS_KEY_WARN_DAYS: int = Field(default=5, ge=1, le=29)
     DB_URL: str = "sqlite+aiosqlite:///./leads.db"
     # Additional admins (operators), comma-separated. ADMIN_TG_ID stays required and is always an admin.
     ADMIN_TG_IDS: str = ""
@@ -87,9 +71,9 @@ class Settings(BaseSettings):
     COLLECT_INTERVAL_MINUTES: int | None = Field(default=None, ge=1)  # when set, replaces COLLECT_CRON
     COLLECT_TIMEZONE: str = "Europe/Moscow"
     COLLECT_RUN_ON_START: bool = False
-    # 2gis is the main source and needs no access to contacts; without a key it is skipped.
+    # 2gis_cdp is the main source (a browser, see TWOGIS_*); the removed name 2gis is an alias of it.
     # 2gis_scraper is opt-in and not listed here: the site answers it with a captcha.
-    COLLECT_PROVIDERS: str = "2gis,osm"
+    COLLECT_PROVIDERS: str = "2gis_cdp,osm"
     COLLECT_QUERIES: str = ""  # category keys and/or free-text queries; empty = all categories
     COLLECT_DISTRICTS: str = ""  # empty = all SPb districts
     COLLECT_BBOX: str = ""  # 'south,west,north,east'; replaces COLLECT_DISTRICTS
@@ -149,7 +133,7 @@ class Settings(BaseSettings):
     GOOGLE_PROFILE_DIR: str = "data/google_profile"
 
     # The collector for a separate computer (collect_cli.py). Relative paths are from the project root.
-    COLLECTOR_PROVIDERS: str = "2gis"
+    COLLECTOR_PROVIDERS: str = "2gis_cdp"
     COLLECTOR_DB_PATH: str = "data/collector.db"
     COLLECTOR_EXPORT_DIR: str = "exports"
 
@@ -194,12 +178,6 @@ class Settings(BaseSettings):
     @classmethod
     def _trim_outreach(cls, value: str) -> str:
         return " ".join(value.split())[:OUTREACH_TEXT_MAX]
-
-    @model_validator(mode="after")
-    def _use_preferred_key_name(self) -> "Settings":
-        if self.DGIS_API_KEY:
-            self.TWOGIS_API_KEY = self.DGIS_API_KEY
-        return self
 
     @model_validator(mode="after")
     def _check_cdp_delays(self) -> "Settings":

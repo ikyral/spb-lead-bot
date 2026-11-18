@@ -33,7 +33,7 @@ from src.services.api_client import (
     ProviderUnavailableError,
 )
 from src.services.providers.base import BaseMapProvider, RawPlace, SearchArea, SearchPage, SearchQuery
-from src.services.providers.twogis import parse_catalog_items
+from src.services.providers.twogis_catalog import parse_catalog_items
 from src.services.providers.twogis_scraper import ROBOTS_AGENT, call_owner, read_card_contacts
 from src.services.scraper import twogis_site
 from src.services.scraper.chrome.parsers import (

@@ -45,7 +45,7 @@ from src.services.providers.base import (
     SearchArea,
     SearchQuery,
 )
-from src.services.providers.registry import KNOWN_PROVIDERS
+from src.services.providers.registry import KNOWN_PROVIDERS, resolve_provider_aliases
 from src.services.scorer import is_high_margin_category
 
 logger = logging.getLogger(__name__)
@@ -149,7 +149,9 @@ def load_collector_config(settings: Settings) -> CollectorConfig:
         trigger = _parse_cron(settings.COLLECT_CRON, timezone)
         schedule_text = f"cron {settings.COLLECT_CRON}"
 
-    providers = [name.lower() for name in _split(settings.COLLECT_PROVIDERS)]
+    providers = resolve_provider_aliases(
+        [name.lower() for name in _split(settings.COLLECT_PROVIDERS)], "COLLECT_PROVIDERS"
+    )
     unknown = sorted(set(providers) - KNOWN_PROVIDERS)
     if unknown:
         raise SettingsError(f"COLLECT_PROVIDERS: неизвестные провайдеры {unknown}; доступны: {sorted(KNOWN_PROVIDERS)}")
