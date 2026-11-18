@@ -823,7 +823,7 @@ PAGE_URL = "https://2gis.ru/spb/search/автосервис Калинински
 
 
 class QuickFinderRemote(ScriptedRemote):
-    """A tab that finds a link by its address at once (like ChromeRemote.find_link_by_href) and says its address."""
+    """A tab that finds a link by its number at once (like ChromeRemote.find_link_by_firm_id) and says its address."""
 
     def __init__(self, script: Any, cards: dict[str, dict[str, Any]], *, missing: set[str] | None = None) -> None:
         super().__init__(script, cards)
@@ -831,13 +831,13 @@ class QuickFinderRemote(ScriptedRemote):
         self.quick_lookups = 0
         self.fail_with: Exception | None = None
 
-    def find_link_by_href(self, href: str) -> DOMNode | None:
+    def find_link_by_firm_id(self, firm_id: str) -> DOMNode | None:
         self.quick_lookups += 1
         if self.fail_with is not None:
             raise self.fail_with
-        if any(firm_id in href for firm_id in self.missing):
+        if firm_id in self.missing:
             return None
-        return _link(900_000 + self.quick_lookups, href)
+        return _link(900_000 + self.quick_lookups, f"/spb/firm/{firm_id}?stat=c3RhdA%3D%3D")
 
     def execute_script(self, expression: str) -> Any:
         if expression.startswith("String(location.href)"):
@@ -1187,6 +1187,85 @@ async def test_two_pages_left_in_one_run_stop_the_run_with_a_clear_reason() -> N
         assert len((await again.provider.search(_query(3), KALININSKY)).places) == 2
     finally:
         await again.provider.close()
+
+
+# ---------- the address of a link changes after a click (its stat=): the link is found by its number ----------
+
+
+def _stat(generation: int) -> str:
+    """A valid `stat=` that is different at every read of the page, as the real one is (it counts the events)."""
+    import base64
+    import urllib.parse
+
+    return urllib.parse.quote(base64.b64encode(f"state-{generation}".encode()).decode(), safe="")
+
+
+class DriftingStatRemote(ScriptedRemote):
+    """A tab whose list is drawn anew at every read, with another `stat=` in every address."""
+
+    def get_document(self, full: bool = True) -> DOMNode:
+        self.document_reads += 1
+        generation = self.document_reads
+        hrefs = [f"/spb/firm/{firm_id}?stat={_stat(generation)}" for firm_id in self.script(generation)]
+        children = [_link(generation * 1000 + index, href) for index, href in enumerate(hrefs)]
+        return DOMNode(
+            nodeId=1, backendNodeId=10, nodeType=9, nodeName="#document", localName="", nodeValue="", children=children
+        )
+
+    def execute_script(self, expression: str) -> Any:
+        if expression.startswith("String(location.href)"):
+            return SPB_SEARCH
+        return super().execute_script(expression)
+
+
+async def test_cards_are_read_although_the_stat_of_every_link_changes_after_a_click(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ids = ["101", "102", "103", "104"]
+    remote_ = DriftingStatRemote(lambda n: ids, _cards(*ids))
+    harness = Harness(remote_)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == [f"2gis_{firm_id}" for firm_id in ids]
+    assert "no longer on the page" not in caplog.text  # before: the exact address was not on the page any more
+
+
+async def test_the_list_that_only_changes_its_stat_has_settled(caplog: pytest.LogCaptureFixture) -> None:
+    remote_ = DriftingStatRemote(lambda n: ["101", "102"], _cards("101", "102"))
+    harness = Harness(remote_)
+    try:
+        with caplog.at_level("INFO"):
+            await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert "The list of results has settled" in caplog.text and "still changing" not in caplog.text
+
+
+async def test_a_quick_search_that_returns_another_organization_is_not_trusted() -> None:
+    class WrongOne(QuickFinderRemote):
+        def find_link_by_firm_id(self, firm_id: str) -> DOMNode | None:
+            self.quick_lookups += 1
+            return _link(900_000 + self.quick_lookups, "/spb/firm/999?stat=c3RhdA%3D%3D")  # not the one asked for
+
+    remote_ = WrongOne(lambda n: ["101", "102"], _cards("101", "102"))
+    harness = Harness(remote_)
+    try:
+        page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101", "2gis_102"]  # the whole page decided
+    assert all("/firm/999" not in href for href in remote_.clicks)
+
+
+def test_a_link_belongs_to_an_organization_by_the_whole_number() -> None:
+    assert parsers.is_link_of_firm("/spb/firm/7000?stat=x", "7000")
+    assert parsers.is_link_of_firm("/spb/search/q/firm/7000/30.4,59.9?m=1", "7000")
+    assert parsers.is_link_of_firm("/spb/firm/7000", "7000")
+    assert not parsers.is_link_of_firm("/spb/firm/70001?stat=x", "7000")  # another, longer number
+    assert not parsers.is_link_of_firm("/spb/firm/7000?stat=x", "")
 
 
 # ---------- 6. blocks recorded by the existing mechanism ----------

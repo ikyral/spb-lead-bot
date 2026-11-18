@@ -485,14 +485,29 @@ class ChromeRemote:
         such link. A failure of the browser's command is a ChromeRuntimeException: the caller may read the whole
         page instead.
         """
+        # The value sits in double quotes of the selector: a backslash and a quote of its own are escaped.
+        escaped = href.replace("\\", "\\\\").replace('"', '\\"')
+        return self._query_link(f'a[href="{escaped}"]')
+
+    def find_link_by_firm_id(self, firm_id: str) -> DOMNode | None:
+        """
+        Find the link of an organization of the result list by its number, whatever its `stat=` is now.
+
+        The `stat=` of the links of the list holds the state of the page and changes after a click, so the same
+        organization is found by the part of the address that stays: `/firm/<number>`. Only digits are accepted,
+        so nothing but a number gets into the selector. None if the page has no such link.
+        """
+        if not firm_id.isdigit():
+            return None
+        return self._query_link(f'a[href*="/firm/{firm_id}"][href*="stat="]')
+
+    def _query_link(self, selector: str) -> DOMNode | None:
         import pychrome
 
         tab = self._require_tab()
-        # The value sits in double quotes of the selector: a backslash and a quote of its own are escaped.
-        escaped = href.replace("\\", "\\\\").replace('"', '\\"')
         try:
             root = tab.DOM.getDocument(depth=0)["root"]["nodeId"]
-            node_id = tab.DOM.querySelector(nodeId=root, selector=f'a[href="{escaped}"]')["nodeId"]
+            node_id = tab.DOM.querySelector(nodeId=root, selector=selector)["nodeId"]
             if not node_id:
                 return None
             described = dict(tab.DOM.describeNode(nodeId=node_id)["node"])
