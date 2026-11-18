@@ -17,7 +17,8 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, TypeVar
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeVar
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from pydantic import SecretStr
@@ -60,6 +61,8 @@ _NO_RESULTS_TITLE_RE = re.compile(r"Ничего не найдено|Не най
 _IN_BUILDING_PATTERN = re.compile(IN_BUILDING_URL_PATTERN)
 
 _MAX_CLICK_ATTEMPTS = 3
+# After so many cards in a row that could not be read the page is left: the rest would only spend the budget.
+_MAX_UNREAD_IN_A_ROW = 3
 _STALE_DOM_TIMEOUT_SECONDS = 15.0
 _SETTLE_POLL_SECONDS = 0.2
 _NETWORK_ERROR_MARKERS: tuple[str, ...] = (
@@ -130,6 +133,28 @@ class ScrapedSearchResult:
     # Links to organizations the page listed, and whether it said that nothing was found.
     links_found: int = 0
     nothing_found: bool = False
+    # Reading was stopped because several cards in a row could not be read; the text says why. Not a block.
+    unreadable: str | None = None
+
+
+class CollectedCards(NamedTuple):
+    """What clicking the cards of one page gave."""
+
+    items: list[dict[str, Any]]
+    urls: list[str]
+    attempted: set[str]
+    blocked_reason: str | None
+    stopped: bool
+    unreadable: str | None = None
+
+
+def describe_link(href: str) -> str:
+    """What a link of a result list is, by its kind and number only: 'firm 7000...', 'station 9', 'other /path'."""
+    path = urlsplit(href).path
+    match = re.search(r"/(firm|station)/([^/?#]+)", path)
+    if match is not None:
+        return f"{match.group(1)} {match.group(2)}"
+    return f"other {path[:40]}"
 
 
 def strip_page_number(url: str) -> str:
@@ -308,11 +333,14 @@ class _BaseChromePageReader:
         *,
         gate: Gate,
         page_timeout_seconds: float = 45.0,
+        snapshot_dir: Path | None = None,
     ) -> None:
         self._remote = remote
         self._options = parser_options
         self._gate = gate
         self._page_timeout_seconds = max(10.0, page_timeout_seconds)
+        # For a diagnostic run: every search page is saved here, to see what the code saw.
+        self._snapshot_dir = snapshot_dir
 
     def _open(self, url: str) -> int | None:
         """Navigate to `url` if the gate allows it, clearing stale network records first."""
@@ -323,8 +351,10 @@ class _BaseChromePageReader:
         self._remote.navigate(url, timeout=int(self._page_timeout_seconds))
         doc_response = self._remote.get_document_response()
         if not isinstance(doc_response, dict):
+            logger.info("Page opened: %s, no answer recorded", unquote(url))
             return None
         status = doc_response.get("status")
+        logger.info("Page opened: %s, status %s", unquote(url), status)
         if status == -1:
             status_text = str(doc_response.get("statusText") or "")
             if any(marker in status_text for marker in _NETWORK_ERROR_MARKERS):
@@ -371,8 +401,13 @@ class _BaseChromePageReader:
         skip_hrefs: set[str] | None = None,
         max_items: int | None = None,
         refetch_on_stale: bool = True,
-    ) -> tuple[list[dict[str, Any]], list[str], set[str], str | None, bool]:
-        """Click each matching link in DOM and collect `/items/byid` payloads. The last value: the gate stopped it."""
+    ) -> CollectedCards:
+        """
+        Click each matching link in DOM and collect `/items/byid` payloads.
+
+        A card that could not be read after its attempts is left and the next one is tried; after
+        `_MAX_UNREAD_IN_A_ROW` such cards in a row the page is left (`unreadable`), so the rest of the budget is kept.
+        """
         document = self._remote.get_document(full=True)
         nodes = find_links(document)
         target_items: list[tuple[str, DOMNode]] = []
@@ -389,8 +424,10 @@ class _BaseChromePageReader:
         collected: list[dict[str, Any]] = []
         collected_urls: list[str] = []
         attempted_hrefs: set[str] = set()
+        unread_in_a_row = 0
+        total = len(target_items)
 
-        for href, node in target_items:
+        for position, (href, node) in enumerate(target_items, start=1):
             if max_items is not None and len(collected) >= max_items:
                 break
 
@@ -401,24 +438,36 @@ class _BaseChromePageReader:
 
             attempted_hrefs.add(href)
             try:
-                payload, response_url, blocked_reason = self._click_single_href(
+                payload, response_url, blocked_reason, unread = self._click_single_href(
                     href=href,
                     initial_node=node,
                     find_node=_refetch,
                     status=status,
                     block_checker=block_checker,
+                    position=position,
+                    total=total,
                 )
             except _GateStopped:
-                return collected, collected_urls, attempted_hrefs, None, True
+                return CollectedCards(collected, collected_urls, attempted_hrefs, None, True)
 
             if blocked_reason is not None:
-                return collected, collected_urls, attempted_hrefs, blocked_reason, False
+                return CollectedCards(collected, collected_urls, attempted_hrefs, blocked_reason, False)
             if payload is not None:
                 collected.append(payload)
+                unread_in_a_row = 0
                 if response_url:
                     collected_urls.append(response_url)
+            elif unread is not None:
+                unread_in_a_row += 1
+                if unread_in_a_row >= _MAX_UNREAD_IN_A_ROW:
+                    reason = (
+                        f"{unread_in_a_row} карточки подряд не прочитались ({unread}): "
+                        "страницу или код надо проверить, это не блокировка"
+                    )
+                    logger.warning("Search page left: %s", reason)
+                    return CollectedCards(collected, collected_urls, attempted_hrefs, None, False, reason)
 
-        return collected, collected_urls, attempted_hrefs, None, False
+        return CollectedCards(collected, collected_urls, attempted_hrefs, None, False)
 
     def _find_node_by_href(self, find_links: Callable[[DOMNode], list[DOMNode]], target_href: str) -> DOMNode | None:
         document = self._remote.get_document(full=True)
@@ -435,25 +484,33 @@ class _BaseChromePageReader:
         find_node: Callable[[], DOMNode | None],
         status: int | None,
         block_checker: BlockChecker | None,
-    ) -> tuple[dict[str, Any] | None, str, str | None]:
+        position: int = 0,
+        total: int = 0,
+    ) -> tuple[dict[str, Any] | None, str, str | None, str | None]:
         """
         Click one card link up to `_MAX_CLICK_ATTEMPTS` times and parse `/items/byid`.
 
+        Returns (payload, its url, the reason of a block, the reason the card could not be read). The last one is
+        set only when the card was tried and gave nothing: a card the gate leaves out or that is gone (404) is not that.
         The gate is asked before every click: a card it leaves out is not clicked at all.
         """
         current_node = initial_node
         firm_id = firm_id_from_href(href)
+        label = f"Card {position}/{total} ({describe_link(href)})"
+        failure = "no attempt was made"
         for attempt in range(_MAX_CLICK_ATTEMPTS):
             if current_node is None or attempt > 0:
                 current_node = find_node()
             if current_node is None:
-                return None, "", None
+                logger.info("%s: the link is no longer on the page", label)
+                return None, "", None, "the link is no longer on the page"
 
             decision = self._gate(GateAction("card", firm_id=firm_id))
             if decision is GateDecision.STOP:
                 raise _GateStopped
             if decision is GateDecision.SKIP:
-                return None, "", None
+                logger.info("%s: left out by the gate", label)
+                return None, "", None, None
 
             self._remote.drain_responses(ITEM_RESPONSE_PATTERN)
             try:
@@ -461,6 +518,8 @@ class _BaseChromePageReader:
             except ChromeRuntimeException as exc:
                 if any(marker in str(exc) for marker in _FATAL_RUNTIME_MARKERS):
                     raise
+                failure = f"the link went stale on the page ({str(exc)[:60]})"
+                logger.info("%s, attempt %d/%d: %s", label, attempt + 1, _MAX_CLICK_ATTEMPTS, failure)
                 current_node = None
                 continue
 
@@ -473,13 +532,16 @@ class _BaseChromePageReader:
                     include_state=False,
                 )
                 if blocked_reason is not None:
-                    return None, "", blocked_reason
+                    return None, "", blocked_reason, None
+                failure = "the catalog did not answer after the click"
+                logger.info("%s, attempt %d/%d: %s", label, attempt + 1, _MAX_CLICK_ATTEMPTS, failure)
                 continue
 
             resp_status = response.get("status")
             resp_url = str(response.get("url") or "")
             if resp_status == 404:
-                return None, "", None
+                logger.info("%s: the catalog answered 404, the card is left out", label)
+                return None, "", None, None
             if resp_status in (401, 403, 429) or (isinstance(resp_status, int) and resp_status < 0):
                 _, blocked_reason = _check_snapshot_block(
                     self._remote,
@@ -487,19 +549,22 @@ class _BaseChromePageReader:
                     block_checker,
                     include_state=False,
                 )
-                return None, "", blocked_reason or f"2ГИС вернул HTTP {resp_status} на карточке"
+                return None, "", blocked_reason or f"2ГИС вернул HTTP {resp_status} на карточке", None
 
             raw_body = self._remote.get_response_body(response)
             payload = _parse_byid_payload(raw_body)
             if payload is not None:
-                return payload, resp_url, None
+                logger.info("%s: read", label)
+                return payload, resp_url, None, None
 
             _, blocked_reason = _check_snapshot_block(self._remote, status, block_checker, include_state=False)
             if blocked_reason is not None:
-                return None, "", blocked_reason
+                return None, "", blocked_reason, None
+            failure = "the answer of the catalog is not a card"
+            logger.info("%s, attempt %d/%d: %s", label, attempt + 1, _MAX_CLICK_ATTEMPTS, failure)
 
-        logger.debug("Exhausted %d click attempts for %s without /items/byid payload", _MAX_CLICK_ATTEMPTS, href)
-        return None, "", None
+        logger.info("%s: not read after %d attempts (%s), the next card is tried", label, _MAX_CLICK_ATTEMPTS, failure)
+        return None, "", None, failure
 
 
 class SearchPageReader(_BaseChromePageReader):
@@ -516,8 +581,11 @@ class SearchPageReader(_BaseChromePageReader):
         *,
         gate: Gate,
         page_timeout_seconds: float = 45.0,
+        snapshot_dir: Path | None = None,
     ) -> None:
-        super().__init__(remote, parser_options, gate=gate, page_timeout_seconds=page_timeout_seconds)
+        super().__init__(
+            remote, parser_options, gate=gate, page_timeout_seconds=page_timeout_seconds, snapshot_dir=snapshot_dir
+        )
         self._active_base_url: str | None = None
         self._current_page: int = 0
         self._visited_links: set[str] = set()
@@ -589,6 +657,49 @@ class SearchPageReader(_BaseChromePageReader):
         self._active_base_url = base_url
         self._current_page = 1
         return None
+
+    def _report_page(self, firm_links: list[DOMNode], all_links: list[DOMNode], pagination: int) -> None:
+        """Say in the log what the page offers, and save it for a diagnostic run: the links are only listed by kind."""
+        firm_hrefs = list(dict.fromkeys(node.attributes.get("href", "") for node in firm_links))
+        other = len({node.attributes.get("href", "") for node in all_links} - set(firm_hrefs))
+        try:
+            raw = self._remote.execute_script("JSON.stringify([location.href, document.title])")
+            url, title = json.loads(raw) if isinstance(raw, str) else ("", "")
+        except (ValueError, ChromeException):
+            url, title = "", ""
+        logger.info(
+            "Search page %d: %s, title %r; %d links to organizations (clicked), %d other result links (left alone), "
+            "%d links to next pages",
+            self._current_page,
+            unquote(str(url)),
+            title,
+            len(firm_hrefs),
+            other,
+            pagination,
+        )
+        if self._snapshot_dir is not None:
+            self._save_snapshot(firm_hrefs, [node.attributes.get("href", "") for node in all_links], pagination)
+
+    def _save_snapshot(self, firm_hrefs: list[str], all_hrefs: list[str], pagination: int) -> None:
+        """The page as it is (HTML) and the list of its result links, in a folder of a diagnostic run."""
+        directory = self._snapshot_dir
+        if directory is None:
+            return
+        try:
+            url, title, html = self._remote.read_current_page()
+            directory.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # a name of a file, the local time
+            stem = directory / f"search_{stamp}_p{self._current_page}"
+            stem.with_suffix(".html").write_text(html, encoding="utf-8")
+            links = [
+                {"position": number, "link": describe_link(href), "clicked": href in firm_hrefs}
+                for number, href in enumerate(dict.fromkeys(all_hrefs), start=1)
+            ]
+            summary = {"url": url, "title": title, "page": self._current_page, "next_pages": pagination, "links": links}
+            stem.with_suffix(".json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+            logger.info("Snapshot of the search page saved: %s", stem)
+        except (OSError, ChromeException):
+            logger.warning("Could not save the snapshot of the search page", exc_info=True)
 
     def _page_has_search_links_or_empty(self) -> bool:
         try:
@@ -683,12 +794,20 @@ class SearchPageReader(_BaseChromePageReader):
                 if _FIRM_PATH_RE.search(node.attributes.get("href", ""))
             ]
 
-        items, item_urls, _attempted, blocked_reason, stopped = self._collect_items_from_links(
+        self._report_page(_firm_links_only(document), all_nodes, len(pages_ahead))
+
+        collected = self._collect_items_from_links(
             _firm_links_only,
             status=200,
             block_checker=block_checker,
             max_items=max_items,
             refetch_on_stale=True,
+        )
+        items, item_urls, blocked_reason, stopped = (
+            collected.items,
+            collected.urls,
+            collected.blocked_reason,
+            collected.stopped,
         )
         self._visited_links.update(all_hrefs)
 
@@ -717,6 +836,7 @@ class SearchPageReader(_BaseChromePageReader):
             stopped=stopped,
             links_found=len(all_hrefs),
             nothing_found=not all_hrefs and bool(_NO_RESULTS_TITLE_RE.search(snapshot.title)),
+            unreadable=collected.unreadable,
         )
 
 
@@ -755,7 +875,7 @@ class InBuildingPageReader(_BaseChromePageReader):
 
         while max_items is None or len(collected) < max_items:
             remaining = None if max_items is None else max_items - len(collected)
-            batch, batch_urls, attempted_hrefs, batch_block, stopped = self._collect_items_from_links(
+            batch_result = self._collect_items_from_links(
                 lambda doc: doc.search(is_in_building_firm_link),
                 status=status,
                 block_checker=block_checker,
@@ -763,6 +883,8 @@ class InBuildingPageReader(_BaseChromePageReader):
                 max_items=remaining,
                 refetch_on_stale=True,
             )
+            batch, batch_urls, attempted_hrefs = batch_result.items, batch_result.urls, batch_result.attempted
+            batch_block, stopped = batch_result.blocked_reason, batch_result.stopped
             seen_hrefs.update(attempted_hrefs)
             collected.extend(batch)
             collected_urls.extend(batch_urls)
@@ -823,6 +945,7 @@ class ChromeScraperSession:
         silent_browser: bool = True,
         use_gc: bool = False,
         remote_factory: Callable[[ChromeOptions, list[str]], ChromeRemote] | None = None,
+        snapshot_dir: Path | None = None,
         proxy: SecretStr | None = None,
         proxy_country: str = "OFF",
         timezone: str | None = None,
@@ -852,6 +975,7 @@ class ChromeScraperSession:
         # Chrome is started anew after so many read cards (its memory grows with every page); 0 = never.
         self._restart_every_cards = restart_every_cards
         self._cards_since_start = 0
+        self._snapshot_dir = snapshot_dir
         self._parser_options = ChromeParserOptions(use_gc=use_gc)
         self._remote_factory = remote_factory or ChromeRemote
         self._remote: ChromeRemote | None = None
@@ -884,6 +1008,7 @@ class ChromeScraperSession:
             self._parser_options,
             gate=self._gate,
             page_timeout_seconds=self._page_timeout_seconds,
+            snapshot_dir=self._snapshot_dir,
         )
         self._in_building_reader = InBuildingPageReader(
             remote,

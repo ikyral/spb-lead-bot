@@ -148,6 +148,8 @@ class Settings(BaseSettings):
     TWOGIS_LIGHT_MODE: bool = True
     # Через сколько прочитанных карточек перезапускать Chrome (профиль остаётся), 0 = не перезапускать.
     TWOGIS_RESTART_EVERY_CARDS: int = Field(default=20, ge=0, le=1000)
+    # Для диагностики: папка, куда сохраняется каждая страница поиска (HTML и список ссылок). Пусто = не сохранять.
+    TWOGIS_SNAPSHOT_DIR: str = ""
 
     # Looking for the site and contacts of leads on Google, only with collect_cli.py --assisted --google.
     # The upper bounds keep it a person's pace whatever is configured; pauses are fixed in the code.

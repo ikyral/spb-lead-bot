@@ -22,6 +22,7 @@ from src.services import pipeline
 from src.services.api_client import (
     ProviderBlockedError,
     ProviderBudgetExhausted,
+    ProviderFormatError,
     ProviderNoConnectionError,
     ProviderUnavailableError,
 )
@@ -592,6 +593,139 @@ async def test_a_search_that_found_something_resets_the_count_of_empty_ones() ->
             await harness.provider.search(_query(10), AREA)
     finally:
         await harness.provider.close()
+
+
+# ---------- what is clicked, and why a click gave nothing: the log, the limits of failures, the snapshot ----------
+
+KALININSKY = SearchArea(bbox=(59.9, 30.3, 59.95, 30.4), district="Калининский")
+AUTO = SearchQuery(text="автосервис", category="auto_repair", high_margin=True)
+
+
+def _doc_with(hrefs: list[str]) -> DOMNode:
+    children = [_link(index + 2, href) for index, href in enumerate(hrefs)]
+    return DOMNode(
+        nodeId=1, backendNodeId=10, nodeType=9, nodeName="#document", localName="", nodeValue="", children=children
+    )
+
+
+def test_a_link_is_described_by_its_kind_and_number_only() -> None:
+    assert parsers.describe_link("/spb/firm/70000001018420390?stat=c3RhdA%3D%3D") == "firm 70000001018420390"
+    assert parsers.describe_link("https://2gis.ru/spb/station/123?stat=abc") == "station 123"
+    assert parsers.describe_link("/spb/geo/4504235282649497") == "other /spb/geo/4504235282649497"
+    assert len(parsers.describe_link("/" + "x" * 200)) <= len("other ") + 40
+
+
+async def test_the_log_says_which_page_was_opened_what_it_offers_and_what_each_click_gave(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = FakeRemote(pages={1: _doc(["101", "102"])}, cards={"101": _card("101"), "102": _card("102")})
+    harness = Harness(fake)
+    try:
+        with caplog.at_level("INFO"):
+            await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    text = caplog.text
+    assert "Page opened: https://2gis.ru/spb/search/автосервис Калининский район, status 200" in text
+    assert "Search page 1:" in text and "2 links to organizations (clicked)" in text
+    assert "Card 1/2 (firm 101): read" in text and "Card 2/2 (firm 102): read" in text
+    assert "Клиника" not in text  # no names of organizations in the log
+
+
+async def test_only_organizations_are_clicked_not_stations_and_not_places() -> None:
+    stat = "?stat=c3RhdA%3D%3D"
+    fake = FakeRemote(
+        pages={1: _doc_with([f"/spb/station/55{stat}", "/spb/geo/4504235282649497", f"/spb/firm/101{stat}"])},
+        cards={"101": _card("101")},
+    )
+    harness = Harness(fake)
+    try:
+        page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101"]
+    assert len(fake.clicks) == 1 and "/firm/101" in fake.clicks[0]
+
+
+async def test_a_card_that_gives_nothing_is_left_after_its_attempts_and_the_next_one_is_read(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = FakeRemote(pages={1: _doc(["101", "102"])}, cards={"102": _card("102")})  # no answer to the first card
+    harness = Harness(fake)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_102"]
+    assert len(fake.clicks) == 3 + 1  # three attempts on the first card, one on the second
+    assert "Card 1/2 (firm 101), attempt 1/3: the catalog did not answer after the click" in caplog.text
+    assert "Card 1/2 (firm 101): not read after 3 attempts (the catalog did not answer after the click)" in caplog.text
+    assert "Card 2/2 (firm 102): read" in caplog.text
+
+
+async def test_three_cards_in_a_row_that_give_nothing_stop_the_page_and_keep_the_budget() -> None:
+    fake = FakeRemote(
+        pages={1: _doc(["101", "102", "103", "104", "105"])},
+        cards={"101": _card("101")},  # the first is read, then three give nothing
+    )
+    harness = Harness(fake)
+    try:
+        with pytest.raises(ProviderFormatError, match="3 карточки подряд не прочитались") as stopped:
+            await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in stopped.value.partial] == ["2gis_101"]
+    assert len(fake.clicks) == 1 + 3 * 3  # the fifth card is not even tried
+    assert harness.notes == []  # not a refusal of the site
+
+
+async def test_a_read_card_between_the_failures_starts_the_count_anew() -> None:
+    fake = FakeRemote(
+        pages={1: _doc(["101", "102", "103", "104", "105"])},
+        cards={"101": _card("101"), "103": _card("103")},  # 102, 104 and 105 give nothing: never three in a row
+    )
+    harness = Harness(fake)
+    try:
+        page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101", "2gis_103"]
+
+
+async def test_the_search_page_is_saved_for_a_diagnostic_run(tmp_path: Path) -> None:
+    fake = FakeRemote(pages={1: _doc(["101", "102"])}, cards={"101": _card("101"), "102": _card("102")})
+    provider = TwoGisCdpProvider(
+        CdpOptions(),
+        session_factory=lambda gate: ChromeScraperSession(  # type: ignore[arg-type,return-value]
+            gate=gate, remote_factory=lambda _o, _p: fake, snapshot_dir=tmp_path / "snapshots"
+        ),
+        robots_loader=lambda: _rules(),
+        sleep=lambda _seconds: None,
+        notify=lambda _text: None,
+    )
+    try:
+        await provider.search(AUTO, KALININSKY)
+    finally:
+        await provider.close()
+    html_files = list((tmp_path / "snapshots").glob("search_*_p1.html"))
+    json_files = list((tmp_path / "snapshots").glob("search_*_p1.json"))
+    assert len(html_files) == len(json_files) == 1
+    assert html_files[0].read_text(encoding="utf-8") == SEARCH_PAGE[2]
+    summary = json.loads(json_files[0].read_text(encoding="utf-8"))
+    assert summary["title"] == SEARCH_PAGE[1] and summary["page"] == 1
+    assert [(link["link"], link["clicked"]) for link in summary["links"]] == [("firm 101", True), ("firm 102", True)]
+
+
+async def _rules() -> RobotsRules:
+    return RecordingRules()
+
+
+def test_the_snapshot_folder_is_off_by_default_and_comes_from_the_settings() -> None:
+    assert CdpOptions().snapshot_dir is None
+    assert CdpOptions.from_settings(_settings()).snapshot_dir is None
+    options = CdpOptions.from_settings(_settings(TWOGIS_SNAPSHOT_DIR="data/snapshots"))
+    assert options.snapshot_dir == PROJECT_ROOT / "data" / "snapshots"
 
 
 # ---------- 6. blocks recorded by the existing mechanism ----------

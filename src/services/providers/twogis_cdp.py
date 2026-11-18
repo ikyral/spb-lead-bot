@@ -34,6 +34,7 @@ from src.services.api_client import (
     ProviderBlockedError,
     ProviderBudgetExhausted,
     ProviderError,
+    ProviderFormatError,
     ProviderNoConnectionError,
     ProviderProxyError,
     ProviderUnavailableError,
@@ -91,6 +92,8 @@ class CdpOptions:
     chrome_memory_mb: int = 0
     light: bool = False
     restart_every_cards: int = 0
+    # A diagnostic run saves every search page here (HTML and the list of its links); None = nothing is saved.
+    snapshot_dir: Path | None = None
     # Only the command line of the collector sets this, for one run: see --ignore-interval.
     ignore_interval: bool = False
 
@@ -123,6 +126,7 @@ class CdpOptions:
             chrome_memory_mb=settings.TWOGIS_CHROME_MEMORY_MB,
             light=settings.TWOGIS_LIGHT_MODE,
             restart_every_cards=settings.TWOGIS_RESTART_EVERY_CARDS,
+            snapshot_dir=resolve_path(settings.TWOGIS_SNAPSHOT_DIR) if settings.TWOGIS_SNAPSHOT_DIR.strip() else None,
             ignore_interval=ignore_interval,
         )
 
@@ -233,6 +237,10 @@ class TwoGisCdpProvider(BaseMapProvider):
             raise ProviderBlockedError(reason, partial=places)
 
         self._results += len(places)
+        if result.unreadable is not None:
+            # Cards of this page could not be read, one after another: not a refusal of the site, but not to go on.
+            logger.warning("2gis_cdp stopped: %s", result.unreadable)
+            raise ProviderFormatError(result.unreadable, partial=places)
         stop = self._stop_error
         if stop is not None:
             if isinstance(stop, ProviderBudgetExhausted):
@@ -393,6 +401,7 @@ class TwoGisCdpProvider(BaseMapProvider):
             memory_limit_mb=self._options.chrome_memory_mb,
             light=self._options.light,
             restart_every_cards=self._options.restart_every_cards,
+            snapshot_dir=self._options.snapshot_dir,
         )
 
     async def _started_session(self) -> CdpSession:

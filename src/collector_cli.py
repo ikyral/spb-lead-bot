@@ -15,6 +15,7 @@ Exit codes: 0 done, 1 error, 2 a source refused or is waiting after a refusal, 1
 import argparse
 import asyncio
 import logging
+import os
 import re
 import sys
 import traceback
@@ -520,8 +521,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     # stdout: PowerShell turns every line of a program's stderr into an error record.
+    # LOG_LEVEL=DEBUG for a diagnostic run; anything unknown means INFO.
+    level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").strip().upper(), logging.INFO)
     logging.basicConfig(
-        level=logging.INFO,
+        level=level if isinstance(level, int) else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         stream=sys.stdout,
     )
