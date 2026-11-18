@@ -361,3 +361,24 @@ def test_cards_the_provider_leaves_out_are_named(caplog: pytest.LogCaptureFixtur
     assert places == []
     assert "'Здание' is left out: not an organization (type 'building')" in caplog.text
     assert "'Без контактов' is left out: the card does not say its contacts" in caplog.text
+
+
+# ---------- a node that went stale between the search and the click ----------
+
+
+def test_a_stale_node_is_an_error_the_reader_can_retry() -> None:
+    import pychrome
+
+    from src.services.scraper.chrome import DOMNode
+    from src.services.scraper.chrome.exceptions import ChromeRuntimeException
+
+    remote = ChromeRemote(ChromeOptions(), [])
+    tab = MagicMock()
+    tab._stopped.is_set.return_value = False
+    tab.DOM.resolveNode.side_effect = pychrome.CallMethodException("DOM.resolveNode error: No node with given id found")
+    remote._chrome_tab = tab
+    node = DOMNode(
+        nodeId=1, backendNodeId=10, nodeType=1, nodeName="A", localName="a", nodeValue="", attributes=["href", "/x"]
+    )
+    with pytest.raises(ChromeRuntimeException, match="No node with given id"):
+        remote.perform_click(node)

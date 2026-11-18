@@ -484,15 +484,21 @@ class ChromeRemote:
 
     def perform_click(self, dom_node: DOMNode, timeout: int | None = None) -> None:
         """Scroll `dom_node` into center view and call its element.click(). No input events are synthesized."""
+        import pychrome
+
         tab = self._require_tab()
-        resolved_node = tab.DOM.resolveNode(backendNodeId=dom_node.backend_id, _timeout=timeout)
-        object_id = resolved_node["object"]["objectId"]
-        tab.Runtime.callFunctionOn(
-            objectId=object_id,
-            functionDeclaration=(
-                'function() { this.scrollIntoView({ block: "center", behavior: "instant" }); this.click(); }'
-            ),
-        )
+        try:
+            resolved_node = tab.DOM.resolveNode(backendNodeId=dom_node.backend_id, _timeout=timeout)
+            object_id = resolved_node["object"]["objectId"]
+            tab.Runtime.callFunctionOn(
+                objectId=object_id,
+                functionDeclaration=(
+                    'function() { this.scrollIntoView({ block: "center", behavior: "instant" }); this.click(); }'
+                ),
+            )
+        except pychrome.CallMethodException as exc:
+            # The page was redrawn and the node is gone: the reader finds the link again and clicks once more.
+            raise ChromeRuntimeException(str(exc)) from exc
 
     def bring_to_front(self) -> None:
         """Bring the browser window/tab to foreground for manual captcha passing."""
