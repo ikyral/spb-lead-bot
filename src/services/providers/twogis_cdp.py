@@ -61,7 +61,7 @@ PROVIDER_NAME: str = "2gis_cdp"
 MIN_PAUSE_SECONDS: float = 3.0
 # 2GIS answers 404 to a search that found nothing ("Точных совпадений нет"). That is an empty result, but a ban could
 # look the same, so this many such answers in a row, with nothing found in between, are taken for a refusal.
-MAX_EMPTY_SEARCHES_IN_A_ROW: int = 3
+MAX_EMPTY_SEARCHES_IN_A_ROW: int = 5
 
 
 @dataclass(frozen=True)
@@ -336,7 +336,7 @@ class TwoGisCdpProvider(BaseMapProvider):
             return None
         self._empty_in_a_row += 1
         if self._empty_in_a_row >= MAX_EMPTY_SEARCHES_IN_A_ROW:
-            return f"сайт ответил кодом 404 на {self._empty_in_a_row} поиска подряд, ничего не найдено"
+            return f"сайт ответил кодом 404 на поиск {self._empty_in_a_row}-й раз подряд, ничего не найдено"
         return None
 
     def _stop_on_block(self, reason: str) -> None:

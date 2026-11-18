@@ -538,14 +538,14 @@ async def test_refusing_statuses_are_not_taken_for_an_empty_search(status: int) 
         await harness.provider.close()
 
 
-async def test_three_empty_404_searches_in_a_row_are_a_refusal() -> None:
+async def test_five_empty_404_searches_in_a_row_are_a_refusal() -> None:
     fake = FakeRemote(doc_status=404, page_info=NOTHING_FOUND_404)
     harness = Harness(fake)
     try:
-        for number in (1, 2):
+        for number in range(1, 5):
             assert (await harness.provider.search(_query(number), AREA)).places == []
-        with pytest.raises(ProviderBlockedError, match="3 поиска подряд"):
-            await harness.provider.search(_query(3), AREA)
+        with pytest.raises(ProviderBlockedError, match="5-й раз подряд"):
+            await harness.provider.search(_query(5), AREA)
         assert harness.notes and "404" in harness.notes[0]
     finally:
         await harness.provider.close()
@@ -555,17 +555,17 @@ async def test_a_search_that_found_something_resets_the_count_of_empty_ones() ->
     fake = FakeRemote(doc_status=404, page_info=NOTHING_FOUND_404)
     harness = Harness(fake)
     try:
-        await harness.provider.search(_query(1), AREA)
-        await harness.provider.search(_query(2), AREA)
+        for number in range(1, 5):  # four empty ones: one short of a refusal
+            await harness.provider.search(_query(number), AREA)
         fake.doc_status = 200
         fake.pages = {1: _doc(["101"])}
         fake.cards = {"101": _card("101")}
-        assert len((await harness.provider.search(_query(3), AREA)).places) == 1
+        assert len((await harness.provider.search(_query(5), AREA)).places) == 1
         fake.doc_status = 404
-        await harness.provider.search(_query(4), AREA)
-        await harness.provider.search(_query(5), AREA)  # two again, not three in a row
+        for number in range(6, 10):  # four empty ones again, not five in a row
+            await harness.provider.search(_query(number), AREA)
         with pytest.raises(ProviderBlockedError):
-            await harness.provider.search(_query(6), AREA)
+            await harness.provider.search(_query(10), AREA)
     finally:
         await harness.provider.close()
 
