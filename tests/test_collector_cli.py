@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -678,6 +679,27 @@ def test_an_error_of_settings_is_still_called_that(cli, tmp_path: Path, monkeypa
     assert "Ошибка настроек: COLLECT_CRON" in out
     assert "Непредвиденная" not in out
     assert not log.exists()
+
+
+def test_secrets_stay_out_of_the_console_and_the_file(cli, tmp_path: Path, monkeypatch, capsys) -> None:
+    log = tmp_path / "logs" / "errors.log"
+    monkeypatch.setattr(collector_cli, "ERROR_LOG_PATH", str(log))
+    cli.settings.BOT_TOKEN = SecretStr("123456:BOTSECRET")
+    cli.settings.TWOGIS_PROXY = SecretStr("http://user:PROXYSECRET@proxy.example:3128")
+    message = (
+        "bad 123456:BOTSECRET and http://user:PROXYSECRET@proxy.example:3128 at "
+        "https://2gis.ru/spb/search?key=OTHERSECRET&q=Иванов with postgresql://user:DBSECRET@host/db"
+    )
+    _failing_run(monkeypatch, RuntimeError(message))
+
+    collector_cli.main([])
+
+    out = capsys.readouterr().out
+    saved = log.read_text(encoding="utf-8")
+    for text in (out, saved):
+        for secret in ("BOTSECRET", "PROXYSECRET", "OTHERSECRET", "DBSECRET", "Иванов"):
+            assert secret not in text
+        assert "https://2gis.ru/spb/search?" in text
 
 
 def test_a_log_that_cannot_be_written_does_not_hide_the_error(cli, tmp_path: Path, monkeypatch, capsys) -> None:

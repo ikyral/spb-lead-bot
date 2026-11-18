@@ -29,6 +29,7 @@ from src.services.api_client import (
 from src.services.collector import collect_leads, load_collector_config, unavailable_reason
 from src.services.providers import ScraperOptions, TwoGisScraperProvider
 from src.services.providers.base import BaseMapProvider, RawPlace, SearchArea, SearchPage, SearchQuery
+from src.services.providers.registry import build_providers
 from src.services.scraper import twogis_site
 from src.services.scraper.browser import PageSnapshot, PlaywrightSession
 from src.services.scraper.robots import RobotsRules, RobotsUnavailableError, fetch_robots, parse_robots
@@ -742,3 +743,16 @@ async def test_budget_end_is_not_an_error(session_maker) -> None:
 
 def test_unavailable_reason_without_state() -> None:
     assert unavailable_reason(BlockingProvider(), None, datetime.now(UTC)) is None
+
+
+def test_registry_knows_the_scraper_and_explains_what_is_off() -> None:
+    result = build_providers(["2gis_scraper", "yandex", "osm"])
+    assert [provider.name for provider in result.providers] == ["2gis_scraper", "osm"]
+    assert list(result.disabled) == ["yandex"]
+
+
+def test_registry_without_playwright_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+    result = build_providers(["2gis_scraper"])
+    assert result.providers == []
+    assert "playwright" in result.disabled["2gis_scraper"]

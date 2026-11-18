@@ -5,15 +5,19 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest
 
 import main
+from src.bot.digest import DIGEST_JOB_ID, DailyDigest
 from src.config import Settings
 
 
 def test_httpx_request_urls_are_not_logged_at_info() -> None:
-    """httpx logs full request URLs at INFO, and 2GIS URLs carry the API key in '?key=...'."""
+    """httpx logs full request URLs at INFO, and a URL may carry a key or a login."""
     # A fresh process: under pytest the root logger already has handlers and basicConfig is a no-op.
     code = "import logging, main; print(logging.getLogger('httpx').getEffectiveLevel())"
     result = subprocess.run(
@@ -126,3 +130,124 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 def test_relative_sqlite_path_is_resolved_against_project_root(db_url: str, expected: str) -> None:
     """'./leads.db' used to depend on the current directory: started elsewhere, the bot got an empty DB."""
     assert expected == Settings(BOT_TOKEN="t", ADMIN_TG_ID=1, DB_URL=db_url).DB_URL
+
+
+@pytest.mark.asyncio
+async def test_main_wires_the_collector_into_the_bot_lifetime(monkeypatch: pytest.MonkeyPatch, session_maker) -> None:
+    """By default only OSM is used; the scheduler runs exactly while polling runs."""
+    from aiogram import Dispatcher
+
+    seen: dict = {}
+
+    async def fake_polling(self: Dispatcher, bot, **kwargs) -> None:
+        await self.emit_startup(bot=bot, **self.workflow_data)
+        runner = self["collector_runner"]
+        seen["status"] = await runner.get_status()
+        seen["routers"] = {router.name for router in self.sub_routers}
+        seen["digest_job"] = runner._scheduler.get_job(DIGEST_JOB_ID)
+        seen["scheduler_running"] = runner._scheduler.running
+        await self.emit_shutdown(bot=bot, **self.workflow_data)
+        seen["scheduler_running_after"] = runner._scheduler.running
+        await bot.session.close()
+
+    async def no_init_db() -> None:
+        return None
+
+    monkeypatch.setattr("src.services.providers.registry.importlib.util.find_spec", lambda _name: object())
+    monkeypatch.setattr(Dispatcher, "start_polling", fake_polling)
+    monkeypatch.setattr(main, "init_db", no_init_db)
+    monkeypatch.setattr(main, "async_session_maker", session_maker)
+    monkeypatch.setattr(main, "settings_error", None)
+    monkeypatch.setattr(main, "settings", Settings(_env_file=None, BOT_TOKEN="123456:TEST", ADMIN_TG_ID=1))
+    # The command menu fails, as it does when an admin has never pressed /start: startup must go on.
+    set_commands = AsyncMock(side_effect=TelegramBadRequest(method=MagicMock(), message="chat not found"))
+    monkeypatch.setattr(Bot, "set_my_commands", set_commands)
+    # The plan runs once right after the start: here it must not reach Telegram.
+    monkeypatch.setattr(DailyDigest, "send_scheduled", AsyncMock())
+
+    await main.main()
+
+    status = seen["status"]
+    assert set_commands.await_count == 2  # everyone, then the admin
+    assert seen["routers"] == {"search", "leads", "issue", "collector", "imports", "reminders", "menu", "fallback"}
+    assert seen["digest_job"] is not None  # DIGEST_ENABLED is on by default
+    assert seen["scheduler_running"] is True
+    assert seen["scheduler_running_after"] is False
+    assert status.next_run_at is not None
+    assert status.active_providers == ["2gis_cdp", "osm"]
+    assert status.disabled_providers == {}
+    assert status.batch_size == 30
+
+
+@pytest.mark.asyncio
+async def test_main_gives_the_provider_its_proxy_and_browser_settings(
+    monkeypatch: pytest.MonkeyPatch, session_maker
+) -> None:
+    """The proxy and the browser settings must really reach the provider: parts tested alone miss a broken link."""
+    from aiogram import Dispatcher
+
+    seen: dict = {}
+
+    async def fake_polling(self: Dispatcher, bot, **kwargs) -> None:
+        await self.emit_startup(bot=bot, **self.workflow_data)
+        runner = self["collector_runner"]
+        seen["status"] = await runner.get_status()
+        seen["provider"] = runner._provider_set.providers[0]
+        await self.emit_shutdown(bot=bot, **self.workflow_data)
+        await bot.session.close()
+
+    async def no_init_db() -> None:
+        return None
+
+    monkeypatch.setattr("src.services.providers.registry.importlib.util.find_spec", lambda _name: object())
+    monkeypatch.setattr(Dispatcher, "start_polling", fake_polling)
+    monkeypatch.setattr(main, "init_db", no_init_db)
+    monkeypatch.setattr(main, "async_session_maker", session_maker)
+    monkeypatch.setattr(main, "settings_error", None)
+    current = Settings(
+        _env_file=None,
+        BOT_TOKEN="123456:TEST",
+        ADMIN_TG_ID=1,
+        TWOGIS_PROXY="http://user:p%40ss@proxy.example:3128",
+        TWOGIS_PROXY_COUNTRY="ru",
+        TWOGIS_HEADLESS=True,
+    )
+    monkeypatch.setattr(main, "settings", current)
+
+    # Routers are module globals, and main() has already run in this process.
+    routers = (
+        main.search_router,
+        main.leads_router,
+        main.issue_router,
+        main.collector_router,
+        main.imports_router,
+        main.reminders_router,
+        main.menu_router,
+        main.fallback_router,
+    )
+    for router in routers:
+        router._parent_router = None
+    monkeypatch.setattr(Bot, "set_my_commands", AsyncMock())
+    monkeypatch.setattr(DailyDigest, "send_scheduled", AsyncMock())
+
+    await main.main()
+
+    status = seen["status"]
+    assert status.active_providers == ["2gis_cdp", "osm"]
+    options = seen["provider"]._options
+    assert options.proxy.get_secret_value() == "http://user:p%40ss@proxy.example:3128"
+    assert (options.proxy_country, options.headless) == ("RU", True)
+    assert "p%40ss" not in repr(options)
+
+
+def test_secrets_are_not_exposed_in_settings_repr() -> None:
+    """Settings may end up in logs or tracebacks; tokens must be masked there."""
+    s = Settings(
+        BOT_TOKEN="123456:SECRET-BOT-TOKEN",
+        ADMIN_TG_ID=1,
+        TWOGIS_PROXY="http://user:SECRET-PROXY-PASS@proxy.example:3128",
+    )
+    for text in (repr(s), str(s), repr(s.model_dump())):
+        assert "SECRET-BOT-TOKEN" not in text
+        assert "SECRET-PROXY-PASS" not in text
+    assert s.BOT_TOKEN.get_secret_value() == "123456:SECRET-BOT-TOKEN"

@@ -696,6 +696,16 @@ async def test_provider_on_command() -> None:
     assert "&lt;b&gt;что-то" in _final_text(message)
 
 
+async def test_provider_on_without_a_name_means_the_browser_parser_of_2gis() -> None:
+    runner = MagicMock()
+    runner.known_provider = MagicMock(return_value=True)
+    runner.enable_provider = AsyncMock()
+
+    await collector_handlers.handle_provider_on(_message(), MagicMock(args=None), runner)
+
+    runner.enable_provider.assert_awaited_once_with("2gis_cdp")
+
+
 async def test_collect_commands_answer_and_switch() -> None:
     runner = MagicMock()
     runner.external_mode = False
