@@ -20,6 +20,8 @@ data/samples/
 data/browser_profile/
 data/google_profile/
 data/cdp_profile/
+# Снимки страниц поиска 2ГИС для диагностики (TWOGIS_SNAPSHOT_DIR): HTML с данными организаций
+data/snapshots/
 
 # Кэш Python и тестов
 __pycache__/
