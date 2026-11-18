@@ -63,6 +63,9 @@ _NO_RESULTS_TITLE_RE = re.compile(r"Ничего не найдено|Не най
 _IN_BUILDING_PATTERN = re.compile(IN_BUILDING_URL_PATTERN)
 
 _MAX_CLICK_ATTEMPTS = 3
+# The browser answers "Could not find node" when the node it just found was drawn anew before the next command:
+# a moment later the same search works, and it costs far less than reading the whole page.
+_NODE_GONE_MARKER = "could not find node"
 # After so many cards in a row that could not be read the page is left: the rest would only spend the budget.
 _MAX_UNREAD_IN_A_ROW = 3
 _STALE_DOM_TIMEOUT_SECONDS = 15.0
@@ -625,16 +628,21 @@ class _BaseChromePageReader:
         # The browser finds a link by a selector at once; reading the whole page for every click is slow and heavy.
         finder = getattr(self._remote, "find_link_by_firm_id", None) if firm_id else None
         if finder is not None:
-            started = time.monotonic()
-            try:
-                found = finder(firm_id)
-            except ChromeException as exc:
-                logger.info("Quick search of the link failed (%s): the whole page is read instead", exc)
-            else:
+            for attempt in (1, 2):
+                started = time.monotonic()
+                try:
+                    found = finder(firm_id)
+                except ChromeException as exc:
+                    if attempt == 1 and _NODE_GONE_MARKER in str(exc).lower():
+                        logger.info("Quick search of the link: the node was gone at once, once more")
+                        continue
+                    logger.info("Quick search of the link failed (%s): the whole page is read instead", exc)
+                    break
                 self._lookup_seconds.append(time.monotonic() - started)
                 if found is not None and is_link_of_firm(found.attributes.get("href", ""), firm_id):
                     return found
                 # Not found: the whole page is read to be sure, and it tells what the page looks like now.
+                break
         document = self._read_document()
         for node in find_links(document):
             href = node.attributes.get("href", "")
