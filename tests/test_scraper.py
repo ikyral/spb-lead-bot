@@ -551,7 +551,7 @@ def _no_site_checks(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _config(**overrides):
-    defaults = {"COLLECT_QUERIES": "dentist_clinic,beauty", "COLLECT_DISTRICTS": "Центральный"}
+    defaults = {"COLLECT_QUERIES": "dentist_clinic,barbershop", "COLLECT_DISTRICTS": "Центральный"}
     return load_collector_config(Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=1, **{**defaults, **overrides}))
 
 

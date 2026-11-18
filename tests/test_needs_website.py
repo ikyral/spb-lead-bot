@@ -632,7 +632,7 @@ def test_every_niche_can_be_searched_in_both_sources() -> None:
     assert len(TARGET_CATEGORIES) == 22
     for key, category in TARGET_CATEGORIES.items():
         assert category["title"], key
-        assert category["query_2gis"], key
+        assert category["queries_2gis"], key
         assert category["osm_tags"], key
     assert {"barbershop", "tire_service", "cleaning", "renovation", "florists", "hotels", "horeca"} <= set(
         TARGET_CATEGORIES
