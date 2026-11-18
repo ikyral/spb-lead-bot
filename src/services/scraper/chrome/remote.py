@@ -2,12 +2,14 @@
 Chrome DevTools Protocol wrapper built on pychrome, ported from parser-2gis-new.
 
 Only reads what pages show and receive, navigates and calls element.click(). Nothing is injected
-into pages and no browser property is overridden.
+into pages and no browser property is overridden. The timezone and the language only follow the place
+of the proxy; the user agent and everything else a page can ask the browser stay as they are.
 """
 
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import queue
@@ -20,7 +22,9 @@ from src.services.api_client import MAX_RESPONSE_BYTES
 
 from .browser import ChromeBrowser
 from .dom import DOMNode
-from .exceptions import ChromeException, ChromeRuntimeException
+from .exceptions import ChromeException, ChromeRuntimeException, ProxyError
+from .filters import HEAVY_RESOURCE_PATTERNS
+from .proxy import IP_CHECK_SERVICES, ProxySettings, extract_ip_info, parse_proxy
 from .utils import ensure_local_cdp_url, wait_until_finished
 
 if TYPE_CHECKING:
@@ -34,6 +38,9 @@ logger = logging.getLogger(__name__)
 _HTTP_TIMEOUT_SECONDS: int = 10
 _CONNECT_TIMEOUT_SECONDS: int = 60
 _DEFAULT_STATE_VARS: tuple[str, ...] = ("initialState", "__REACT_QUERY_STATE__")
+# Chrome asks again when the login is wrong: after so many answers the proxy counts as refusing it.
+_PROXY_AUTH_MAX_ATTEMPTS: int = 20
+_IP_CHECK_TIMEOUT_SECONDS: int = 30
 _pychrome_patched = False
 
 
@@ -95,6 +102,16 @@ class ChromeRemote:
         self._requests: dict[str, RequestDict] = {}
         self._requests_lock = threading.Lock()
         self._ping_thread: threading.Thread | None = None
+        self._proxy: ProxySettings | None = (
+            parse_proxy(chrome_options.proxy.get_secret_value()) if chrome_options.proxy is not None else None
+        )
+        self._proxy_auth_attempts = 0
+        self._proxy_auth_failed = False
+        # What the check before the first request found out: the IP the sites see, and its country.
+        self.exit_ip: str | None = None
+        self.exit_country: str | None = None
+        # How many requests for heavy resources the browser refused (the light mode), for the log.
+        self.blocked_count = 0
 
     @wait_until_finished(timeout=_CONNECT_TIMEOUT_SECONDS)
     def _connect_interface(self) -> bool:
@@ -126,9 +143,63 @@ class ChromeRemote:
             self._connect_interface()
             self._setup_tab()
             self._init_tab_monitor()
+            # Before 2GIS is touched at all: from the wrong country nothing may be opened.
+            if self._proxy is not None or self._chrome_options.country_to_check is not None:
+                self._check_exit_ip()
         except Exception:
             self.stop()
             raise
+
+    @wait_until_finished(timeout=20, throw_exception=False)
+    def _wait_document_ready(self) -> bool:
+        return self.execute_script("document.readyState") == "complete"
+
+    def _check_exit_ip(self) -> None:
+        """
+        Open an IP service in the browser and compare the country of the exit IP with the required one.
+
+        Raises ProxyError if the proxy does not answer or refuses the login, or the country is wrong.
+        """
+        required = self._chrome_options.country_to_check
+        proxy_name = self._proxy.masked() if self._proxy is not None else "без прокси"
+        problems: list[str] = []
+
+        for url, country_field, ip_field in IP_CHECK_SERVICES:
+            try:
+                self.navigate(url, timeout=_IP_CHECK_TIMEOUT_SECONDS)
+            except ChromeException as exc:
+                problems.append(f"{url.split('/')[2]}: {exc}")
+                if self._proxy_auth_failed:
+                    break
+                continue
+            self._wait_document_ready()
+            body = self.execute_script('document.body ? document.body.innerText : ""')
+            ip, country = extract_ip_info(str(body or ""), country_field, ip_field)
+            if country:
+                self.exit_ip, self.exit_country = ip, country
+                break
+            problems.append(f"{url.split('/')[2]}: непонятный ответ")
+
+        # The check is not a page of 2GIS: what it loaded must not be taken for one.
+        self.clear_requests()
+
+        if self._proxy_auth_failed:
+            raise ProxyError(f"Прокси {proxy_name} не принял логин или пароль")
+        if self.exit_country is None:
+            if self._proxy is not None:
+                # With a proxy, "nothing loads" almost always means that the proxy is dead.
+                raise ProxyError(f"Не удалось выйти в интернет через прокси {proxy_name}: {'; '.join(problems)}")
+            raise ProxyError(
+                f"Не удалось узнать страну внешнего IP ({'; '.join(problems)}). "
+                "Проверьте сеть или отключите проверку: TWOGIS_PROXY_COUNTRY=off"
+            )
+
+        logger.info("External IP: %s (%s), %s", self.exit_ip, self.exit_country, proxy_name)
+        if required is not None and self.exit_country != required:
+            raise ProxyError(
+                f"Внешний IP {self.exit_ip} из страны {self.exit_country}, а нужна {required} ({proxy_name}). "
+                "Сбор остановлен, чтобы не ходить в 2ГИС с неподходящего IP"
+            )
 
     def _create_tab(self) -> Any:
         import pychrome
@@ -170,6 +241,9 @@ class ChromeRemote:
                     self._response_queues[pattern].put(response)
 
         def loading_failed(**kwargs: Any) -> None:
+            if kwargs.get("blockedReason") == "inspector":
+                self.blocked_count += 1
+                return  # our own refusal, not a failure of the site
             error_text = kwargs.get("errorText")
             blocked_reason = kwargs.get("blockedReason")
             bits = []
@@ -207,11 +281,71 @@ class ChromeRemote:
         self._chrome_tab.Network.loadingFailed = loading_failed
         self._chrome_tab.Network.requestWillBeSent = request_will_be_sent
 
+        def fetch_request_paused(**kwargs: Any) -> None:
+            """Fetch is on only to answer the proxy: every request goes on as it was."""
+            with contextlib.suppress(Exception):  # a cancelled request or a closing tab
+                self._chrome_tab.Fetch.continueRequest(requestId=kwargs["requestId"])
+
+        def fetch_auth_required(**kwargs: Any) -> None:
+            """The proxy asks for the login: it is given to the proxy only, never to a site."""
+            challenge = kwargs.get("authChallenge") or {}
+            proxy = self._proxy
+            if challenge.get("source") == "Proxy" and proxy is not None and not self._proxy_auth_failed:
+                self._proxy_auth_attempts += 1
+                if self._proxy_auth_attempts <= _PROXY_AUTH_MAX_ATTEMPTS:
+                    answer = {
+                        "response": "ProvideCredentials",
+                        "username": proxy.username,
+                        "password": proxy.password,
+                    }
+                else:
+                    self._proxy_auth_failed = True
+                    answer = {"response": "CancelAuth"}
+            else:
+                answer = {"response": "Default"}
+            with contextlib.suppress(Exception):
+                self._chrome_tab.Fetch.continueWithAuth(requestId=kwargs["requestId"], authChallengeResponse=answer)
+
         self._chrome_tab.Network.enable()
         self._chrome_tab.DOM.enable()
         self._chrome_tab.Page.enable()
         self._chrome_tab.Runtime.enable()
         self._chrome_tab.Log.enable()
+        self._apply_locale()
+        self._block_heavy_resources()
+
+        # Chrome ignores the login in --proxy-server, so the proxy's request for it is answered here.
+        if self._proxy is not None and self._proxy.has_auth:
+            self._chrome_tab.Fetch.requestPaused = fetch_request_paused
+            self._chrome_tab.Fetch.authRequired = fetch_auth_required
+            self._chrome_tab.Fetch.enable(handleAuthRequests=True, patterns=[{"urlPattern": "*"}])
+
+    def _block_heavy_resources(self) -> None:
+        """The light mode: the browser does not even ask for what only draws the page."""
+        if not self._chrome_options.light:
+            return
+        import pychrome
+
+        try:
+            self._chrome_tab.Network.setBlockedURLs(urls=list(HEAVY_RESOURCE_PATTERNS))
+        except pychrome.CallMethodException as exc:
+            logger.warning("Could not block the heavy resources, the browser stays heavier: %s", exc)
+
+    def _apply_locale(self) -> None:
+        """The timezone of the browser follows the place of the proxy; in headless mode the window gets a size."""
+        import pychrome
+
+        timezone = self._chrome_options.timezone
+        if timezone:
+            try:
+                self._chrome_tab.Emulation.setTimezoneOverride(timezoneId=timezone)
+            except pychrome.CallMethodException as exc:
+                logger.warning("Could not set the timezone %s: %s", timezone, exc)
+        if self._chrome_options.headless:
+            # A tab made over DevTools has a tiny window, and the map of 2GIS then collapses to a point.
+            self._chrome_tab.Emulation.setDeviceMetricsOverride(
+                width=1920, height=1080, deviceScaleFactor=1, mobile=False
+            )
 
     def _init_tab_monitor(self) -> None:
         """Detect V8 OOM tab crashes that leave WebSocket open until next command."""
@@ -350,15 +484,21 @@ class ChromeRemote:
 
     def perform_click(self, dom_node: DOMNode, timeout: int | None = None) -> None:
         """Scroll `dom_node` into center view and call its element.click(). No input events are synthesized."""
+        import pychrome
+
         tab = self._require_tab()
-        resolved_node = tab.DOM.resolveNode(backendNodeId=dom_node.backend_id, _timeout=timeout)
-        object_id = resolved_node["object"]["objectId"]
-        tab.Runtime.callFunctionOn(
-            objectId=object_id,
-            functionDeclaration=(
-                'function() { this.scrollIntoView({ block: "center", behavior: "instant" }); this.click(); }'
-            ),
-        )
+        try:
+            resolved_node = tab.DOM.resolveNode(backendNodeId=dom_node.backend_id, _timeout=timeout)
+            object_id = resolved_node["object"]["objectId"]
+            tab.Runtime.callFunctionOn(
+                objectId=object_id,
+                functionDeclaration=(
+                    'function() { this.scrollIntoView({ block: "center", behavior: "instant" }); this.click(); }'
+                ),
+            )
+        except pychrome.CallMethodException as exc:
+            # The page was redrawn and the node is gone: the reader finds the link again and clicks once more.
+            raise ChromeRuntimeException(str(exc)) from exc
 
     def bring_to_front(self) -> None:
         """Bring the browser window/tab to foreground for manual captcha passing."""
@@ -423,6 +563,8 @@ class ChromeRemote:
         """Close CDP tab, stop Chrome browser process, and release queues."""
         from requests.exceptions import RequestException
 
+        if self.blocked_count:
+            logger.info("The browser refused %d requests for heavy resources", self.blocked_count)
         tab, self._chrome_tab = self._chrome_tab, None
         browser, self._chrome_browser = self._chrome_browser, None
         self._chrome_interface = None

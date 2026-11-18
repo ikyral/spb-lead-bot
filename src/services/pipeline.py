@@ -7,20 +7,25 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.database.repo import find_existing_external_ids, get_lead_fingerprints, save_new_leads
 from src.services.chains import load_chain_index, refresh_chain_flags
 from src.services.checker import analyze_website, create_check_client
 from src.services.dedup import DuplicateIndex, merge_duplicate_places
-from src.services.dgis_key import DgisKeyPolicy, DgisQuota
 from src.services.providers.base import RawPlace
 from src.services.providers.csv_loader import parse_csv_leads
 from src.services.providers.osm import OSMOverpassProvider
-from src.services.providers.twogis import TwoGisOptions, TwoGisProvider
-from src.services.scorer import calculate_lead_score, is_worth_saving
-from src.services.site_status import SITE_DEAD, SITE_UNKNOWN, confidence_of_check, source_of_status
+from src.services.scorer import MIN_LEAD_SCORE, calculate_lead_score, is_worth_saving
+from src.services.site_status import (
+    SITE_DEAD,
+    SITE_FOUND,
+    SITE_HAS_SITE,
+    SITE_UNKNOWN,
+    confidence_of_check,
+    source_of_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,13 @@ ProgressCallback = Callable[[int, int], Awaitable[None]]
 def _contacts_unknown(place: RawPlace) -> bool:
     """The source gave no contacts, and none came from a duplicate in another source."""
     return not place.contacts_known and not (place.phone or place.raw_website or place.socials)
+
+
+def _why_not(site_status: str, score: int, place: RawPlace) -> str:
+    """The reason a place is not a lead, for the log."""
+    if site_status in (SITE_HAS_SITE, SITE_FOUND):
+        return f"the site works ({place.raw_website or 'a site is known'}), status {site_status}"
+    return f"score {score} is below {MIN_LEAD_SCORE} (site status {site_status})"
 
 
 async def _load_known_leads(session: AsyncSession) -> DuplicateIndex:
@@ -129,15 +141,21 @@ async def _process_and_save_places(
         )
 
         if not is_worth_saving(site_status, score):
+            logger.info("Not a lead: %r (%s): %s", place.name, place.external_id, _why_not(site_status, score, place))
             continue
 
         qualified += 1
 
         if known_leads.find(place.name, place.phone, place.map_url, place.address) is not None:
+            logger.info("Not new: %r (%s): the lead is already in the database", place.name, place.external_id)
             duplicates_skipped += 1
             continue
 
         is_chain = chains.is_chain(place.name)
+        if is_chain:
+            logger.info(
+                "Not issued: %r (%s): a chain, saved aside to count its branches", place.name, place.external_id
+            )
         (chains_to_save if is_chain else leads_to_save).append(
             {
                 "external_id": place.external_id,
@@ -200,52 +218,31 @@ async def save_collected_places(
         if place.external_id not in known_ids
         and known_leads.find(place.name, place.phone, place.map_url, place.address) is None
     ]
+    if len(fresh) < len(merged):
+        logger.info(
+            "Already in the database, not checked again: %d of %d places", len(merged) - len(fresh), len(merged)
+        )
     stats = await _process_and_save_places(session, fresh, extra_fields=extra_fields, seen=places)
     stats["total_found"] = len(places)
     stats["duplicates_skipped"] += len(places) - len(fresh)
     return stats
 
 
-def _manual_search_quota(session: AsyncSession, api_key: str) -> DgisQuota:
-    """Manual searches spend the same requests of the key as collection."""
-    session_maker = async_sessionmaker(session.bind, expire_on_commit=False, class_=AsyncSession)
-    return DgisQuota(session_maker, api_key, DgisKeyPolicy.from_settings(settings))
-
-
 async def run_lead_harvest(
     session: AsyncSession,
     district_name: str,
     category_key: str,
-    twogis_api_key: str | None = None,
     progress: ProgressCallback | None = None,
 ) -> dict[str, int]:
-    """Harvest leads from OSM and optionally 2GIS (queried concurrently), then verify and save them."""
+    """Harvest leads from OSM, then verify and save them; places already in the database are skipped."""
 
-    async def _search_osm() -> list[RawPlace]:
-        try:
-            return await OSMOverpassProvider().search_places(district_name, category_key)
-        except Exception:
-            # Providers handle network/API errors themselves; this only catches bugs, with a traceback.
-            logger.exception("OSM lead harvest failed for district %s", district_name)
-            return []
-
-    async def _search_2gis() -> list[RawPlace]:
-        if not twogis_api_key or not twogis_api_key.strip():
-            return []
-        try:
-            provider = TwoGisProvider(
-                twogis_api_key.strip(),
-                options=TwoGisOptions.from_settings(settings),
-                spend_request=_manual_search_quota(session, twogis_api_key).spend,
-            )
-            return await provider.search_places(district_name, category_key)
-        except Exception:
-            logger.exception("2GIS lead harvest failed for district %s", district_name)
-            return []
-
-    # gather keeps the order (OSM first), so duplicate merging keeps the OSM identity as before.
-    osm_places, twogis_places = await asyncio.gather(_search_osm(), _search_2gis())
-    return await _process_and_save_places(session, osm_places + twogis_places, progress=progress)
+    try:
+        places = await OSMOverpassProvider().search_places(district_name, category_key)
+    except Exception:
+        # Providers handle network/API errors themselves; this only catches bugs, with a traceback.
+        logger.exception("OSM lead harvest failed for district %s", district_name)
+        places = []
+    return await _process_and_save_places(session, places, progress=progress)
 
 
 async def import_csv_harvest(

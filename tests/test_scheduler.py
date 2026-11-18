@@ -228,13 +228,13 @@ async def test_partial_status_when_some_targets_failed(session_maker) -> None:
 
 async def test_no_key_and_no_other_source_gives_a_clear_message_without_requests(session_maker) -> None:
     reports = Reports()
-    runner = _runner(session_maker, None, reports, disabled={"2gis": "не задан TWOGIS_API_KEY"})
+    runner = _runner(session_maker, None, reports, disabled={"2gis_cdp": "не установлен pychrome"})
     assert await runner.run_once(TRIGGER_MANUAL) is True
 
     state = await _state(session_maker)
     assert state.last_status == STATUS_FAILED
-    assert "не задан TWOGIS_API_KEY" in state.last_error
-    assert "не задан TWOGIS_API_KEY" in reports.items[0].new_alerts[0]
+    assert "не установлен pychrome" in state.last_error
+    assert "не установлен pychrome" in reports.items[0].new_alerts[0]
 
 
 async def test_daily_limit_stops_runs_and_resets_the_next_day(session_maker) -> None:
@@ -430,10 +430,10 @@ async def test_run_killed_with_the_process_is_marked_on_next_start(session_maker
 
 
 async def test_status_shows_sources_and_schedule(session_maker) -> None:
-    runner = _runner(session_maker, Provider(), Reports(), disabled={"2gis": "не задан TWOGIS_API_KEY"})
+    runner = _runner(session_maker, Provider(), Reports(), disabled={"2gis_cdp": "не установлен pychrome"})
     status = await runner.get_status()
     assert status.active_providers == ["fake"]
-    assert status.disabled_providers == {"2gis": "не задан TWOGIS_API_KEY"}
+    assert status.disabled_providers == {"2gis_cdp": "не установлен pychrome"}
     assert "0 4 * * *" in status.schedule_text
     assert "Europe/Moscow" in status.schedule_text
 

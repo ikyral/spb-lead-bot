@@ -1,22 +1,33 @@
 """Builds the providers enabled in COLLECT_PROVIDERS, explaining why any of them is unavailable."""
 
 import importlib.util
-from collections.abc import Awaitable, Callable
+import logging
 from dataclasses import dataclass, field
 
 from src.services.providers.base import BaseMapProvider
 from src.services.providers.osm import OSMOverpassProvider
-from src.services.providers.twogis import TwoGisOptions, TwoGisProvider
 from src.services.providers.twogis_cdp import CdpOptions, TwoGisCdpProvider
 from src.services.providers.twogis_scraper import ScraperOptions, TwoGisScraperProvider
 from src.services.providers.yandex import YANDEX_DISABLED_REASON
 
-KNOWN_PROVIDERS: frozenset[str] = frozenset({"2gis_scraper", "2gis_cdp", "2gis", "osm", "yandex"})
-CDP_MANUAL_ONLY_REASON: str = (
-    "запускается только вручную на компьютере с экраном: "
-    "python collect_cli.py --assisted (COLLECTOR_PROVIDERS=2gis_cdp)"
-)
-CDP_NOT_INSTALLED_REASON: str = "не установлен pychrome (pip install -r requirements-cdp.txt)"
+logger = logging.getLogger(__name__)
+
+KNOWN_PROVIDERS: frozenset[str] = frozenset({"2gis_scraper", "2gis_cdp", "osm", "yandex"})
+# The API of 2GIS is gone: the old name of the provider now means the browser one.
+LEGACY_PROVIDER_ALIASES: dict[str, str] = {"2gis": "2gis_cdp"}
+CDP_NOT_INSTALLED_REASON: str = "не установлен pychrome (pip install -r requirements.txt)"
+
+
+def resolve_provider_aliases(names: list[str], setting: str) -> list[str]:
+    """Replace the removed provider names by their successors, warn about it, keep the order, drop repeats."""
+    result: list[str] = []
+    for name in names:
+        target = LEGACY_PROVIDER_ALIASES.get(name, name)
+        if target != name:
+            logger.warning("%s: провайдер %s удалён, используется %s. Замените имя в .env", setting, name, target)
+        if target not in result:
+            result.append(target)
+    return result
 
 
 @dataclass
@@ -29,23 +40,19 @@ class ProviderSet:
 
 def build_providers(
     enabled: list[str],
-    twogis_api_key: str | None,
     scraper_options: ScraperOptions | None = None,
-    twogis_options: TwoGisOptions | None = None,
-    twogis_spend_request: Callable[[], Awaitable[None]] | None = None,
     cdp_options: CdpOptions | None = None,
 ) -> ProviderSet:
     """
     Create providers from validated names, in the given order (the first source wins on merge).
 
-    2gis_cdp is built only when `cdp_options` is given: only the manual collector does that.
+    2gis_cdp works on the schedule and by hand alike. Without `cdp_options` it gets the defaults (no proxy);
+    without the package pychrome it is left out with a reason.
     """
     result = ProviderSet()
     for name in enabled:
         if name == "2gis_cdp":
-            if cdp_options is None:
-                result.disabled[name] = CDP_MANUAL_ONLY_REASON
-            elif importlib.util.find_spec("pychrome") is None:
+            if importlib.util.find_spec("pychrome") is None:
                 result.disabled[name] = CDP_NOT_INSTALLED_REASON
             else:
                 result.providers.append(TwoGisCdpProvider(cdp_options))
@@ -54,13 +61,6 @@ def build_providers(
                 result.providers.append(TwoGisScraperProvider(scraper_options))
             else:
                 result.disabled[name] = "не установлен playwright (pip install playwright, playwright install chromium)"
-        elif name == "2gis":
-            if twogis_api_key and twogis_api_key.strip():
-                result.providers.append(
-                    TwoGisProvider(twogis_api_key.strip(), options=twogis_options, spend_request=twogis_spend_request)
-                )
-            else:
-                result.disabled[name] = "не задан DGIS_API_KEY"
         elif name == "osm":
             result.providers.append(OSMOverpassProvider())
         elif name == "yandex":

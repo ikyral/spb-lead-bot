@@ -90,6 +90,14 @@ class ProviderNoConnectionError(ProviderStoppedError):
     """The site did not answer anything at all: the problem is on this side."""
 
 
+class ProviderProxyError(ProviderStoppedError):
+    """
+    The proxy of the browser does not work or the exit IP is from the wrong country.
+
+    A problem on this side of the network, so not a block of the site: nothing is counted against 2GIS.
+    """
+
+
 class ProviderBlockedError(ProviderError):
     """
     The site refused automated access: captcha, 403, 429 or a page that came empty.

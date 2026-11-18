@@ -28,7 +28,7 @@ from src.database.models import (
 )
 from src.database.repo import DigestCounts, get_digest_counts, get_followups, set_contact_status
 from src.services.digest import FOLLOWUPS_SHOWN, DigestData, digest_bounds, digest_window_open
-from src.services.scheduler import DgisKeyStatus, RequestUsage
+from src.services.scheduler import RequestUsage
 from src.services.site_status import SITE_DEAD, SITE_FOUND, SITE_NO_SITE, SITE_UNKNOWN
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -239,27 +239,20 @@ def _data(counts: DigestCounts, followups: list[Lead], usage: RequestUsage | Non
     return DigestData(NOW.date(), counts, followups, 3, usage)
 
 
-def _usage(used: int, limit: int) -> RequestUsage:
-    key = DgisKeyStatus(used=used, limit=limit, reserve=50, expires_on=None, days_left=None, request_contacts=False)
-    return RequestUsage(collector_today=0, collector_day_limit=200, dgis_key=key)
-
-
 def test_an_empty_plan_says_there_is_nobody_to_remind() -> None:
     text = format_digest_summary(_data(DigestCounts(0, 0, 0, 0), []))
 
     assert "План на 09.11" in text
     assert "Полезных лидов в запасе (без сайта и сайт не открывается): <b>0</b>" in text
     assert "Напоминать сегодня некому." in text
-    assert "API 2ГИС" not in text  # no key, no line
 
 
 def test_a_plan_with_data() -> None:
-    text = format_digest_summary(_data(DigestCounts(12, 340, 2, 5), [_issued(1), _issued(2)], _usage(640, 1000)))
+    text = format_digest_summary(_data(DigestCounts(12, 340, 2, 5), [_issued(1), _issued(2)]))
 
     assert "<b>12</b>" in text and "<b>340</b>" in text
     assert "Напоминаний на сегодня: <b>2</b>" in text
     assert "«Написал» без ответа дольше 3 дн.: <b>5</b>" in text
-    assert "Запросов к API 2ГИС осталось: <b>360</b> из 1000" in text
     assert "Пора напомнить (2)" in text
 
 

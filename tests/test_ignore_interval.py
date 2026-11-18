@@ -161,7 +161,7 @@ def cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         collector_cli,
         "build_providers",
-        lambda names, key, options=None, *rest: ProviderSet(providers=[provider(options)]),
+        lambda names, options=None, cdp_options=None: ProviderSet(providers=[provider(options)]),
     )
 
     async def fake_analyze(url, client=None):

@@ -25,11 +25,10 @@ from src.config import resolve_path, settings, settings_error
 from src.database.repo import async_session_maker, engine, init_db, migrate_legacy_ownership
 from src.services.chains import load_chain_index, refresh_chain_flags
 from src.services.collector import load_collector_config
-from src.services.dgis_key import DgisKeyPolicy, DgisQuota
 from src.services.lead_import import ImportService
 from src.services.ownership import RELEASE_INTERVAL_SECONDS, RELEASE_JOB_ID, release_expired_job
 from src.services.providers.registry import build_providers
-from src.services.providers.twogis import TwoGisOptions
+from src.services.providers.twogis_cdp import CdpOptions
 from src.services.providers.twogis_scraper import ScraperOptions
 from src.services.scheduler import CollectorRunner
 
@@ -87,20 +86,12 @@ async def main() -> None:
     # Last: it takes any private text the others did not.
     dp.include_router(fallback_router)
 
-    twogis_key = settings.TWOGIS_API_KEY.get_secret_value() if settings.TWOGIS_API_KEY else None
-    dgis_quota = (
-        DgisQuota(async_session_maker, twogis_key, DgisKeyPolicy.from_settings(settings))
-        if twogis_key and twogis_key.strip()
-        else None
-    )
     if settings.SCRAPER_ASSISTED:
         logger.warning("SCRAPER_ASSISTED is ignored by the bot: it works only in the collector on a computer")
     provider_set = build_providers(
         collector_config.providers,
-        twogis_key,
         ScraperOptions.from_settings(settings),
-        TwoGisOptions.from_settings(settings),
-        dgis_quota.spend if dgis_quota else None,
+        CdpOptions.from_settings(settings),
     )
     for name, reason in provider_set.disabled.items():
         logger.warning("Provider %s is disabled: %s", name, reason)
@@ -117,8 +108,6 @@ async def main() -> None:
         external_mode=not settings.COLLECT_ENABLED or not collector_config.providers,
         pool_reminder=notifier.remind_pool_low,
         batch_size=settings.LEADS_BATCH_SIZE,
-        dgis_quota=dgis_quota,
-        key_notice=notifier.send,
     )
     dp["collector_runner"] = collector_runner
 

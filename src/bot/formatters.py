@@ -13,8 +13,6 @@ from src.bot.texts import (
     BATCH_BUTTON_TEXT,
     CONTACT_SOURCE_TITLES,
     CONTACTS_TITLE,
-    DIGEST_API_LEFT_LINE,
-    DIGEST_API_USED_LINE,
     DIGEST_DUE_LINE,
     DIGEST_FOLLOWUPS_TITLE,
     DIGEST_NO_FOLLOWUPS,
@@ -93,7 +91,7 @@ if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this modul
     from src.services.lead_enrich import EnrichStats, UsefulLead
     from src.services.lead_import import ImportResult
     from src.services.niche_priority import NicheStats
-    from src.services.scheduler import CollectorStatus, DgisKeyStatus, RequestUsage, RunReport
+    from src.services.scheduler import CollectorStatus, RequestUsage, RunReport
 
 # Telegram's limit for one message.
 MAX_MESSAGE_LENGTH: int = 4096
@@ -371,11 +369,6 @@ def format_digest_summary(data: DigestData) -> str:
         DIGEST_DUE_LINE.format(count=counts.reminders_due),
         DIGEST_STALE_LINE.format(days=data.followup_after_days, count=counts.written_no_answer),
     ]
-    key = data.usage.dgis_key if data.usage is not None else None
-    if key is not None and key.limit:
-        lines.append(DIGEST_API_LEFT_LINE.format(left=max(0, key.limit - key.used), limit=key.limit))
-    elif key is not None:
-        lines.append(DIGEST_API_USED_LINE.format(used=key.used))
     if data.owner is not None:
         lines += [
             "",
@@ -551,25 +544,8 @@ def format_funnel_stats(
 
 
 def format_request_usage(usage: RequestUsage) -> str:
-    """API requests for /leads_stats. The daily counter of the collector covers 2GIS and OSM together."""
-    lines = [
-        "\n🔌 <b>Запросы к API:</b>",
-        f"• Сбор за сутки (2ГИС и OSM): <b>{usage.collector_today}</b> из {usage.collector_day_limit}",
-    ]
-    key = usage.dgis_key
-    if key is None:
-        lines.append("• 2ГИС: ключ не задан, запросов нет")
-        return "\n".join(lines)
-    lines.append(f"• 2ГИС всего с этим ключом: <b>{key.used}</b>")
-    if key.limit:
-        left = max(0, key.limit - key.used)
-        lines.append(
-            f"• Осталось по лимиту ключа: <b>{left}</b> из {key.limit} "
-            f"(сбор остановится, когда останется резерв {key.reserve})"
-        )
-    else:
-        lines.append("• Лимит ключа не задан (DGIS_REQUEST_LIMIT)")
-    return "\n".join(lines)
+    """Requests of the collector for /leads_stats. The daily counter covers all its sources together."""
+    return f"\n🔌 <b>Запросы сбора:</b>\n• За сутки: <b>{usage.collector_today}</b> из {usage.collector_day_limit}"
 
 
 def format_collection_report(report: RunReport) -> str:
@@ -790,26 +766,6 @@ def _stock_lines(status: CollectorStatus) -> list[str]:
     return lines
 
 
-def _dgis_key_lines(key: DgisKeyStatus) -> list[str]:
-    """What is left of the API key: requests and days."""
-    if key.limit:
-        left = max(0, key.limit - key.used)
-        requests = f"израсходовано <b>{key.used}</b> из {key.limit}, осталось <b>{left}</b> (резерв {key.reserve})"
-    else:
-        requests = f"израсходовано <b>{key.used}</b>, лимит не задан"
-    lines = [f"\n<b>API 2ГИС</b>: {requests}"]
-    if key.expires_on is not None and key.days_left is not None:
-        shown = key.expires_on.strftime("%d.%m.%Y")
-        if key.days_left < 0:
-            lines.append(f"⌛ Срок ключа закончился {shown}")
-        else:
-            lines.append(f"Ключ действует до {shown}, осталось дней: <b>{key.days_left}</b>")
-    else:
-        lines.append("Срок ключа неизвестен: задайте DGIS_KEY_CREATED_AT")
-    lines.append(f"Контакты: {'запрашиваются' if key.request_contacts else 'не запрашиваются, смотри в карточке'}")
-    return lines
-
-
 def _site_stock_lines(status: CollectorStatus) -> list[str]:
     return _pool_stats_lines(status.pool_stats) if status.pool_stats is not None else []
 
@@ -838,7 +794,6 @@ def format_collector_status(status: CollectorStatus) -> str:
                 "Режим: <b>внешний сборщик</b>. Этот сервер сам не собирает, лиды приходят файлами.",
                 *_stock_lines(status),
                 *_site_stock_lines(status),
-                *(_dgis_key_lines(status.dgis_key) if status.dgis_key else []),
                 *_import_lines(status.last_import, status.imported_total),
             ]
         )
@@ -860,8 +815,6 @@ def format_collector_status(status: CollectorStatus) -> str:
     lines += _stock_lines(status)
     lines += _site_stock_lines(status)
     lines.append(f"Запросов за сутки: {status.requests_today} из {status.max_requests_per_day}")
-    if status.dgis_key:
-        lines += _dgis_key_lines(status.dgis_key)
     if status.is_running:
         lines.append("\n⏳ <b>Сбор выполняется прямо сейчас</b>")
 

@@ -12,6 +12,15 @@ class ChromePathNotFound(ChromeException):
         super().__init__(message)
 
 
+class ProxyError(ChromeException):
+    """
+    The proxy does not answer or does not accept the login, or the exit IP is from the wrong country.
+
+    Fatal for the whole run: going on would reach 2GIS from an IP that was not meant for it. This is a
+    problem of this side's network, not a refusal of the site.
+    """
+
+
 class ChromeUserAbortException(ChromeException):
     """CDP tab connection was closed deliberately."""
 

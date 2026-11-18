@@ -21,7 +21,7 @@ from src.services.api_client import (
     ProviderTemporaryError,
 )
 from src.services.collector import MAX_CONSECUTIVE_FAILURES, _progress_key, collect_leads, load_collector_config
-from src.services.providers import OSMOverpassProvider, TwoGisProvider
+from src.services.providers import OSMOverpassProvider
 from src.services.providers.base import (
     SPB_DISTRICTS,
     TARGET_CATEGORIES,
@@ -32,7 +32,7 @@ from src.services.providers.base import (
     SearchQuery,
 )
 from src.services.providers.registry import build_providers
-from src.services.providers.twogis import TwoGisOptions
+from src.services.providers.twogis_catalog import parse_catalog_items
 from src.services.providers.yandex import YandexProvider
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -51,17 +51,6 @@ def _config(**overrides):
 
 def _fixture(name: str) -> dict:
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
-
-
-def _twogis(payload_or_handler, api_key: str = "SECRET-KEY", require_contacts: bool = False) -> TwoGisProvider:
-    handler = payload_or_handler
-    if not callable(payload_or_handler):
-        handler = lambda request: httpx.Response(200, json=payload_or_handler)  # noqa: E731
-    return TwoGisProvider(
-        api_key,
-        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-        options=TwoGisOptions(require_contacts=require_contacts),
-    )
 
 
 # ---------- settings ----------
@@ -116,7 +105,7 @@ def test_invalid_settings_name_the_variable(overrides: dict, message: str) -> No
 def test_default_targets_are_all_categories_in_all_districts() -> None:
     config = _config()
     assert len(config.targets) == len(TARGET_CATEGORIES) * len(SPB_DISTRICTS)
-    assert config.providers == ["2gis", "osm"]  # 2GIS is the main source, the page reader is not listed
+    assert config.providers == ["2gis_cdp", "osm"]  # the browser reader of 2GIS is the main source
     assert len(config.targets) == 220
     assert {"pet_services", "fitness_studios", "furniture_custom", "kids_centers"} <= {
         target.query.category for target in config.targets
@@ -153,13 +142,6 @@ def test_empty_values_in_env_mean_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     assert _settings().COLLECT_INTERVAL_MINUTES is None
 
 
-def test_provider_without_key_is_disabled_with_a_clear_reason() -> None:
-    result = build_providers(["2gis", "osm", "yandex"], twogis_api_key="  ")
-    assert [provider.name for provider in result.providers] == ["osm"]
-    assert result.disabled["2gis"] == "не задан DGIS_API_KEY"
-    assert "Яндекс" in result.disabled["yandex"]
-
-
 async def test_yandex_stub_never_returns_data() -> None:
     assert await YandexProvider().search_places("Центральный", "beauty") == []
     with pytest.raises(Exception, match="Яндекс"):
@@ -169,15 +151,20 @@ async def test_yandex_stub_never_returns_data() -> None:
 # ---------- 2GIS page parsing ----------
 
 
-async def test_twogis_page_from_fixture_keeps_only_valid_organizations() -> None:
-    page = await _twogis(_fixture("twogis_items.json")).search(QUERY, AREA, page=1, page_size=50)
+def _catalog_places(name: str) -> list[RawPlace]:
+    """What the browser providers get out of a card of 2GIS: the pure parser on a saved response."""
+    return parse_catalog_items(_fixture(name), "Центральный", "dentist_clinic", True)
 
-    assert [place.external_id for place in page.places] == [
+
+def test_twogis_items_from_fixture_keep_only_valid_organizations() -> None:
+    places = _catalog_places("twogis_items.json")
+
+    assert [place.external_id for place in places] == [
         "2gis_70000001018420390_abc123def",
         "2gis_70000001018420391",
         "2gis_70000001018420393",
     ]
-    first = page.places[0]
+    first = places[0]
     assert (first.source, first.name, first.category, first.district, first.high_margin) == (
         "2gis",
         "Улыбка, стоматология",
@@ -189,52 +176,9 @@ async def test_twogis_page_from_fixture_keeps_only_valid_organizations() -> None
     assert first.source_url == "https://2gis.ru/spb/firm/70000001018420390"
     assert first.map_url == "https://yandex.ru/maps/?pt=30.325,59.935&z=17&l=map"
     assert first.socials == "https://vk.com/smile_spb"
-    assert page.has_more is False
-    assert page.warning is None
 
-    odd = page.places[2]
+    odd = places[2]
     assert (odd.phone, odd.raw_website, odd.map_url) == (None, None, None)
-
-
-async def test_twogis_request_contains_the_query_area_page_and_key() -> None:
-    requests: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(200, json=_fixture("twogis_not_found.json"))
-
-    page = await _twogis(handler).search(QUERY, AREA, page=3, page_size=10)
-    assert page.places == [] and page.has_more is False
-    params = dict(requests[0].url.params)
-    assert (params["q"], params["page"], params["page_size"]) == ("стоматология", "3", "10")
-    assert params["key"] == "SECRET-KEY"
-    assert (params["point1"], params["point2"]) == ("30.3,59.95", "30.4,59.9")
-    assert "items.contact_groups" not in params["fields"]
-
-
-async def test_twogis_blocked_key_raises_without_leaking_it() -> None:
-    with pytest.raises(ProviderAuthError) as error:
-        await _twogis(_fixture("twogis_key_blocked.json")).search(QUERY, AREA)
-    assert "keyIsBlocked" in str(error.value)
-    assert "SECRET-KEY" not in str(error.value)
-
-
-async def test_twogis_without_key_says_so_and_sends_nothing() -> None:
-    def fail(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("no request may be sent without a key")
-
-    with pytest.raises(ProviderAuthError, match="TWOGIS_API_KEY"):
-        await _twogis(fail, api_key="").search(QUERY, AREA)
-
-
-async def test_twogis_warns_about_missing_contacts_only_if_they_are_required() -> None:
-    page = await _twogis(_fixture("twogis_no_contacts.json")).search(QUERY, AREA)
-    assert len(page.places) == 5
-    assert page.warning is None
-
-    provider = _twogis(_fixture("twogis_no_contacts.json"), require_contacts=True)
-    page = await provider.search(QUERY, AREA)
-    assert "contact_groups" in (page.warning or "")
 
 
 async def test_overpass_search_reports_total_failure_and_skips_free_text() -> None:
@@ -291,6 +235,22 @@ class FakeProvider(BaseMapProvider):
         if page > len(self.pages):
             return SearchPage(places=[])
         return SearchPage(places=self.pages[page - 1], has_more=page < len(self.pages))
+
+
+class WarningProvider(BaseMapProvider):
+    """Serves one page of places with a warning about the data, like a source that answers without contacts."""
+
+    name = "warning"
+
+    def __init__(self, places: list[RawPlace], warning: str) -> None:
+        self.places = places
+        self.warning = warning
+
+    async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:
+        return []
+
+    async def search(self, query, area, page=1, page_size=50) -> SearchPage:
+        return SearchPage(places=self.places if page == 1 else [], warning=self.warning)
 
 
 @pytest.fixture
@@ -459,7 +419,7 @@ async def test_results_before_a_failure_are_kept(session_maker, no_site_checks) 
 
 async def test_data_warning_becomes_a_single_alert(session_maker, no_site_checks, monkeypatch) -> None:
     monkeypatch.setattr(pipeline.settings, "LEADS_REQUIRE_CONTACT", True)
-    provider = _twogis(_fixture("twogis_no_contacts.json"), require_contacts=True)
+    provider = WarningProvider(_catalog_places("twogis_no_contacts.json"), "нет доступа к contact_groups")
     config = _config(COLLECT_QUERIES="dentist_clinic,beauty", COLLECT_DISTRICTS="Центральный")
     result = await collect_leads(session_maker, [provider], config)
     assert len(result.alerts) == 1
@@ -493,8 +453,8 @@ async def test_budget_argument_overrides_the_run_limit(session_maker, no_site_ch
 
 
 async def test_from_2gis_response_to_the_card_the_admin_receives(session_maker, no_site_checks) -> None:
-    """The whole way: API response, normalization, storage, batch, message."""
-    provider = _twogis(_fixture("twogis_items.json"))
+    """The whole way: a card of 2GIS, normalization, storage, batch, message."""
+    provider = FakeProvider(pages=[_catalog_places("twogis_items.json")])
     result = await collect_leads(session_maker, [provider], _one_target(COLLECT_MAX_PAGES=1))
     assert result.errors == 0
     assert result.saved_new == 3  # the third has no contacts: a lead too, handed out after the others
@@ -516,6 +476,12 @@ async def test_from_2gis_response_to_the_card_the_admin_receives(session_maker, 
     assert format_issued_lead(batch[2]).count("смотри в карточке") == 1
 
 
+def test_items_without_contacts_are_still_parsed() -> None:
+    places = _catalog_places("twogis_no_contacts.json")
+    assert len(places) == 5
+    assert not any(place.contacts_known for place in places)
+
+
 def test_env_example_is_a_valid_configuration() -> None:
     """A copy of .env.example must start the bot and match the documented defaults."""
     example = Path(__file__).parent.parent / ".env.example"
@@ -523,6 +489,11 @@ def test_env_example_is_a_valid_configuration() -> None:
     config = load_collector_config(settings)
     assert Settings.model_fields["COLLECT_CRON"].default == settings.COLLECT_CRON
     assert settings.COLLECT_INTERVAL_MINUTES is None
-    assert settings.TWOGIS_API_KEY is None
     assert (settings.LEADS_BATCH_SIZE, settings.LEADS_MIN_POOL) == (30, 60)
-    assert config.providers == ["2gis", "osm"]
+    assert config.providers == ["2gis_cdp", "osm"]
+
+
+def test_registry_explains_why_a_provider_is_off() -> None:
+    result = build_providers(["osm", "yandex"])
+    assert [provider.name for provider in result.providers] == ["osm"]
+    assert "Яндекс" in result.disabled["yandex"]

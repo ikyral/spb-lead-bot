@@ -14,6 +14,7 @@ from src.database.repo import get_leads, get_leads_stats, update_crm_status
 from src.services import pipeline
 from src.services.pipeline import import_csv_harvest, run_lead_harvest
 from src.services.providers.base import RawPlace
+from src.services.providers.osm import OSMOverpassProvider
 
 
 @pytest.fixture
@@ -146,11 +147,11 @@ async def test_get_leads_stats_and_status_transitions(session: AsyncSession) -> 
 
 
 @pytest.mark.asyncio
-async def test_run_lead_harvest_with_providers(
+async def test_run_lead_harvest_saves_the_places_of_osm(
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify run_lead_harvest aggregates OSM and 2GIS places."""
+    """The manual search reads OSM; places already in the database are not saved twice."""
     fake_osm_place = RawPlace(
         external_id="osm_999",
         source="osm",
@@ -159,88 +160,26 @@ async def test_run_lead_harvest_with_providers(
         phone="+79998887766",
         high_margin=True,
     )
-    fake_2gis_place = RawPlace(
-        external_id="2gis_888",
-        source="2gis",
-        name="Косметолог",
-        category="beauty",
-        raw_website="https://vk.com/cosmo",
-        high_margin=True,
-    )
 
     async def mock_osm_search(self: Any, district: str, category: str) -> list[RawPlace]:
         return [fake_osm_place]
 
-    async def mock_2gis_search(self: Any, district: str, category: str) -> list[RawPlace]:
-        return [fake_2gis_place]
-
-    from src.services.providers.osm import OSMOverpassProvider
-    from src.services.providers.twogis import TwoGisProvider
-
     monkeypatch.setattr(OSMOverpassProvider, "search_places", mock_osm_search)
-    monkeypatch.setattr(TwoGisProvider, "search_places", mock_2gis_search)
 
-    res = await run_lead_harvest(
-        session=session,
-        district_name="Центральный",
-        category_key="auto_repair",
-        twogis_api_key="valid_token_123",
-    )
+    res = await run_lead_harvest(session=session, district_name="Центральный", category_key="auto_repair")
+    assert (res["total_found"], res["qualified"], res["saved_new"], res["duplicates_skipped"]) == (1, 1, 1, 0)
 
-    assert res["total_found"] == 2
-    assert res["qualified"] == 2
-    assert res["saved_new"] == 2
-    assert res["duplicates_skipped"] == 0
+    again = await run_lead_harvest(session=session, district_name="Центральный", category_key="auto_repair")
+    assert (again["saved_new"], again["duplicates_skipped"]) == (0, 1)
 
 
-@pytest.mark.asyncio
-async def test_run_lead_harvest_merges_same_business_from_osm_and_2gis(
-    session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The same business returned by OSM and 2GIS must be saved once, enriched with 2GIS contacts."""
-    osm_place = RawPlace(
-        external_id="osm_501",
-        source="osm",
-        name="Стоматология Улыбка",
-        category="dentist_clinic",
-        phone="+7 812 555-01-01",
-        high_margin=True,
-    )
-    twogis_place = RawPlace(
-        external_id="2gis_701",
-        source="2gis",
-        name="Улыбка, стоматология",
-        category="dentist_clinic",
-        phone="8 (812) 555-01-01",
-        socials="https://vk.com/ulybka",
-        address="Невский проспект, 22",
-        high_margin=True,
-    )
+async def test_run_lead_harvest_survives_a_failing_osm(session: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def broken(self: Any, district: str, category: str) -> list[RawPlace]:
+        raise RuntimeError("overpass")
 
-    async def mock_osm_search(self: Any, district: str, category: str) -> list[RawPlace]:
-        return [osm_place]
-
-    async def mock_2gis_search(self: Any, district: str, category: str) -> list[RawPlace]:
-        return [twogis_place]
-
-    from src.services.providers.osm import OSMOverpassProvider
-    from src.services.providers.twogis import TwoGisProvider
-
-    monkeypatch.setattr(OSMOverpassProvider, "search_places", mock_osm_search)
-    monkeypatch.setattr(TwoGisProvider, "search_places", mock_2gis_search)
-
-    res = await run_lead_harvest(session, "Центральный", "dentist_clinic", twogis_api_key="key")
-    assert res == {"total_found": 2, "qualified": 1, "saved_new": 1, "duplicates_skipped": 0}
-
-    leads = await get_leads(session, limit=10)
-    assert len(leads) == 1
-    lead = leads[0]
-    assert (lead.external_id, lead.socials, lead.address) == (
-        "osm_501",
-        "https://vk.com/ulybka",
-        "Невский проспект, 22",
-    )
+    monkeypatch.setattr(OSMOverpassProvider, "search_places", broken)
+    res = await run_lead_harvest(session, "Центральный", "auto_repair")
+    assert (res["total_found"], res["saved_new"]) == (0, 0)
 
 
 @pytest.mark.asyncio
@@ -331,48 +270,6 @@ async def test_progress_callback_reports_checked_sites_and_errors_do_not_break_h
 
     assert reports == [(done, 10) for done in range(1, 11)]
     assert stats["saved_new"] == 10
-
-
-@pytest.mark.asyncio
-async def test_run_lead_harvest_queries_osm_and_2gis_concurrently(
-    session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """OSM (up to 30s per endpoint) and 2GIS (up to 10 pages) used to be queried one after another."""
-    twogis_started = asyncio.Event()
-
-    async def osm_waits_for_2gis(self: Any, district: str, category: str) -> list[RawPlace]:
-        await asyncio.wait_for(twogis_started.wait(), timeout=2)
-        return [
-            RawPlace(
-                external_id="osm_1", source="osm", name="Улыбка", category="dentist_clinic", phone="+7 812 555-01-01"
-            )
-        ]
-
-    async def twogis_search(self: Any, district: str, category: str) -> list[RawPlace]:
-        twogis_started.set()
-        return [
-            RawPlace(
-                external_id="2gis_1",
-                source="2gis",
-                name="Улыбка, стоматология",
-                category="dentist_clinic",
-                phone="8 812 555-01-01",
-                socials="https://vk.com/u",
-            )
-        ]
-
-    from src.services.providers.osm import OSMOverpassProvider
-    from src.services.providers.twogis import TwoGisProvider
-
-    monkeypatch.setattr(OSMOverpassProvider, "search_places", osm_waits_for_2gis)
-    monkeypatch.setattr(TwoGisProvider, "search_places", twogis_search)
-
-    res = await run_lead_harvest(session, "Центральный", "dentist_clinic", twogis_api_key="key")
-
-    assert res["total_found"] == 2 and res["saved_new"] == 1
-    # Source order is preserved: the OSM record keeps its identity after merging
-    assert [lead.external_id for lead in await get_leads(session, limit=10)] == ["osm_1"]
 
 
 @pytest.mark.asyncio

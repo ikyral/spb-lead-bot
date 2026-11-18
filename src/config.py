@@ -1,9 +1,12 @@
-from datetime import date
+import re
 from pathlib import Path, PurePosixPath
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
+
+from src.services.scraper.chrome.proxy import normalize_country, parse_proxy
 
 # Relative paths (.env, sqlite files) are resolved against the project root,
 # not the current working directory.
@@ -12,6 +15,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 class SettingsError(ValueError):
     """The settings cannot work. The message is meant for the owner; any other ValueError is a bug."""
+
+
+class ProxySettingsError(Exception):
+    """
+    TWOGIS_PROXY cannot be used. Not a ValueError on purpose: pydantic would print the whole input with
+    the error, and the input holds the password of the proxy.
+    """
 
 
 # OUTREACH_OFFER and OUTREACH_SIGNATURE are cut to this many characters.
@@ -26,21 +36,6 @@ class Settings(BaseSettings):
     BOT_TOKEN: SecretStr = SecretStr("")
     # The main owner of the bot. Leads worked before ownership existed are given to this ID.
     ADMIN_TG_ID: int = 0
-    # The main source of leads (provider 2gis) and manual search.
-    # DGIS_API_KEY and the older name TWOGIS_API_KEY both work; DGIS_API_KEY wins.
-    TWOGIS_API_KEY: SecretStr | None = None
-    DGIS_API_KEY: SecretStr | None = None
-    # Demo keys allow 10 items on a page and 5 pages per query. false only for a paid key.
-    DGIS_DEMO_KEY: bool = True
-    # Ask for items.contact_groups. It needs paid access; without it organizations come without contacts.
-    DGIS_REQUEST_CONTACTS: bool = False
-    # Requests allowed for one key, 0 = no limit. A demo key has 1000 in total.
-    # Collection stops DGIS_REQUEST_RESERVE requests short of the limit.
-    DGIS_REQUEST_LIMIT: int = Field(default=1000, ge=0)
-    DGIS_REQUEST_RESERVE: int = Field(default=50, ge=0)
-    # Optional. A demo key lives 30 days from this date; admins are warned DGIS_KEY_WARN_DAYS before.
-    DGIS_KEY_CREATED_AT: date | None = None
-    DGIS_KEY_WARN_DAYS: int = Field(default=5, ge=1, le=29)
     DB_URL: str = "sqlite+aiosqlite:///./leads.db"
     # Additional admins (operators), comma-separated. ADMIN_TG_ID stays required and is always an admin.
     ADMIN_TG_IDS: str = ""
@@ -87,9 +82,9 @@ class Settings(BaseSettings):
     COLLECT_INTERVAL_MINUTES: int | None = Field(default=None, ge=1)  # when set, replaces COLLECT_CRON
     COLLECT_TIMEZONE: str = "Europe/Moscow"
     COLLECT_RUN_ON_START: bool = False
-    # 2gis is the main source and needs no access to contacts; without a key it is skipped.
+    # 2gis_cdp is the main source (a browser, see TWOGIS_*); the removed name 2gis is an alias of it.
     # 2gis_scraper is opt-in and not listed here: the site answers it with a captcha.
-    COLLECT_PROVIDERS: str = "2gis,osm"
+    COLLECT_PROVIDERS: str = "2gis_cdp,osm"
     COLLECT_QUERIES: str = ""  # category keys and/or free-text queries; empty = all categories
     COLLECT_DISTRICTS: str = ""  # empty = all SPb districts
     COLLECT_BBOX: str = ""  # 'south,west,north,east'; replaces COLLECT_DISTRICTS
@@ -123,19 +118,36 @@ class Settings(BaseSettings):
     # How many times collect_cli.py --check may look at the site within 24 hours.
     SCRAPER_CHECK_MAX_PER_DAY: int = Field(default=3, ge=1, le=10)
 
-    # Парсер 2gis_cdp: только ручной запуск на ПК с экраном (collect_cli.py --assisted), окно Chrome видно.
+    # Парсер 2gis_cdp (Chrome по протоколу DevTools): основной источник лидов, идёт и по расписанию.
     # Нижний предел паузы 3 с задан здесь: меньше поставить нельзя.
     SCRAPER_CDP_MIN_DELAY_SECONDS: float = Field(default=3.0, ge=3.0)
     SCRAPER_CDP_MAX_DELAY_SECONDS: float = Field(default=8.0, ge=3.0)
     # Считаются открытия страниц, клики по пагинации и каждая открытая карточка.
     SCRAPER_CDP_MAX_PAGES_PER_RUN: int = Field(default=60, ge=1, le=200)
-    SCRAPER_CDP_MAX_RESULTS_PER_RUN: int = Field(default=100, ge=1, le=300)
+    SCRAPER_CDP_MAX_RESULTS_PER_RUN: int = Field(default=30, ge=1, le=300)
     SCRAPER_CDP_MIN_HOURS_BETWEEN_RUNS: float = Field(default=20.0, ge=0.0)
     SCRAPER_CDP_PAGE_TIMEOUT_SECONDS: float = Field(default=45.0, ge=5.0)
-    # Профиль Chrome сохраняется между запусками.
-    SCRAPER_CDP_PROFILE_DIR: str = "data/cdp_profile"
     # Пусто = найти Chrome автоматически.
     SCRAPER_CDP_CHROME_PATH: str = ""
+    # Прокси с российским IP: схема://[логин:пароль@]хост:порт. SecretStr: пароль не попадает в repr, логи и ошибки.
+    TWOGIS_PROXY: SecretStr | None = None
+    # Страна внешнего IP, проверяется в самом браузере до первого запроса к 2ГИС. off = не проверять.
+    TWOGIS_PROXY_COUNTRY: str = "RU"
+    # Профиль Chrome сохраняется между запусками. Старое имя SCRAPER_CDP_PROFILE_DIR тоже читается.
+    TWOGIS_PROFILE_DIR: str = Field(
+        default="data/cdp_profile", validation_alias=AliasChoices("TWOGIS_PROFILE_DIR", "SCRAPER_CDP_PROFILE_DIR")
+    )
+    # Часовой пояс и язык браузера: под место прокси.
+    TWOGIS_TIMEZONE: str = "Europe/Moscow"
+    TWOGIS_LANG: str = "ru-RU"
+    # На сервере браузер идёт в обычном режиме под Xvfb; headless только если экрана нет совсем.
+    TWOGIS_HEADLESS: bool = False
+    # Память Chrome. Лимит кучи V8 в МБ (0 = как в Chrome: 75% оперативной памяти) и облегчённый режим: без картинок,
+    # без шрифтов, тайлов карты и стилей, один процесс отрисовки, без расширений.
+    TWOGIS_CHROME_MEMORY_MB: int = Field(default=300, ge=0, le=64000)
+    TWOGIS_LIGHT_MODE: bool = True
+    # Через сколько прочитанных карточек перезапускать Chrome (профиль остаётся), 0 = не перезапускать.
+    TWOGIS_RESTART_EVERY_CARDS: int = Field(default=20, ge=0, le=1000)
 
     # Looking for the site and contacts of leads on Google, only with collect_cli.py --assisted --google.
     # The upper bounds keep it a person's pace whatever is configured; pauses are fixed in the code.
@@ -149,7 +161,7 @@ class Settings(BaseSettings):
     GOOGLE_PROFILE_DIR: str = "data/google_profile"
 
     # The collector for a separate computer (collect_cli.py). Relative paths are from the project root.
-    COLLECTOR_PROVIDERS: str = "2gis"
+    COLLECTOR_PROVIDERS: str = "2gis_cdp"
     COLLECTOR_DB_PATH: str = "data/collector.db"
     COLLECTOR_EXPORT_DIR: str = "exports"
 
@@ -185,6 +197,11 @@ class Settings(BaseSettings):
             raise ValueError(f"DIGEST_TIME must be HH:MM, for example 09:30, got {value!r}")
         return f"{int(hours):02d}:{int(minutes):02d}"
 
+    def secret_values(self) -> list[str]:
+        """Every secret of the settings that is set: for hiding them in texts that are printed or stored."""
+        secrets = (self.BOT_TOKEN, self.TWOGIS_PROXY)
+        return [value for secret in secrets if secret and (value := secret.get_secret_value().strip())]
+
     @property
     def digest_hour_minute(self) -> tuple[int, int]:
         hours, minutes = self.DIGEST_TIME.split(":")
@@ -195,10 +212,45 @@ class Settings(BaseSettings):
     def _trim_outreach(cls, value: str) -> str:
         return " ".join(value.split())[:OUTREACH_TEXT_MAX]
 
+    @field_validator("TWOGIS_PROXY_COUNTRY")
+    @classmethod
+    def _check_proxy_country(cls, value: str) -> str:
+        return normalize_country(value)
+
+    @field_validator("TWOGIS_CHROME_MEMORY_MB")
+    @classmethod
+    def _check_chrome_memory(cls, value: int) -> int:
+        if 0 < value < 100:
+            raise ValueError("лимит памяти Chrome: от 100 МБ или 0 (по умолчанию Chrome)")
+        return value
+
+    @field_validator("TWOGIS_TIMEZONE")
+    @classmethod
+    def _check_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value.strip())
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            raise ValueError("неизвестный часовой пояс, пример: Europe/Moscow") from None
+        return value.strip()
+
+    @field_validator("TWOGIS_LANG")
+    @classmethod
+    def _check_lang(cls, value: str) -> str:
+        text = value.strip()
+        if not re.fullmatch(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*", text):
+            raise ValueError("язык браузера вида ru-RU")
+        return text
+
     @model_validator(mode="after")
-    def _use_preferred_key_name(self) -> "Settings":
-        if self.DGIS_API_KEY:
-            self.TWOGIS_API_KEY = self.DGIS_API_KEY
+    def _check_twogis_proxy(self) -> "Settings":
+        # A ProxySettingsError, not a ValueError: the text of a pydantic error repeats the input with the password.
+        if self.TWOGIS_PROXY is not None and not self.TWOGIS_PROXY.get_secret_value().strip():
+            self.TWOGIS_PROXY = None
+        if self.TWOGIS_PROXY is not None:
+            try:
+                parse_proxy(self.TWOGIS_PROXY.get_secret_value())
+            except ValueError as exc:
+                raise ProxySettingsError(f"TWOGIS_PROXY: {exc}") from None
         return self
 
     @model_validator(mode="after")

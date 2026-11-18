@@ -45,7 +45,7 @@ from src.services.lead_file import (
     is_valid_result_record,
 )
 from src.services.providers.base import RawPlace
-from src.services.providers.twogis import parse_catalog_items
+from src.services.providers.twogis_catalog import parse_catalog_items
 from src.services.providers.twogis_scraper import (
     MAX_UNRECOGNIZED_IN_A_ROW,
     CardContacts,

@@ -1,9 +1,12 @@
 """
-2GIS through its public pages in a visible Chrome window, driven over the DevTools protocol.
+2GIS through its public pages in a Chrome window, driven over the DevTools protocol.
 
-Manual only: the provider is not in COLLECT_PROVIDERS or the schedule, and the registry builds it
-only for collect_cli.py --assisted on a computer with a screen. The browser keeps its own defaults:
-nothing changes how it presents itself or hides that it is driven.
+The main source of leads: it runs on the schedule of the bot (COLLECT_PROVIDERS) and by hand
+(collect_cli.py). On a server the window is a virtual screen (Xvfb); on a computer a person may sit at it.
+The browser goes out through TWOGIS_PROXY (an IP of Russia), and before the first request to 2GIS it checks
+the country of the exit IP: from the wrong one, or with a dead proxy, nothing is opened and the run stops.
+That is a problem of the network of this side, not a refusal of the site, and it is reported as such.
+The browser keeps its own defaults: nothing changes how it presents itself or hides that it is driven.
 
 Every action that reaches the site goes through one gate, in this order: the limit of pages per
 run (each opened page, pagination click and card counts), robots.txt for the exact URL (a card by
@@ -19,9 +22,11 @@ import logging
 import random
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+
+from pydantic import SecretStr
 
 from src.config import Settings, resolve_path
 from src.services.api_client import (
@@ -30,10 +35,11 @@ from src.services.api_client import (
     ProviderBudgetExhausted,
     ProviderError,
     ProviderNoConnectionError,
+    ProviderProxyError,
     ProviderUnavailableError,
 )
 from src.services.providers.base import BaseMapProvider, RawPlace, SearchArea, SearchPage, SearchQuery
-from src.services.providers.twogis import parse_catalog_items
+from src.services.providers.twogis_catalog import parse_catalog_items
 from src.services.providers.twogis_scraper import ROBOTS_AGENT, call_owner, read_card_contacts
 from src.services.scraper import twogis_site
 from src.services.scraper.chrome.parsers import (
@@ -63,11 +69,22 @@ class CdpOptions:
     min_delay_seconds: float = 3.0
     max_delay_seconds: float = 8.0
     max_pages_per_run: int = 60
-    max_results_per_run: int = 100
+    max_results_per_run: int = 30
     min_hours_between_runs: float = 20.0
     page_timeout_seconds: float = 45.0
     profile_dir: Path | None = None
     chrome_path: Path | None = None
+    # The proxy with its password: SecretStr, left out of repr(), so it cannot get into a log.
+    proxy: SecretStr | None = field(default=None, repr=False)
+    proxy_country: str = "OFF"
+    timezone: str | None = None
+    lang: str | None = None
+    headless: bool = False
+    # The memory of Chrome: the limit of the V8 heap in MB (0 = what Chrome takes by itself), the light mode
+    # (no images, fonts, map tiles), and after how many read cards Chrome is started anew (0 = never).
+    chrome_memory_mb: int = 0
+    light: bool = False
+    restart_every_cards: int = 0
     # Only the command line of the collector sets this, for one run: see --ignore-interval.
     ignore_interval: bool = False
 
@@ -90,8 +107,16 @@ class CdpOptions:
             max_results_per_run=settings.SCRAPER_CDP_MAX_RESULTS_PER_RUN,
             min_hours_between_runs=settings.SCRAPER_CDP_MIN_HOURS_BETWEEN_RUNS,
             page_timeout_seconds=settings.SCRAPER_CDP_PAGE_TIMEOUT_SECONDS,
-            profile_dir=resolve_path(settings.SCRAPER_CDP_PROFILE_DIR),
+            profile_dir=resolve_path(settings.TWOGIS_PROFILE_DIR),
             chrome_path=Path(chrome_path) if chrome_path else None,
+            proxy=settings.TWOGIS_PROXY,
+            proxy_country=settings.TWOGIS_PROXY_COUNTRY,
+            timezone=settings.TWOGIS_TIMEZONE,
+            lang=settings.TWOGIS_LANG,
+            headless=settings.TWOGIS_HEADLESS,
+            chrome_memory_mb=settings.TWOGIS_CHROME_MEMORY_MB,
+            light=settings.TWOGIS_LIGHT_MODE,
+            restart_every_cards=settings.TWOGIS_RESTART_EVERY_CARDS,
             ignore_interval=ignore_interval,
         )
 
@@ -133,7 +158,7 @@ class TwoGisCdpProvider(BaseMapProvider):
         self.min_hours_between_runs = self._options.min_hours_between_runs
         self.ignore_interval = self._options.ignore_interval
         self._session_factory = session_factory or self._chrome_session
-        self._robots_loader = robots_loader or (lambda: fetch_robots(twogis_site.BASE_URL, ROBOTS_AGENT))
+        self._robots_loader = robots_loader or self._fetch_robots
         # Called in the worker thread of the browser, so it is a plain blocking sleep.
         self._sleep = sleep
         self._notify = notify
@@ -145,14 +170,17 @@ class TwoGisCdpProvider(BaseMapProvider):
         self._stop_error: ProviderError | None = None
         self._blocked: str | None = None
         self._budget_ended = False
+        self._proxy_failure: ProviderProxyError | None = None
         self.run_counted = False
 
     async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:
-        """Not used for manual search in the bot: it runs only by hand on a computer with a screen."""
+        """Not used for the manual search in the bot: it is slow, and the browser pauses between pages."""
         return []
 
     async def search(self, query: SearchQuery, area: SearchArea, page: int = 1, page_size: int = 50) -> SearchPage:
         """One page of search results: page 1 is opened, the next ones by their pagination link, then every card."""
+        if self._proxy_failure is not None:
+            raise self._proxy_failure  # the proxy does not work: nothing more is tried in this run
         if self._blocked is not None:
             raise ProviderBlockedError(self._blocked)
         if self._budget_ended:
@@ -160,8 +188,14 @@ class TwoGisCdpProvider(BaseMapProvider):
         if self._results >= self._options.max_results_per_run:
             raise ProviderBudgetExhausted("лимит результатов за запуск")
 
+        # The browser first: it checks the exit IP before anything is asked of 2GIS, robots.txt included.
+        try:
+            session = await self._started_session()
+        except ProviderProxyError as exc:
+            self._proxy_failure = exc
+            logger.error("2gis_cdp stopped, the proxy does not work: %s", exc)
+            raise
         await self._robots_rules()  # before any page: unknown rules mean nothing is opened
-        session = await self._started_session()
         self._search_text = f"{query.text} {area.district}" if area.district else query.text
         self._stop_error = None
         url = twogis_site.build_search_url(self._options.city_slug, self._search_text)
@@ -208,6 +242,7 @@ class TwoGisCdpProvider(BaseMapProvider):
         self._stop_error = None
         self._blocked = None
         self._budget_ended = False
+        self._proxy_failure = None
         self.run_counted = False
         if session is not None:
             await session.close()
@@ -297,9 +332,15 @@ class TwoGisCdpProvider(BaseMapProvider):
             result = payload.get("result")
             items = result.get("items") if isinstance(result, dict) else None
             for item in items if isinstance(items, list) else []:
-                if not isinstance(item, dict) or item.get("type") not in (None, "branch"):
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") not in (None, "branch"):
+                    logger.info(
+                        "2gis_cdp: %r is left out: not an organization (type %r)", item.get("name"), item.get("type")
+                    )
                     continue
                 if read_card_contacts(item) is None:
+                    logger.info("2gis_cdp: %r is left out: the card does not say its contacts", item.get("name"))
                     continue
                 cards.append(item)
         return parse_catalog_items(
@@ -318,6 +359,14 @@ class TwoGisCdpProvider(BaseMapProvider):
             page_timeout_seconds=self._options.page_timeout_seconds,
             profile_dir=self._options.profile_dir,
             chrome_path=self._options.chrome_path,
+            proxy=self._options.proxy,
+            proxy_country=self._options.proxy_country,
+            timezone=self._options.timezone,
+            lang=self._options.lang,
+            headless=self._options.headless,
+            memory_limit_mb=self._options.chrome_memory_mb,
+            light=self._options.light,
+            restart_every_cards=self._options.restart_every_cards,
         )
 
     async def _started_session(self) -> CdpSession:
@@ -326,6 +375,10 @@ class TwoGisCdpProvider(BaseMapProvider):
             self._session = session  # close() must find it even if starting fails halfway
             await session.start()
         return self._session
+
+    async def _fetch_robots(self) -> RobotsRules:
+        proxy = self._options.proxy.get_secret_value() if self._options.proxy is not None else None
+        return await fetch_robots(twogis_site.BASE_URL, ROBOTS_AGENT, proxy=proxy)
 
     async def _robots_rules(self) -> RobotsRules:
         if self._robots is None:

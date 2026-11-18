@@ -31,7 +31,7 @@ from src.services.lead_file import (
     parse_enrich_result,
 )
 from src.services.providers.base import SearchArea, SearchQuery
-from src.services.providers.twogis import parse_catalog_items
+from src.services.providers.twogis_catalog import parse_catalog_items
 from src.services.providers.twogis_scraper import (
     MAX_UNRECOGNIZED_IN_A_ROW,
     ScraperOptions,

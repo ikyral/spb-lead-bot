@@ -20,7 +20,7 @@ import sys
 import traceback
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy.engine import URL
@@ -31,13 +31,11 @@ from src.database.models import ProviderState
 from src.database.repo import enable_provider, get_provider_states, init_db
 from src.services.assisted_runs import CHECK_MAX_PAGES, ENRICH_MAX_CARDS, CheckReport, EnrichRun, run_check, run_enrich
 from src.services.collector import REST_REASON, CollectorConfig, load_collector_config
-from src.services.dgis_key import DGIS_PROVIDER_NAME, DgisKeyPolicy, DgisQuota, key_expiry_notice
 from src.services.google_assisted import GoogleOptions, GoogleRun, run_google_enrich
 from src.services.lead_export import ExportResult, export_new_leads
 from src.services.lead_file import EnrichRequest, LeadFileError, parse_enrich_request
 from src.services.lead_import import read_limited
 from src.services.providers.registry import build_providers
-from src.services.providers.twogis import TwoGisOptions
 from src.services.providers.twogis_cdp import PROVIDER_NAME as CDP_PROVIDER_NAME
 from src.services.providers.twogis_cdp import CdpOptions
 from src.services.providers.twogis_scraper import ScraperOptions, TwoGisScraperProvider
@@ -145,7 +143,6 @@ class _Outcome:
     report: RunReport | None = None
     export: ExportResult | None = None
     refused: dict[str, ProviderState] = field(default_factory=dict)
-    key_lines: list[str] = field(default_factory=list)
     # When the interval ends, for the providers skipped because of it.
     rest_until: dict[str, datetime] = field(default_factory=dict)
 
@@ -169,8 +166,6 @@ def _print_outcome(outcome: _Outcome) -> None:
         print(f"Выгружено лидов: {outcome.export.count}.")
         for path in outcome.export.files:
             print(f"Файл: {path}")
-    for line in outcome.key_lines:
-        print(line)
     for name, state in outcome.refused.items():
         if state.disabled_at is not None:
             cause = "после блокировок " if state.consecutive_blocks else ""
@@ -195,18 +190,6 @@ def _refused_providers(states: dict[str, ProviderState], names: Sequence[str]) -
     }
 
 
-def _key_lines(state: ProviderState | None, policy: DgisKeyPolicy) -> list[str]:
-    """Here nobody gets alerts from the bot: what is left of the API key goes to the console."""
-    used = state.requests_total if state is not None else 0
-    limit_text = f"из {policy.limit}, осталось {max(0, policy.limit - used)}" if policy.limit else "лимит не задан"
-    lines = [f"API 2ГИС: израсходовано запросов {used} {limit_text}."]
-    # The owner's local day is what matters here.
-    notice = key_expiry_notice(policy, date.today())
-    if notice is not None:
-        lines.append(notice[1])
-    return lines
-
-
 async def _collect(
     current: Settings,
     session_maker: async_sessionmaker[AsyncSession],
@@ -216,39 +199,19 @@ async def _collect(
 ) -> list[str]:
     """Run one pass of the usual collection. Returns the names of the providers configured here."""
     config = _collector_config(current)
-    twogis_key = current.TWOGIS_API_KEY.get_secret_value() if current.TWOGIS_API_KEY else None
     if assisted and SCRAPER_PROVIDER_NAME not in config.providers and CDP_PROVIDER_NAME not in config.providers:
         # Otherwise the run would quietly go without a browser and without the mode that was asked for.
         raise SettingsError(
             f"режим с участием человека нужен парсеру: добавьте {SCRAPER_PROVIDER_NAME} или {CDP_PROVIDER_NAME} "
             "в COLLECTOR_PROVIDERS"
         )
-    # 2gis_cdp is built only here, in a manual run with a screen; otherwise the registry explains why not.
-    cdp_options = (
-        CdpOptions.from_settings(current, ignore_interval=ignore_interval)
-        if assisted and CDP_PROVIDER_NAME in config.providers
-        else None
-    )
+    cdp_options = CdpOptions.from_settings(current, ignore_interval=ignore_interval and assisted)
     if not current.SCRAPER_HEADLESS and not assisted:
         logger.warning("SCRAPER_HEADLESS=false is for manual debugging only: do not use it on a schedule")
-    dgis_quota = (
-        DgisQuota(session_maker, twogis_key, DgisKeyPolicy.from_settings(current))
-        if twogis_key and twogis_key.strip()
-        else None
-    )
-    if dgis_quota is not None:
-        await dgis_quota.sync_key()
-    provider_args = (
+    provider_set = build_providers(
         config.providers,
-        twogis_key,
         replace(ScraperOptions.from_settings(current, assisted=assisted), ignore_interval=ignore_interval),
-        TwoGisOptions.from_settings(current),
-        dgis_quota.spend if dgis_quota else None,
-    )
-    provider_set = (
-        build_providers(*provider_args, cdp_options=cdp_options)
-        if cdp_options is not None
-        else build_providers(*provider_args)
+        cdp_options=cdp_options,
     )
 
     async def keep_report(report: RunReport) -> None:
@@ -509,8 +472,6 @@ async def _run(args: argparse.Namespace, current: Settings) -> int:
                 last_run = states[name].last_run_at if name in states else None
                 if reason == REST_REASON and last_run is not None:
                     outcome.rest_until[name] = last_run + hours
-        if DGIS_PROVIDER_NAME in names and current.TWOGIS_API_KEY:
-            outcome.key_lines = _key_lines(states.get(DGIS_PROVIDER_NAME), DgisKeyPolicy.from_settings(current))
     finally:
         await engine.dispose()
 
@@ -524,8 +485,7 @@ async def _run(args: argparse.Namespace, current: Settings) -> int:
 
 def _without_secrets(text: str, current: Settings) -> str:
     """What an error says may repeat a key or a link with it, and this text is printed and stays in a file."""
-    for secret in (current.BOT_TOKEN, current.TWOGIS_API_KEY, current.DGIS_API_KEY):
-        value = secret.get_secret_value().strip() if secret else ""
+    for value in current.secret_values():
         if value:
             text = text.replace(value, _HIDDEN)
     text = _URL_PASSWORD_RE.sub(f"://{_HIDDEN}@", text)

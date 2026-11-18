@@ -84,10 +84,15 @@ def parse_robots(text: str, agent: str) -> RobotsRules:
     return rules
 
 
-async def _get_robots(url: str, client: httpx.AsyncClient | None) -> httpx.Response:
+async def _get_robots(url: str, client: httpx.AsyncClient | None, proxy: str | None) -> httpx.Response:
     if client is not None:
         return await client.get(url, timeout=ROBOTS_TIMEOUT_SECONDS)
-    async with httpx.AsyncClient(follow_redirects=True) as own_client:
+    try:
+        own_client = httpx.AsyncClient(follow_redirects=True, proxy=proxy)
+    except ImportError:
+        # httpx needs the package socksio for a SOCKS proxy.
+        raise RobotsUnavailableError("для SOCKS-прокси нужен пакет httpx[socks]") from None
+    async with own_client:
         return await own_client.get(url, timeout=ROBOTS_TIMEOUT_SECONDS)
 
 
@@ -96,19 +101,21 @@ async def fetch_robots(
     agent: str,
     client: httpx.AsyncClient | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    proxy: str | None = None,
 ) -> RobotsRules:
     """
     Load the rules for a site, following RFC 9309.
 
     A missing file (4xx) means no restrictions. If the file cannot be read (5xx, network),
     everything counts as forbidden: RobotsUnavailableError is raised. Only a network failure is
-    tried again: an answer of the site, whatever it is, is its answer.
+    tried again: an answer of the site, whatever it is, is its answer. With `proxy` the file is
+    fetched the way the browser goes out, so the site sees the same IP.
     """
     url = f"{base_url}/robots.txt"
     pauses = iter(ROBOTS_RETRY_PAUSES_SECONDS)
     while True:
         try:
-            response = await _get_robots(url, client)
+            response = await _get_robots(url, client, proxy)
             break
         except httpx.HTTPError as exc:
             pause = next(pauses, None)

@@ -93,8 +93,8 @@ def cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     holder.exports = tmp_path / "exports"
     holder.settings = settings
 
-    def fake_build(names, key, options=None, *twogis_args):
-        holder.names, holder.options, holder.twogis_args = names, options, twogis_args
+    def fake_build(names, options=None, cdp_options=None):
+        holder.names, holder.options, holder.cdp_options = names, options, cdp_options
         return ProviderSet(providers=[holder.provider])
 
     monkeypatch.setattr(collector_cli, "build_providers", fake_build)
@@ -124,25 +124,10 @@ def _set_state(tmp_path: Path, **values) -> None:
     asyncio.run(run())
 
 
-def test_collector_with_a_key_counts_its_requests_and_shows_what_is_left(
-    cli, monkeypatch: pytest.MonkeyPatch, capsys
-) -> None:
-    settings = cli.settings.model_copy(update={"COLLECTOR_PROVIDERS": "2gis", "TWOGIS_API_KEY": SecretStr("KEY")})
-    monkeypatch.setattr(collector_cli, "settings", settings)
-    cli.provider.name = "2gis"
-
-    assert collector_cli.main([]) == 0
-
-    options, spend_request = cli.twogis_args
-    assert options.demo_key is True
-    assert callable(spend_request)
-    assert "API 2ГИС: израсходовано запросов 0 из 1000, осталось 1000." in capsys.readouterr().out
-
-
 def test_settings_need_no_bot_token() -> None:
     settings = Settings(_env_file=None)
     assert settings.BOT_TOKEN.get_secret_value() == ""
-    assert settings.COLLECTOR_PROVIDERS == "2gis"
+    assert settings.COLLECTOR_PROVIDERS == "2gis_cdp"
     assert settings.SCRAPER_HEADLESS is True
 
 
@@ -306,7 +291,9 @@ def test_no_usable_source_is_an_error(cli, monkeypatch: pytest.MonkeyPatch, caps
     monkeypatch.setattr(
         collector_cli,
         "build_providers",
-        lambda names, key, options=None, *_twogis: ProviderSet(disabled={"2gis_scraper": "не установлен playwright"}),
+        lambda names, options=None, cdp_options=None: ProviderSet(
+            disabled={"2gis_scraper": "не установлен playwright"}
+        ),
     )
     assert collector_cli.main([]) == 1
     assert "не установлен playwright" in capsys.readouterr().out
@@ -416,7 +403,7 @@ def _external_runner(session_maker, provider=None, reminder=None, min_pool: int 
 
 
 def test_empty_provider_list_is_different_from_not_set() -> None:
-    assert Settings(_env_file=None).COLLECT_PROVIDERS == "2gis,osm"
+    assert Settings(_env_file=None).COLLECT_PROVIDERS == "2gis_cdp,osm"
     assert _config(COLLECT_PROVIDERS="").providers == []
 
 
@@ -426,12 +413,6 @@ def test_empty_provider_list_is_different_from_not_set() -> None:
 def test_other_blank_settings_still_mean_the_default(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     monkeypatch.setenv(name, "")
     Settings(_env_file=None)
-
-
-def test_blank_preferred_key_does_not_hide_the_old_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DGIS_API_KEY", "")
-    monkeypatch.setenv("TWOGIS_API_KEY", "ключ")
-    assert Settings(_env_file=None).TWOGIS_API_KEY.get_secret_value() == "ключ"
 
 
 async def test_no_collection_jobs_and_no_runs_in_external_mode(session_maker) -> None:
@@ -704,10 +685,10 @@ def test_secrets_stay_out_of_the_console_and_the_file(cli, tmp_path: Path, monke
     log = tmp_path / "logs" / "errors.log"
     monkeypatch.setattr(collector_cli, "ERROR_LOG_PATH", str(log))
     cli.settings.BOT_TOKEN = SecretStr("123456:BOTSECRET")
-    cli.settings.DGIS_API_KEY = SecretStr("DGISSECRET")
+    cli.settings.TWOGIS_PROXY = SecretStr("http://user:PROXYSECRET@proxy.example:3128")
     message = (
-        "bad 123456:BOTSECRET and DGISSECRET at https://catalog.api.2gis.ru/3.0/items?key=OTHERSECRET&q=Иванов "
-        "with postgresql://user:DBSECRET@host/db"
+        "bad 123456:BOTSECRET and http://user:PROXYSECRET@proxy.example:3128 at "
+        "https://2gis.ru/spb/search?key=OTHERSECRET&q=Иванов with postgresql://user:DBSECRET@host/db"
     )
     _failing_run(monkeypatch, RuntimeError(message))
 
@@ -716,9 +697,9 @@ def test_secrets_stay_out_of_the_console_and_the_file(cli, tmp_path: Path, monke
     out = capsys.readouterr().out
     saved = log.read_text(encoding="utf-8")
     for text in (out, saved):
-        for secret in ("BOTSECRET", "DGISSECRET", "OTHERSECRET", "DBSECRET", "Иванов"):
+        for secret in ("BOTSECRET", "PROXYSECRET", "OTHERSECRET", "DBSECRET", "Иванов"):
             assert secret not in text
-        assert "https://catalog.api.2gis.ru/3.0/items?" in text
+        assert "https://2gis.ru/spb/search?" in text
 
 
 def test_a_log_that_cannot_be_written_does_not_hide_the_error(cli, tmp_path: Path, monkeypatch, capsys) -> None:

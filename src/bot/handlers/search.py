@@ -21,7 +21,6 @@ from src.bot.keyboards import (
 )
 from src.bot.middlewares import PUBLIC_FLAG, is_admin
 from src.bot.texts import SEARCH_MENU_BUTTON_TEXT, START_ADMIN_TEXT, START_USER_TEXT
-from src.config import settings
 from src.database.repo import async_session_maker, get_owned_in_area
 from src.services.pipeline import MAX_CSV_PLACES, import_csv_harvest, run_lead_harvest
 from src.services.providers.base import SPB_DISTRICTS, TARGET_CATEGORIES
@@ -177,7 +176,6 @@ async def handle_category_chosen(callback: CallbackQuery) -> None:
                 session=session,
                 district_name=district_name,
                 category_key=category_key,
-                twogis_api_key=(settings.TWOGIS_API_KEY.get_secret_value() if settings.TWOGIS_API_KEY else None),
                 progress=progress,
             )
         report = (
