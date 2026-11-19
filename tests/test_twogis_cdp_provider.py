@@ -820,6 +820,25 @@ async def test_a_link_that_left_the_page_before_its_click_is_not_clicked(caplog:
     assert "Card 1/2 (firm 101): the link is no longer on the page" in caplog.text
 
 
+async def test_links_that_are_gone_after_some_cards_were_read_end_the_page_quietly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The list is drawn anew after the first click: 102 and 103 are not on the page any more. No error, nothing lost.
+    remote_ = ScriptedRemote(
+        lambda n: ["101"] if remote_.clicks else ["101", "102", "103"], _cards("101", "102", "103")
+    )
+    harness = Harness(remote_)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101"]  # what was read is kept
+    assert page.has_more is False and harness.notes == []  # the page ends, the run goes on, no refusal
+    assert "The list changed after 1 cards: the other 2 of the page are left for a later run" in caplog.text
+    assert "Search page left" not in caplog.text
+
+
 # ---------- a link is found by the browser itself, not by reading the whole page; what a failure looks like ----------
 
 PAGE_URL = "https://2gis.ru/spb/search/автосервис Калининский район?m=30.607964,60.009023/10"
