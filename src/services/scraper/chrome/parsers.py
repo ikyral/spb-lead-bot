@@ -69,6 +69,10 @@ _NODE_GONE_MARKER = "could not find node"
 # After so many cards in a row that could not be read the page is left: the rest would only spend the budget.
 _MAX_UNREAD_IN_A_ROW = 3
 _STALE_DOM_TIMEOUT_SECONDS = 15.0
+# A click may leave the list (a card opened over it, a page of another city): the "Back" of the browser is pressed
+# at most this many times, and the list is awaited this long after each step.
+_MAX_BACK_STEPS = 2
+_BACK_WAIT_SECONDS = 8.0
 # The list of results is redrawn for a while after the page is loaded (2GIS sorts it again for the area of its map):
 # the clicks wait until it has not changed this many reads in a row, but not longer than the limit.
 _LINKS_STABLE_READS = 2
@@ -616,6 +620,38 @@ class _BaseChromePageReader:
 
         return CollectedCards(collected, collected_urls, attempted_hrefs, None, False)
 
+    def _return_to_list(self, firm_id: str | None) -> bool:
+        """
+        Press "Back" (at most `_MAX_BACK_STEPS` times) until the search page of the city shows the list again.
+
+        True if the page is on a search page of the city and, when `firm_id` is given, its link is there. A person
+        does the same when a card hides the list. False if the history has no way back or the list did not return.
+        """
+        for step in range(1, _MAX_BACK_STEPS + 1):
+            try:
+                if not self._remote.go_back():
+                    break
+            except ChromeException as exc:
+                logger.info("Back to the list failed: %s", exc)
+                break
+            deadline = time.monotonic() + _BACK_WAIT_SECONDS
+            while time.monotonic() < deadline:
+                time.sleep(_LINKS_POLL_SECONDS)
+                if self._search_page_left() is not None:
+                    continue
+                if firm_id is None:
+                    logger.info("Back to the list: step %d, the search page is shown again", step)
+                    return True
+                try:
+                    found = self._remote.find_link_by_firm_id(firm_id)
+                except ChromeException:
+                    continue
+                if found is not None:
+                    logger.info("Back to the list: step %d, the link is on the page again", step)
+                    return True
+        logger.info("Back to the list: the list did not return")
+        return False
+
     def _find_node_by_href(self, find_links: Callable[[DOMNode], list[DOMNode]], target_href: str) -> DOMNode | None:
         """
         The link of the same organization as `target_href`, as it is on the page now.
@@ -678,7 +714,8 @@ class _BaseChromePageReader:
             if current_node is None:
                 logger.info("%s: the link is no longer on the page", label)
                 self._log_page_state("the link is no longer on the page")
-                return None, "", None, "the link is no longer on the page"
+                if not (self._return_to_list(firm_id) and (current_node := find_node()) is not None):
+                    return None, "", None, "the link is no longer on the page"
 
             decision = self._gate(GateAction("card", firm_id=firm_id))
             if decision is GateDecision.STOP:
@@ -708,6 +745,12 @@ class _BaseChromePageReader:
                     payload_here = _parse_byid_payload(self._remote.get_response_body(response))
                     url_here = str(response.get("url") or "")
                 logger.warning("%s: the click led away from the search page, to %s", label, where)
+                if self._return_to_list(None):
+                    logger.info("%s: back on the search page", label)
+                    if payload_here is not None:
+                        return payload_here, url_here, None, None
+                    failure = f"the click led away from the search page (to {where})"
+                    continue
                 raise _LeftSearchPage(where, payload_here, url_here)
             if response is None:
                 _, blocked_reason = _check_snapshot_block(
