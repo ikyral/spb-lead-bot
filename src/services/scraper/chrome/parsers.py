@@ -72,6 +72,7 @@ _STALE_DOM_TIMEOUT_SECONDS = 15.0
 # A click may leave the list (a card opened over it, a page of another city): the "Back" of the browser is pressed
 # at most this many times, and the list is awaited this long after each step.
 _MAX_BACK_STEPS = 2
+_LINK_GONE = "the link is no longer on the page"
 _BACK_WAIT_SECONDS = 8.0
 # The list of results is redrawn for a while after the page is loaded (2GIS sorts it again for the area of its map):
 # the clicks wait until it has not changed this many reads in a row, but not longer than the limit.
@@ -175,6 +176,8 @@ class CollectedCards(NamedTuple):
     stopped: bool
     unreadable: str | None = None
     left_search: str | None = None
+    # The list was drawn anew after some clicks and the rest of its links are gone: the page ends here, not an error.
+    list_changed: bool = False
 
 
 def describe_link(href: str) -> str:
@@ -606,6 +609,15 @@ class _BaseChromePageReader:
                 unread_in_a_row = 0
                 if response_url:
                     collected_urls.append(response_url)
+            elif unread == _LINK_GONE and collected:
+                # 2GIS draws the list anew for the map after some clicks ("Back" leads only to cards read before):
+                # what was read is kept, the rest of the page is left for a later run.
+                logger.info(
+                    "The list changed after %d cards: the other %d of the page are left for a later run",
+                    len(collected),
+                    total - position + 1,
+                )
+                return CollectedCards(collected, collected_urls, attempted_hrefs, None, False, None, None, True)
             elif unread is not None:
                 unread_in_a_row += 1
                 if unread_in_a_row >= _MAX_UNREAD_IN_A_ROW:
@@ -712,10 +724,9 @@ class _BaseChromePageReader:
             # The node is taken anew right before the click: the page may have been redrawn since the list was read.
             current_node = find_node()
             if current_node is None:
-                logger.info("%s: the link is no longer on the page", label)
-                self._log_page_state("the link is no longer on the page")
-                if not (self._return_to_list(firm_id) and (current_node := find_node()) is not None):
-                    return None, "", None, "the link is no longer on the page"
+                logger.info("%s: %s", label, _LINK_GONE)
+                self._log_page_state(_LINK_GONE)
+                return None, "", None, _LINK_GONE
 
             decision = self._gate(GateAction("card", firm_id=firm_id))
             if decision is GateDecision.STOP:
@@ -1122,7 +1133,9 @@ class SearchPageReader(_BaseChromePageReader):
         return ScrapedSearchResult(
             snapshot=snapshot,
             items=items,
-            has_more=False if blocked_reason is not None or stopped or left_search is not None else has_more,
+            has_more=False
+            if blocked_reason is not None or stopped or left_search is not None or collected.list_changed
+            else has_more,
             blocked_reason=blocked_reason,
             stopped=stopped,
             links_found=len(all_hrefs),
