@@ -125,6 +125,9 @@ class FakeRemote:
     def get_document_response(self) -> dict[str, Any]:
         return {"status": self.doc_status, "meta": {"type": "Document"}}
 
+    def go_back(self) -> bool:
+        return False  # no way back unless a test says so
+
     def execute_script(self, expression: str) -> Any:
         return "complete" if expression == "document.readyState" else None
 
@@ -1048,6 +1051,19 @@ class UrlRemote(FakeRemote):
         return super().execute_script(expression)
 
 
+class BackableRemote(UrlRemote):
+    """A tab with a working "Back": it returns to the search page the click has left."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.backs = 0
+
+    def go_back(self) -> bool:
+        self.backs += 1
+        self.url = SPB_SEARCH
+        return True
+
+
 class FixtureRemote(UrlRemote):
     def get_document(self, full: bool = True) -> DOMNode:
         return _doc_from_html("twogis_search_cities.html")
@@ -1127,6 +1143,26 @@ async def test_a_click_that_leaves_the_search_ends_the_page_and_keeps_what_the_c
     assert page.has_more is False and len(fake.clicks) == 2  # the third is not clicked: no way back
     assert "the click led away from the search page, to /spb/firm" in caplog.text
     assert "not read after" not in caplog.text and harness.notes == []  # not an unreadable card, not a refusal
+
+
+async def test_a_click_that_leaves_the_search_is_undone_by_back_and_the_page_goes_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("src.services.scraper.chrome.parsers.time.sleep", lambda _s: None)
+    stat = "?stat=c3RhdA%3D%3D"
+    fake = BackableRemote(
+        pages={1: _doc_with([f"/spb/firm/101{stat}", f"/spb/firm/102{stat}", f"/spb/firm/103{stat}"])},
+        cards=_cards("101", "102", "103"),
+        leave_on=("/firm/102",),
+    )
+    fake.url = SPB_SEARCH
+    harness = Harness(fake)
+    try:
+        page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101", "2gis_102", "2gis_103"]
+    assert fake.backs == 1 and len(fake.clicks) == 3  # the page is not left: the third card is read too
 
 
 async def test_a_click_that_leaves_without_an_answer_of_the_catalog_still_ends_the_page_quietly() -> None:

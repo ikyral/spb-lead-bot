@@ -516,6 +516,21 @@ class ChromeRemote:
         described["nodeId"] = node_id
         return DOMNode(**described)
 
+    def go_back(self) -> bool:
+        """The "Back" button of the browser: one step back in the history of the tab. False if there is none."""
+        import pychrome
+
+        tab = self._require_tab()
+        try:
+            history = tab.Page.getNavigationHistory()
+            index = int(history["currentIndex"])
+            if index <= 0:
+                return False
+            tab.Page.navigateToHistoryEntry(entryId=history["entries"][index - 1]["id"])
+        except (pychrome.CallMethodException, KeyError, IndexError, TypeError, ValueError) as exc:
+            raise ChromeRuntimeException(f"go back failed: {str(exc)[:80]}") from exc
+        return True
+
     def execute_script(self, expression: str) -> Any:
         """Evaluate JavaScript expression in page context and return its JSON value."""
         tab = self._require_tab()
