@@ -149,6 +149,10 @@ class ProviderState(Base):
     requests_day_used: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Position in the list of search targets for this provider; None inherits CollectorState.cursor.
     cursor: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    # Runs in a row that ended with a network error (not a block); a successful page resets it.
+    network_failure_streak: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # A pause after repeated network failures, kept apart from blocked_until so blocks are not mixed in.
+    network_paused_until: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
 
 
 class SearchProgress(Base):
