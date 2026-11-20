@@ -758,6 +758,9 @@ async def test_temporary_error_keeps_the_cursor(session_maker, no_site_checks, c
     with caplog.at_level("WARNING"):
         result = await collect_leads(session_maker, [provider], config)
     assert result.errors == MAX_CONSECUTIVE_FAILURES
+    categories = [target.query.category for target in config.targets]
+    # The same target is retried: the cursor did not move inside the run either.
+    assert [category for category, _ in provider.calls] == [categories[0]] * MAX_CONSECUTIVE_FAILURES
     assert await _cursor_of(session_maker, "2gis_cdp") == 0
     assert len([r for r in caplog.records if "failed on" in r.getMessage()]) == MAX_CONSECUTIVE_FAILURES
 
@@ -772,3 +775,13 @@ async def test_target_bound_errors_move_the_cursor_on(session_maker, no_site_che
     result = await collect_leads(session_maker, [provider], config)
     assert result.errors == 1
     assert await _cursor_of(session_maker, "2gis_cdp") == 1
+
+
+async def test_temporary_error_on_the_first_target_keeps_the_cursor_with_one_request(
+    session_maker, no_site_checks
+) -> None:
+    config = _cursor_config(COLLECT_MAX_REQUESTS_PER_RUN=1)
+    provider = FakeProvider(error=ProviderTemporaryError("сеть"), name="2gis_cdp")
+    result = await collect_leads(session_maker, [provider], config)
+    assert result.errors == 1
+    assert await _cursor_of(session_maker, "2gis_cdp") == 0
