@@ -15,7 +15,7 @@ from src.bot.formatters import format_import_messages, format_niche_table, forma
 from src.bot.keyboards import get_after_enrichment_keyboard
 from src.bot.texts import EXPORT_CAPTION_STEPS, EXPORT_WRONG_NUMBER_TEXT
 from src.config import settings
-from src.database.repo import async_session_maker
+from src.database.repo import async_session_maker, count_unverified_osm_leads
 from src.services.lead_file import (
     ENRICH_REQUEST_MAX_LEADS,
     KIND_ENRICH_REQUEST,
@@ -143,7 +143,8 @@ async def handle_niches(message: Message) -> None:
     """Show what is known about sites in each niche, which is what the order of /export_unknown comes from."""
     async with async_session_maker() as session:
         stats = await load_niche_stats(session)
-    await _answer_all(message, format_niche_table(stats))
+        unverified_osm = await count_unverified_osm_leads(session)
+    await _answer_all(message, format_niche_table(stats, unverified_osm))
 
 
 @router.message(F.document, F.document.file_name.lower().endswith(".json"))

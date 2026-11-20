@@ -67,6 +67,7 @@ def _lead(number: int, **fields) -> Lead:
         "category": "dentist_clinic",
         "district": "Центральный",
         "site_status": "no_site",
+        "site_source": "2gis",
         "score": 50,
         "crm_status": STATUS_NEW,
         "created_at": datetime(2026, 11, 5, 10, 0, tzinfo=UTC) + timedelta(minutes=number),
@@ -584,6 +585,8 @@ async def test_old_table_gets_the_six_columns_and_the_index(tmp_path) -> None:
             indexes = {row[1] for row in await conn.execute(text("PRAGMA index_list(leads)"))}
         assert set(owned) <= columns
         assert "ix_leads_owner_owned_until" in indexes
+        async with engine.begin() as conn:
+            await conn.execute(text("UPDATE leads SET site_source = '2gis'"))  # as if the verdict was checked
         session_maker = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
         batch = await _issue(session_maker, 1, ANNA)
         assert batch[0].name == "Старый" and batch[0].issued_to_user_id == ANNA

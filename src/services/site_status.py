@@ -48,8 +48,15 @@ ISSUE_GROUPS: tuple[tuple[str, ...], ...] = (
 UNVERIFIED_STATUSES: frozenset[str] = frozenset({SITE_UNKNOWN, SITE_UNCERTAIN, SITE_NOT_FOUND})
 # No site of its own, as far as anyone can tell. A social network instead of a site is the same for a lead.
 NO_SITE_STATUSES: frozenset[str] = frozenset({SITE_NO_SITE, SITE_NOT_FOUND, SITE_SOCIAL_ONLY})
+# Sources whose "no_site" was never really checked (old OSM data). A NULL source is unverified too.
+UNVERIFIED_SITE_SOURCES: frozenset[str] = frozenset({SOURCE_OSM})
 # Used in the link only, so an absurdly long card cannot break the button.
 _SEARCH_TEXT_LIMIT: int = 200
+
+
+def is_unverified_no_site(site_status: str, site_source: str | None) -> bool:
+    """A "no site" verdict without a real check behind it: such a lead is not handed out."""
+    return site_status == SITE_NO_SITE and (site_source is None or site_source in UNVERIFIED_SITE_SOURCES)
 
 
 def issue_group(site_status: str) -> int:

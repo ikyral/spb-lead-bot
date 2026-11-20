@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -75,7 +76,10 @@ async def test_csv_pipeline_full_integration(
     }
 
     # Verify database contents
-    leads = await get_leads(session, limit=10)
+    # The CSV has no source of the verdict, so its "no site" lead is unverified and is not in the pool.
+    pool = await get_leads(session, limit=10)
+    assert len(pool) == 2
+    leads = list((await session.execute(select(Lead))).scalars().all())
     assert len(leads) == 3
 
     leads_by_name = {lead.name: lead for lead in leads}
@@ -195,6 +199,7 @@ async def test_import_skips_business_already_saved_from_another_source(
             category="auto_repair",
             phone="+7 999 111-22-33",
             site_status="no_site",
+            site_source="2gis",
             score=65,
             crm_status="in_work",
         )

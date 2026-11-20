@@ -65,6 +65,7 @@ def _lead(number: int, **fields) -> Lead:
         "name": f"Организация {number}",
         "category": "dentist_clinic",
         "site_status": "no_site",
+        "site_source": "2gis",
         "score": 50,
         "crm_status": STATUS_NEW,
         "created_at": datetime(2026, 11, 5, 10, 0, tzinfo=UTC) + timedelta(minutes=number),
@@ -938,9 +939,16 @@ async def old_database(tmp_path):
     await engine.dispose()
 
 
+async def _mark_checked(engine) -> None:
+    """Old OSM 'no site' leads have no source of the verdict and are hidden; here they count as checked."""
+    async with engine.begin() as conn:
+        await conn.execute(text("UPDATE leads SET site_source = '2gis'"))
+
+
 async def test_upgrade_keeps_data_is_repeatable_and_old_leads_join_the_queue(old_database) -> None:
     await init_db(old_database)
     await init_db(old_database)  # a restart must not fail
+    await _mark_checked(old_database)
 
     assert await _columns(old_database) >= NEW_COLUMNS
     assert {"collector_state", "provider_state"} <= await _tables(old_database)
@@ -955,6 +963,7 @@ async def test_upgrade_keeps_data_is_repeatable_and_old_leads_join_the_queue(old
 async def test_documented_rollback_restores_the_old_schema(old_database) -> None:
     before = await _columns(old_database)
     await init_db(old_database)
+    await _mark_checked(old_database)
     session_maker = async_sessionmaker(old_database, expire_on_commit=False, class_=AsyncSession)
     async with session_maker() as session:
         await issue_next_leads(session, 1)
@@ -975,6 +984,7 @@ async def test_documented_rollback_restores_the_old_schema(old_database) -> None
 
 async def test_rollback_keeps_refusals_as_rejected(old_database) -> None:
     await init_db(old_database)
+    await _mark_checked(old_database)
     session_maker = async_sessionmaker(old_database, expire_on_commit=False, class_=AsyncSession)
     async with session_maker() as session:
         batch = await issue_next_leads(session, 1)

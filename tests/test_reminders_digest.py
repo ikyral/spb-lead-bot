@@ -46,6 +46,7 @@ def _lead(number: int, **overrides: Any) -> Lead:
         "name": f"Организация {number}",
         "category": "dentist_clinic",
         "site_status": SITE_NO_SITE,
+        "site_source": "2gis",
         "score": 50,
         "crm_status": STATUS_NEW,
         "source_url": f"https://2gis.ru/spb/firm/{70000000 + number}",

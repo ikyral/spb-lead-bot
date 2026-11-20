@@ -474,7 +474,17 @@ async def test_reminder_limit_survives_a_restart(session_maker) -> None:
 
 async def test_enough_leads_means_no_reminder(session_maker) -> None:
     async with session_maker() as session:
-        session.add(Lead(external_id="a", source="x", name="n", category="c", site_status="no_site", crm_status="new"))
+        session.add(
+            Lead(
+                external_id="a",
+                source="x",
+                name="n",
+                category="c",
+                site_status="no_site",
+                site_source="2gis",
+                crm_status="new",
+            )
+        )
         await session.commit()
     reminder = AsyncMock()
     await _external_runner(session_maker, reminder=reminder, min_pool=1).check_pool()
@@ -545,6 +555,7 @@ async def test_status_in_external_mode_shows_imports_and_the_pool(session_maker)
                 name="n",
                 category="c",
                 site_status="no_site",
+                site_source="2gis",
                 crm_status="new",
                 imported_at=datetime.now(UTC),
             )

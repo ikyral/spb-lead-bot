@@ -205,7 +205,7 @@ async def test_overpass_places_link_to_their_osm_card() -> None:
 # ---------- one collection pass ----------
 
 
-def _place(number: int, source: str = "fake", phone: str | None = None, **fields) -> RawPlace:
+def _place(number: int, source: str = "2gis", phone: str | None = None, **fields) -> RawPlace:
     return RawPlace(
         external_id=f"{source}_{number}",
         source=source,
