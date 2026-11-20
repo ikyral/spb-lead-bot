@@ -1228,6 +1228,12 @@ class SearchPageReader(_BaseChromePageReader):
         self._document_seconds = []
         self._lookup_seconds = []
         self._wait_for_stable_links()
+        foreign_url = self._foreign_city_address()
+        if foreign_url is not None:
+            # 2GIS moved the tab to another city while the list was settling: nothing of it is clicked, as on opening.
+            logger.info("The search page went to another city: %s", unquote(foreign_url))
+            snapshot = _snapshot_from_remote(self._remote, status=200, include_state=False)
+            return ScrapedSearchResult(snapshot=snapshot, items=[], has_more=False, foreign_city_url=foreign_url)
         document = self._read_document()
         all_nodes = self._find_search_links(document)
         all_hrefs = {node.attributes["href"] for node in all_nodes if "href" in node.attributes}

@@ -1988,20 +1988,54 @@ PIKALEVO_SEARCH = "https://2gis.ru/pikalevo/search/шаурма Выборгск
 
 
 class CityRedirectRemote(UrlRemote):
-    """A tab that 2GIS sends to another city the first `redirects` times a page is opened, or after a click."""
+    """
+    A tab that 2GIS sends to another city the first `redirects` times a page is opened, or after a click.
 
-    def __init__(self, *args: Any, redirects: int = 0, html: str = "<html></html>", **kwargs: Any) -> None:
+    `settle_redirects`: the first times a page is opened it stays in the city until its address has been checked
+    once, then moves to another city while the list is settling (the next read of the page); `settle_html` is what
+    the page shows from then on, if given.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        redirects: int = 0,
+        html: str = "<html></html>",
+        settle_redirects: int = 0,
+        settle_html: str | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.redirects = redirects
         self.html = html
+        self.settle_redirects = settle_redirects
+        self.settle_html = settle_html
+        self.address_checked = False
+        self.clicks_elsewhere: list[str] = []  # clicks made while the tab was not on a search page of the city
 
     def navigate(self, url: str, timeout: int = 60) -> None:
         super().navigate(url, timeout)
+        self.address_checked = False
         if self.redirects > 0:
             self.redirects -= 1
             self.url = PIKALEVO_SEARCH
 
+    def execute_script(self, expression: str) -> Any:
+        if expression.startswith("String(location.href)") and "/spb/search/" in self.url:
+            self.address_checked = True
+        return super().execute_script(expression)
+
+    def get_document(self, full: bool = True) -> DOMNode:
+        if self.address_checked and self.settle_redirects > 0 and "/spb/search/" in self.url:
+            self.settle_redirects -= 1
+            self.url = PIKALEVO_SEARCH
+            if self.settle_html is not None:
+                self.html = self.settle_html
+        return super().get_document(full)
+
     def perform_click(self, node: DOMNode) -> None:
+        if self.url and "/spb/search/" not in self.url:
+            self.clicks_elsewhere.append(node.attributes["href"])
         FakeRemote.perform_click(self, node)
         if any(marker in node.attributes["href"] for marker in self.leave_on):
             self.url = PIKALEVO_SEARCH
@@ -2095,6 +2129,78 @@ async def test_a_captcha_on_a_page_of_another_city_is_still_a_block(memory_sessi
     async with memory_session_maker() as session:
         state = (await get_provider_states(session))["2gis_cdp"]
     assert state.consecutive_blocks == 1 and state.blocked_until is not None
+
+
+async def test_a_search_sent_to_another_city_while_settling_is_not_clicked_and_opened_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = CityRedirectRemote(pages={1: _doc(["101", "102"])}, cards=_cards("101", "102"), settle_redirects=1)
+    harness = Harness(fake)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101", "2gis_102"]
+    # Nothing of the page of the other city is clicked: only the cards of the page opened again.
+    clicked = [_FIRM_RE.search(href).group(1) for href in fake.clicks]  # type: ignore[union-attr]
+    assert clicked == ["101", "102"] and fake.clicks_elsewhere == []
+    assert len(fake.navigations) == 2 and all("/spb/search/" in url for url in fake.navigations)
+    assert harness.notes == [] and fake.settle_redirects == 0
+    assert "The search page went to another city: https://2gis.ru/pikalevo/search/" in caplog.text
+    warning = next(
+        record
+        for record in caplog.records
+        if record.name == twogis_cdp.__name__ and "went to another city" in record.getMessage()
+    )
+    assert warning.levelname == "WARNING"
+
+
+async def test_a_search_sent_to_another_city_twice_while_settling_skips_the_target_without_a_click(
+    memory_session_maker,
+) -> None:
+    settings = _settings(COLLECT_QUERIES="dentist_clinic,barbershop", COLLECT_DISTRICTS="Центральный")
+    config = load_collector_config(settings)
+    fake = CityRedirectRemote(pages={1: _doc(["101"])}, cards=_cards("101"), settle_redirects=2)
+    harness = Harness(fake, min_hours_between_runs=0)
+    result = await collect_leads(memory_session_maker, [harness.provider], config)
+    async with memory_session_maker() as session:
+        state = (await get_provider_states(session))["2gis_cdp"]
+    assert state.consecutive_blocks == 0 and state.blocked_until is None and state.disabled_at is None
+    assert state.cursor == 0
+    assert result.errors == result.format_errors == 1 and "другой город" in (result.last_error or "")
+    # The first target: opened, re-opened once, no click; the second target is read as usual.
+    assert len(fake.navigations) == 3
+    assert [_FIRM_RE.search(href).group(1) for href in fake.clicks] == ["101"]  # type: ignore[union-attr]
+    assert fake.clicks_elsewhere == [] and harness.notes == []
+
+
+async def test_a_captcha_after_the_list_settled_on_another_city_is_still_a_block() -> None:
+    fake = CityRedirectRemote(
+        pages={1: _doc(["101"])},
+        cards=_cards("101"),
+        settle_redirects=5,
+        settle_html=CAPTCHA_PAGE[2],
+    )
+    harness = Harness(fake, min_hours_between_runs=0)
+    with pytest.raises(ProviderBlockedError, match="капч"):
+        await harness.provider.search(AUTO, KALININSKY)
+    assert len(fake.navigations) == 1 and fake.clicks == []  # a refusal stops at once, not opened again
+    assert harness.notes and "капч" in harness.notes[0]
+    await harness.provider.close()
+
+
+async def test_a_page_that_stays_in_the_city_is_read_as_before() -> None:
+    fake = CityRedirectRemote(pages={1: _doc(["101", "102"])}, cards=_cards("101", "102"))
+    harness = Harness(fake)
+    try:
+        page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101", "2gis_102"]
+    assert len(fake.navigations) == 1
+    assert [_FIRM_RE.search(href).group(1) for href in fake.clicks] == ["101", "102"]  # type: ignore[union-attr]
+    assert harness.notes == []
 
 
 async def test_two_redirects_to_another_city_move_the_cursor_on_and_count_no_block(memory_session_maker) -> None:
