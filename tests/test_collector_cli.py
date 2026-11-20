@@ -29,6 +29,7 @@ from src.services.collector import load_collector_config
 from src.services.lead_file import parse_lead_file
 from src.services.providers.base import BaseMapProvider, RawPlace, SearchPage
 from src.services.providers.registry import ProviderSet
+from src.services.providers.twogis_cdp import CdpOptions
 from src.services.scheduler import COLLECT_JOB_ID, POOL_CHECK_JOB_ID, CollectorRunner, TopupDecision, TopupOutcome
 
 
@@ -380,6 +381,76 @@ def test_assisted_keeps_the_pause_and_does_not_clear_the_count(cli, capsys, tmp_
     assert state.consecutive_blocks == 1
     assert state.blocked_until is not None
     assert "Не запускайте сбор повторно" in capsys.readouterr().out
+
+
+def test_cdp_rest_interval_uses_cdp_setting(cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    cdp_settings = cli.settings.model_copy(
+        update={
+            "COLLECTOR_PROVIDERS": "2gis_cdp",
+            "SCRAPER_CDP_MIN_HOURS_BETWEEN_RUNS": 12.0,
+            "SCRAPER_MIN_HOURS_BETWEEN_RUNS": 30.0,
+        }
+    )
+    assert collector_cli._min_hours_between_runs(collector_cli.CDP_PROVIDER_NAME, cdp_settings) == 12.0
+    assert collector_cli._min_hours_between_runs(collector_cli.SCRAPER_PROVIDER_NAME, cdp_settings) == 30.0
+    assert collector_cli._min_hours_between_runs("osm", cdp_settings) == 0.0
+
+    monkeypatch.setattr(collector_cli, "settings", cdp_settings)
+    cli.provider = Provider(min_hours=12.0)
+    cli.provider.name = "2gis_cdp"
+
+    assert collector_cli.main([]) == 0
+    state = asyncio.run(_state(tmp_path, "2gis_cdp"))
+    assert state.last_run_at is not None
+    capsys.readouterr()
+
+    assert collector_cli.main([]) == 0
+    out = capsys.readouterr().out
+    expected_retry = collector_cli._local_time(state.last_run_at + timedelta(hours=12.0))
+    wrong_retry = collector_cli._local_time(state.last_run_at + timedelta(hours=30.0))
+    assert expected_retry != wrong_retry
+    assert "уже запускался сегодня" in out
+    assert expected_retry in out
+    assert wrong_retry not in out
+
+
+async def test_collect_passes_assisted_to_cdp_options(
+    session_maker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[Settings, bool, bool]] = []
+
+    def fake_from_settings(
+        current: Settings,
+        ignore_interval: bool = False,
+        *,
+        assisted: bool = False,
+    ) -> CdpOptions:
+        calls.append((current, ignore_interval, assisted))
+        return CdpOptions()
+
+    monkeypatch.setattr(collector_cli.CdpOptions, "from_settings", fake_from_settings)
+    monkeypatch.setattr(
+        collector_cli,
+        "build_providers",
+        lambda names, options=None, cdp_options=None: ProviderSet(providers=[Provider()]),
+    )
+    current = Settings(
+        _env_file=None,
+        COLLECTOR_PROVIDERS="2gis_cdp",
+        COLLECT_QUERIES="dentist_clinic",
+        COLLECT_DISTRICTS="Центральный",
+    )
+    outcome = collector_cli._Outcome()
+
+    await collector_cli._collect(current, session_maker, outcome, assisted=True, ignore_interval=False)
+    await collector_cli._collect(current, session_maker, outcome, assisted=True, ignore_interval=True)
+    await collector_cli._collect(current, session_maker, outcome, assisted=False, ignore_interval=True)
+
+    assert [(ignore, assisted) for _, ignore, assisted in calls] == [
+        (False, True),
+        (True, True),
+        (False, False),
+    ]
 
 
 # ---------- a server without its own collection ----------

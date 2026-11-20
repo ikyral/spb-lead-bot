@@ -38,6 +38,7 @@ from src.services.scraper.chrome.parsers import (
     SearchPageReader,
     classify_2gis_url,
     is_in_building_firm_link,
+    is_search_result_href,
     is_search_result_link,
     strip_page_number,
 )
@@ -796,3 +797,257 @@ async def test_chrome_session_error_translation_and_visible_window() -> None:
             await broken_session.read_search("https://2gis.ru/spb/search/x")
     finally:
         await broken_session.close()
+
+
+def test_chrome_remote_lightweight_helpers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fake_bin = tmp_path / "chrome"
+    fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    class _FakeBrowserProcess:
+        def __init__(self, _opts: ChromeOptions) -> None:
+            self.remote_port = 9222
+            self.returncode = None
+
+        def close(self) -> None:
+            return None
+
+    class _FakeTab:
+        status_started = "started"
+
+        def __init__(self) -> None:
+            self.id = "tab-1"
+            self.status = "started"
+            self._stopped = MagicMock()
+            self._stopped.is_set.return_value = False
+            self._stopped.wait.return_value = True
+            self.Network = MagicMock()
+            self.Emulation = MagicMock()
+            self.DOM = MagicMock()
+            self.Page = MagicMock()
+            self.Runtime = MagicMock()
+            self.Log = MagicMock()
+            self.Runtime.evaluate.return_value = {"result": {"value": None}}
+            self._send = MagicMock(return_value={})
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            self._stopped.is_set.return_value = True
+
+    fake_tab = _FakeTab()
+    monkeypatch.setattr("src.services.scraper.chrome.remote.ChromeBrowser", _FakeBrowserProcess)
+    monkeypatch.setattr("src.services.scraper.chrome.remote.patch_pychrome", lambda: None)
+    _fake_cdp_modules(monkeypatch, _FakeTab)
+    monkeypatch.setattr(ChromeRemote, "_create_tab", lambda self: fake_tab)
+
+    remote = ChromeRemote(ChromeOptions(binary_path=fake_bin), [ITEM_RESPONSE_PATTERN])
+    remote.start()
+    try:
+        fake_tab.Runtime.evaluate.return_value = {"result": {"value": "Стоматологии — 2ГИС"}}
+        assert remote.read_title() == "Стоматологии — 2ГИС"
+        fake_tab.Runtime.evaluate.return_value = {"result": {"value": 123}}
+        assert remote.read_title() == ""
+
+        fake_tab.Runtime.evaluate.return_value = {
+            "result": {"value": json.dumps([f"/spb/firm/101?stat={_b64('a')}", f"/spb/station/9?stat={_b64('b')}"])}
+        }
+        assert remote.read_search_link_hrefs() == [
+            f"/spb/firm/101?stat={_b64('a')}",
+            f"/spb/station/9?stat={_b64('b')}",
+        ]
+        fake_tab.Runtime.evaluate.return_value = {"result": {"value": "not-json"}}
+        assert remote.read_search_link_hrefs() is None
+        fake_tab.Runtime.evaluate.return_value = {"result": {"value": None}}
+        assert remote.read_search_link_hrefs() is None
+
+        def fake_navigate(url: str, timeout: int = 15) -> None:
+            remote._chrome_tab.Network.requestWillBeSent(
+                requestId="req-robots",
+                type="Document",
+                request={"url": url},
+            )
+            remote._chrome_tab.Network.responseReceived(
+                requestId="req-robots",
+                type="Document",
+                response={"url": url, "status": 200},
+            )
+
+        fake_tab.Runtime.evaluate.side_effect = [
+            {"result": {"value": "complete"}},
+            {"result": {"value": "User-agent: *\nDisallow: /private\n"}},
+        ]
+        monkeypatch.setattr(remote, "navigate", fake_navigate)
+        status, body = remote.fetch_plain_text("https://2gis.ru/robots.txt", timeout=15)
+        assert status == 200
+        assert "Disallow: /private" in body
+        assert remote.get_requests() == []
+    finally:
+        remote.stop()
+
+
+def test_search_reader_uses_lightweight_polling_and_falls_back_cleanly() -> None:
+    class _LightRemote(_FakeRemote):
+        def __init__(self) -> None:
+            super().__init__()
+            self.doc_calls = 0
+            self.href_calls = 0
+            self.title_calls = 0
+            self.hrefs_override: list[str] | None = None
+            self.quick_find_calls = 0
+
+        def read_title(self) -> str:
+            self.title_calls += 1
+            return self.current_page_info[1]
+
+        def read_search_link_hrefs(self) -> list[str] | None:
+            self.href_calls += 1
+            if self.hrefs_override is not None:
+                return self.hrefs_override
+            doc = self.pages[self.current_page]
+            return [node.attributes["href"] for node in doc.search(is_search_result_link)]
+
+        def find_link_by_firm_id(self, firm_id: str) -> DOMNode | None:
+            self.quick_find_calls += 1
+            return _dom_link(900 + self.quick_find_calls, f"/spb/firm/{firm_id}?stat={_b64('q')}")
+
+        def get_document(self, full: bool = True) -> DOMNode:
+            self.doc_calls += 1
+            return super().get_document(full=full)
+
+    assert is_search_result_href(f"/spb/firm/101?stat={_b64('a')}")
+    assert not is_search_result_href("/spb/firm/101")
+
+    remote = _LightRemote()
+    remote.pages = {
+        1: _dom_root(
+            _dom_link(2, f"/spb/firm/101?stat={_b64('a')}"),
+            _dom_link(3, "/spb/search/x/page/2"),
+        ),
+    }
+    remote.click_outcomes = [
+        {
+            "status": 200,
+            "url": "https://catalog.api.2gis.ru/3.0/items/byid?id=101",
+            "body": json.dumps(_byid_payload("101", "Клиника 1")),
+        },
+    ]
+    reader = SearchPageReader(remote, ChromeParserOptions(), gate=_go)  # type: ignore[arg-type]
+    res = reader.read_page("https://2gis.ru/spb/search/x", page=1)
+
+    assert [p["result"]["items"][0]["id"] for p in res.items] == ["101"]
+    assert remote.href_calls >= 4  # _page_has_search_links_or_empty + 3 stable reads
+    # Only ONE get_document() call in _scrape_current_page (no polling DOM reads and no double read).
+    assert remote.doc_calls == 1
+    assert remote.quick_find_calls == 1
+
+    # Fallback when read_search_link_hrefs returns None
+    fallback_remote = _LightRemote()
+    fallback_remote.pages = {1: _dom_root(_dom_link(2, f"/spb/firm/102?stat={_b64('b')}"))}
+    fallback_remote.hrefs_override = None
+
+    def _none_hrefs() -> list[str] | None:
+        fallback_remote.href_calls += 1
+        return None
+
+    fallback_remote.read_search_link_hrefs = _none_hrefs  # type: ignore[method-assign]
+    fallback_remote.click_outcomes = [
+        {
+            "status": 200,
+            "url": "https://catalog.api.2gis.ru/3.0/items/byid?id=102",
+            "body": json.dumps(_byid_payload("102", "Клиника 2")),
+        },
+    ]
+    fallback_reader = SearchPageReader(fallback_remote, ChromeParserOptions(), gate=_go)  # type: ignore[arg-type]
+    res_fb = fallback_reader.read_page("https://2gis.ru/spb/search/x", page=1)
+    assert [p["result"]["items"][0]["id"] for p in res_fb.items] == ["102"]
+    assert fallback_remote.doc_calls >= 5
+
+
+def test_search_reader_skip_firm_ids_preserves_page_recognition_and_pagination(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    remote = _FakeRemote()
+    remote.pages = {
+        1: _dom_root(
+            _dom_link(2, f"/spb/firm/101?stat={_b64('a')}"),
+            _dom_link(3, f"/spb/firm/102?stat={_b64('b')}"),
+            _dom_link(4, "/spb/search/x/page/2"),
+        ),
+        2: _dom_root(
+            _dom_link(5, f"/spb/firm/201?stat={_b64('c')}"),
+        ),
+    }
+    remote.responses_by_url = [
+        {"url": "https://catalog.api.2gis.ru/3.0/items?q=x", "mimeType": "application/json", "body": '{"result":{}}'}
+    ]
+    remote.click_outcomes = [
+        {
+            "status": 200,
+            "url": "https://catalog.api.2gis.ru/3.0/items/byid?id=201",
+            "body": json.dumps(_byid_payload("201", "Клиника 201")),
+        },
+    ]
+
+    get_responses_calls = 0
+
+    def _tracked_get_responses() -> list[dict[str, Any]]:
+        nonlocal get_responses_calls
+        get_responses_calls += 1
+        return list(remote.responses_by_url)
+
+    remote.get_responses = _tracked_get_responses  # type: ignore[method-assign]
+
+    gate_actions: list[GateAction] = []
+
+    def _recording_gate(action: GateAction) -> GateDecision:
+        gate_actions.append(action)
+        return GateDecision.GO
+
+    reader = SearchPageReader(remote, ChromeParserOptions(), gate=_recording_gate)  # type: ignore[arg-type]
+    with caplog.at_level("INFO"):
+        p1 = reader.read_page("https://2gis.ru/spb/search/x", page=1, skip_firm_ids={"101", "102"})
+
+    assert p1.items == []
+    assert p1.links_found == 2
+    assert p1.has_more is True
+    assert remote.clicks == []
+    assert [a.kind for a in gate_actions] == ["open"]
+    assert get_responses_calls == 0
+    assert "Search page 1: skipped 2 already-known organizations" in caplog.text
+
+    p2 = reader.read_page("https://2gis.ru/spb/search/x", page=2, skip_firm_ids={"101", "102"})
+    assert [p["result"]["items"][0]["id"] for p in p2.items] == ["201"]
+    assert p2.has_more is False
+
+
+async def test_chrome_session_fetch_text_resets_search_reader() -> None:
+    remote = _FakeRemote()
+    remote.pages = {1: _dom_root(_dom_link(2, f"/spb/firm/101?stat={_b64('a')}"))}
+    remote.click_outcomes = [
+        {
+            "status": 200,
+            "url": "https://catalog.api.2gis.ru/3.0/items/byid?id=101",
+            "body": json.dumps(_byid_payload("101", "Клиника 1")),
+        }
+    ]
+
+    def _fetch_plain_text(url: str, timeout: int = 15) -> tuple[int | None, str]:
+        return 200, f"robots from {url}"
+
+    remote.fetch_plain_text = _fetch_plain_text  # type: ignore[attr-defined]
+    session = ChromeScraperSession(
+        gate=_go,
+        remote_factory=lambda _o, _p: remote,  # type: ignore[arg-type,return-value]
+    )
+    await session.start()
+    try:
+        await session.read_search("https://2gis.ru/spb/search/x", page=1)
+        assert session._search_reader is not None
+        assert session._search_reader._current_page == 1
+        status, text = await session.fetch_text("https://2gis.ru/robots.txt")
+        assert status == 200
+        assert text == "robots from https://2gis.ru/robots.txt"
+        assert session._search_reader._current_page == 0
+    finally:
+        await session.close()

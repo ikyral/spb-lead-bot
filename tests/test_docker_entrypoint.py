@@ -6,7 +6,9 @@ import pytest
 
 import docker_entrypoint as entrypoint
 
-APP_UID, APP_GID = 1000, 1000
+# Pick IDs distinct from the test runner's own UID/GID so _fix_ownership always exercises os.chown.
+APP_UID = 2000 if getattr(os, "getuid", lambda: 0)() == 1000 else 1000
+APP_GID = 2000 if getattr(os, "getgid", lambda: 0)() == 1000 else 1000
 
 
 @pytest.fixture

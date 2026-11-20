@@ -213,7 +213,7 @@ async def test_an_unknown_source_gets_an_example() -> None:
 
     text = message.answer.await_args.args[0]
     assert "Неизвестный источник: &lt;yandex&gt;" in text
-    assert "<code>/provider_on 2gis_scraper</code>" in text
+    assert "<code>/provider_on 2gis_cdp</code>" in text
     runner.enable_provider.assert_not_called()
 
 

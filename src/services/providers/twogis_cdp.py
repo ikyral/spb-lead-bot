@@ -18,11 +18,12 @@ page that is not understood) it stops: nothing waits for the captcha or tries to
 is recorded by the collector like any other; a person may pass the check in the browser between runs.
 """
 
+import asyncio
 import logging
 import random
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -41,7 +42,7 @@ from src.services.api_client import (
 )
 from src.services.providers.base import BaseMapProvider, RawPlace, SearchArea, SearchPage, SearchQuery
 from src.services.providers.twogis_catalog import parse_catalog_items
-from src.services.providers.twogis_scraper import ROBOTS_AGENT, call_owner, read_card_contacts
+from src.services.providers.twogis_scraper import CAPTCHA_POLL_SECONDS, ROBOTS_AGENT, call_owner, read_card_contacts
 from src.services.scraper import twogis_site
 from src.services.scraper.chrome.parsers import (
     BlockChecker,
@@ -51,7 +52,14 @@ from src.services.scraper.chrome.parsers import (
     GateDecision,
     ScrapedSearchResult,
 )
-from src.services.scraper.robots import RobotsNoConnectionError, RobotsRules, RobotsUnavailableError, fetch_robots
+from src.services.scraper.chrome.proxy import parse_proxy
+from src.services.scraper.robots import (
+    RobotsNoConnectionError,
+    RobotsRules,
+    RobotsUnavailableError,
+    fetch_robots,
+    parse_robots,
+)
 from src.services.scraper.snapshot import PageSnapshot
 from src.services.twogis_links import build_card_url
 
@@ -89,6 +97,9 @@ class CdpOptions:
     timezone: str | None = None
     lang: str | None = None
     headless: bool = False
+    assisted: bool = False
+    assisted_wait_minutes: float = 5.0
+    assisted_max_captchas: int = 2
     # The memory of Chrome: the limit of the V8 heap in MB (0 = what Chrome takes by itself), the light mode
     # (no images, fonts, map tiles), and after how many read cards Chrome is started anew (0 = never).
     chrome_memory_mb: int = 0
@@ -108,9 +119,15 @@ class CdpOptions:
             raise ValueError("лимиты страниц и результатов за запуск должны быть не меньше 1")
 
     @classmethod
-    def from_settings(cls, settings: Settings, ignore_interval: bool = False) -> "CdpOptions":
+    def from_settings(
+        cls,
+        settings: Settings,
+        ignore_interval: bool = False,
+        *,
+        assisted: bool = False,
+    ) -> "CdpOptions":
         chrome_path = settings.SCRAPER_CDP_CHROME_PATH.strip()
-        return cls(
+        options = cls(
             city_slug=settings.SCRAPER_CITY_SLUG,
             min_delay_seconds=settings.SCRAPER_CDP_MIN_DELAY_SECONDS,
             max_delay_seconds=settings.SCRAPER_CDP_MAX_DELAY_SECONDS,
@@ -131,6 +148,15 @@ class CdpOptions:
             snapshot_dir=resolve_path(settings.TWOGIS_SNAPSHOT_DIR) if settings.TWOGIS_SNAPSHOT_DIR.strip() else None,
             ignore_interval=ignore_interval,
         )
+        if not assisted:
+            return options
+        return replace(
+            options,
+            assisted=True,
+            headless=False,
+            assisted_wait_minutes=settings.SCRAPER_ASSISTED_WAIT_MINUTES,
+            assisted_max_captchas=settings.SCRAPER_ASSISTED_MAX_CAPTCHAS,
+        )
 
 
 class CdpSession(Protocol):
@@ -145,7 +171,14 @@ class CdpSession(Protocol):
         block_checker: BlockChecker | None = None,
         reset: bool = False,
         continue_current: bool = False,
+        skip_firm_ids: set[str] | frozenset[str] | None = None,
     ) -> ScrapedSearchResult: ...
+
+    async def read_page(self) -> PageSnapshot | None: ...
+
+    async def bring_to_front(self) -> None: ...
+
+    async def fetch_text(self, url: str) -> tuple[int | None, str]: ...
 
     async def close(self) -> None: ...
 
@@ -157,6 +190,7 @@ class TwoGisCdpProvider(BaseMapProvider):
     """Reads organization cards by clicking them on 2GIS search pages in a visible Chrome window."""
 
     name = PROVIDER_NAME
+    external_id_prefix: str | None = "2gis_"
 
     def __init__(
         self,
@@ -165,6 +199,8 @@ class TwoGisCdpProvider(BaseMapProvider):
         robots_loader: RobotsLoader | None = None,
         sleep: Callable[[float], None] = time.sleep,
         notify: Callable[[str], None] = call_owner,
+        clock: Callable[[], float] = time.monotonic,
+        async_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._options = options or CdpOptions()
         self.min_hours_between_runs = self._options.min_hours_between_runs
@@ -174,10 +210,13 @@ class TwoGisCdpProvider(BaseMapProvider):
         # Called in the worker thread of the browser, so it is a plain blocking sleep.
         self._sleep = sleep
         self._notify = notify
+        self._clock = clock
+        self._async_sleep = async_sleep
         self._session: CdpSession | None = None
         self._robots: RobotsRules | None = None
         self._pages = 0
         self._results = 0
+        self._captchas = 0
         self._search_text = ""
         self._stop_error: ProviderError | None = None
         self._blocked: str | None = None
@@ -185,7 +224,23 @@ class TwoGisCdpProvider(BaseMapProvider):
         self._proxy_failure: ProviderProxyError | None = None
         self._empty_in_a_row = 0
         self._left_search_pages = 0
+        self._known_firm_ids: set[str] = set()
+        self.human_check_passed = False
         self.run_counted = False
+
+    def set_known_external_ids(self, external_ids: set[str]) -> None:
+        """Store numeric 2GIS firm IDs already saved in the DB so search pages skip clicking them."""
+        self._known_firm_ids = {
+            firm_id
+            for eid in external_ids
+            if eid.startswith("2gis_") and (firm_id := eid.removeprefix("2gis_").split("_", 1)[0])
+        }
+
+    def _remember_places(self, places: list[RawPlace]) -> None:
+        for place in places:
+            firm_id = place.external_id.removeprefix("2gis_").split("_", 1)[0]
+            if firm_id:
+                self._known_firm_ids.add(firm_id)
 
     async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:
         """Not used for the manual search in the bot: it is slow, and the browser pauses between pages."""
@@ -220,6 +275,7 @@ class TwoGisCdpProvider(BaseMapProvider):
                 max_items=self._options.max_results_per_run - self._results,
                 block_checker=self._block_reason,
                 continue_current=True,
+                skip_firm_ids=self._known_firm_ids,
             )
         except ProviderNoConnectionError:
             raise
@@ -230,14 +286,39 @@ class TwoGisCdpProvider(BaseMapProvider):
         self.run_counted = self.run_counted or self._pages > 0
 
         places = self._places(result.items, query, area)
-        reason = result.blocked_reason
-        if reason is None and not result.stopped:
-            reason = self._page_problem(result)
-        if reason is None:
-            reason = self._count_empty_searches(result)
+        self._remember_places(places)
+        reason = self._result_problem(result)
         if reason is not None:
-            self._stop_on_block(reason)
-            raise ProviderBlockedError(reason, partial=places)
+            is_captcha = twogis_site.is_captcha(
+                result.snapshot.final_url, result.snapshot.title, result.snapshot.html
+            )
+            if is_captcha:
+                self.run_counted = True
+            if self._options.assisted and is_captcha:
+                try:
+                    result = await self._after_human_check(
+                        session,
+                        url,
+                        page,
+                        max_items=max(0, self._options.max_results_per_run - self._results - len(places)),
+                    )
+                except ProviderBlockedError as exc:
+                    self._stop_on_block(str(exc))
+                    raise ProviderBlockedError(str(exc), partial=places) from None
+                retry_places = self._places(result.items, query, area)
+                self._remember_places(retry_places)
+                places = self._dedupe_places(places, retry_places)
+                retry_reason = self._result_problem(result)
+                if retry_reason is not None:
+                    if twogis_site.is_captcha(
+                        result.snapshot.final_url, result.snapshot.title, result.snapshot.html
+                    ):
+                        retry_reason = "капча появилась снова сразу после прохождения"
+                    self._stop_on_block(retry_reason)
+                    raise ProviderBlockedError(retry_reason, partial=places)
+            else:
+                self._stop_on_block(reason)
+                raise ProviderBlockedError(reason, partial=places)
 
         self._results += len(places)
         if result.unreadable is not None:
@@ -273,13 +354,15 @@ class TwoGisCdpProvider(BaseMapProvider):
         """End the run: the browser is closed and the limits start over next time."""
         session, self._session = self._session, None
         self._robots = None
-        self._pages = self._results = 0
+        self._pages = self._results = self._captchas = 0
         self._stop_error = None
         self._blocked = None
         self._budget_ended = False
         self._proxy_failure = None
         self._empty_in_a_row = 0
         self._left_search_pages = 0
+        self._known_firm_ids = set()
+        self.human_check_passed = False
         self.run_counted = False
         if session is not None:
             await session.close()
@@ -369,6 +452,74 @@ class TwoGisCdpProvider(BaseMapProvider):
             return f"сайт ответил кодом 404 на поиск {self._empty_in_a_row}-й раз подряд, ничего не найдено"
         return None
 
+    def _result_problem(self, result: ScrapedSearchResult) -> str | None:
+        reason = result.blocked_reason
+        if reason is None and not result.stopped:
+            reason = self._page_problem(result)
+        if reason is None:
+            reason = self._count_empty_searches(result)
+        return reason
+
+    @staticmethod
+    def _dedupe_places(first: list[RawPlace], second: list[RawPlace]) -> list[RawPlace]:
+        seen: set[str] = set()
+        combined: list[RawPlace] = []
+        for place in (*first, *second):
+            if place.external_id not in seen:
+                seen.add(place.external_id)
+                combined.append(place)
+        return combined
+
+    async def _after_human_check(
+        self,
+        session: CdpSession,
+        url: str,
+        page: int,
+        *,
+        max_items: int,
+    ) -> ScrapedSearchResult:
+        """Ask the owner to pass the captcha, then reopen the search page once."""
+        if self._captchas >= self._options.assisted_max_captchas:
+            raise ProviderBlockedError(
+                f"сайт снова показал капчу, а запросов к человеку за запуск уже {self._captchas}"
+            )
+        self._captchas += 1
+        await self._wait_for_human(session)
+        self.human_check_passed = True
+        return await session.read_search(
+            url,
+            page,
+            max_items=max_items,
+            block_checker=self._block_reason,
+            reset=True,
+            continue_current=True,
+            skip_firm_ids=self._known_firm_ids,
+        )
+
+    async def _wait_for_human(self, session: CdpSession) -> None:
+        """Wait until the browser window stops showing the captcha or timeout expires."""
+        minutes = self._options.assisted_wait_minutes
+        try:
+            await session.bring_to_front()
+        except ProviderUnavailableError:
+            raise ProviderBlockedError("окно браузера закрыто, капча не пройдена") from None
+        self._notify(f"Сайт показал капчу. Пройдите проверку в окне браузера, жду до {minutes:g} мин.")
+        deadline = self._clock() + minutes * 60
+        while self._clock() < deadline:
+            await self._async_sleep(CAPTCHA_POLL_SECONDS)
+            try:
+                shown = await session.read_page()
+            except ProviderUnavailableError:
+                raise ProviderBlockedError("окно браузера закрыто, капча не пройдена") from None
+            if (
+                shown is not None
+                and shown.final_url.startswith("http")
+                and not twogis_site.is_captcha(shown.final_url, shown.title, shown.html)
+            ):
+                self._notify("Проверка пройдена, продолжаю сбор.")
+                return
+        raise ProviderBlockedError(f"капча не пройдена за {minutes:g} мин")
+
     def _stop_on_block(self, reason: str) -> None:
         self._blocked = reason
         # The reason is a text of this code: no URLs, no keys.
@@ -433,7 +584,26 @@ class TwoGisCdpProvider(BaseMapProvider):
 
     async def _fetch_robots(self) -> RobotsRules:
         proxy = self._options.proxy.get_secret_value() if self._options.proxy is not None else None
-        return await fetch_robots(twogis_site.BASE_URL, ROBOTS_AGENT, proxy=proxy)
+        try:
+            return await fetch_robots(twogis_site.BASE_URL, ROBOTS_AGENT, proxy=proxy)
+        except RobotsUnavailableError as exc:
+            is_socks = proxy is not None and parse_proxy(proxy).scheme.startswith("socks")
+            if not is_socks or "httpx[socks]" not in str(exc) or self._session is None:
+                raise
+            robots_url = f"{twogis_site.BASE_URL}/robots.txt"
+            try:
+                status, text = await self._session.fetch_text(robots_url)
+            except ProviderNoConnectionError:
+                raise RobotsNoConnectionError(NO_CONNECTION_TEXT) from None
+            except ProviderError as fetch_exc:
+                raise RobotsUnavailableError(str(fetch_exc)) from None
+            if status == 200:
+                return parse_robots(text, ROBOTS_AGENT)
+            if status is not None and 400 <= status < 500:
+                return RobotsRules()
+            if status is None or status < 0:
+                raise RobotsNoConnectionError("не удалось загрузить robots.txt через браузер") from None
+            raise RobotsUnavailableError(f"код {status}") from None
 
     async def _robots_rules(self) -> RobotsRules:
         if self._robots is None:

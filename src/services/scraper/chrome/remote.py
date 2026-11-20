@@ -560,6 +560,43 @@ class ChromeRemote:
         tab = self._require_tab()
         tab.Page.bringToFront()
 
+    def read_title(self) -> str:
+        """Read `document.title` of the active document without serializing the full page."""
+        raw = self.execute_script("String(document.title || '')")
+        return raw if isinstance(raw, str) else ""
+
+    def read_search_link_hrefs(self) -> list[str] | None:
+        """Read candidate search result hrefs via JS without serializing the full DOM tree."""
+        raw = self.execute_script(
+            "JSON.stringify("
+            "Array.from(document.querySelectorAll('a[href]'), (a) => a.getAttribute('href') || '')"
+            ".filter((h) => h.includes('stat=') && (h.includes('/firm/') || h.includes('/station/')))"
+            ")"
+        )
+        if not isinstance(raw, str):
+            return None
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(parsed, list):
+            return None
+        return [item for item in parsed if isinstance(item, str)]
+
+    def fetch_plain_text(self, url: str, timeout: int = 15) -> tuple[int | None, str]:
+        """Navigate to a plain-text URL in the browser and return `(status, body_text)`."""
+        self.clear_requests()
+        try:
+            self.navigate(url, timeout=timeout)
+            self._wait_document_ready()
+            doc_response = self.get_document_response()
+            raw_status = doc_response.get("status") if isinstance(doc_response, dict) else None
+            status = int(raw_status) if isinstance(raw_status, int) and not isinstance(raw_status, bool) else None
+            body = self.execute_script('document.body ? document.body.innerText : ""')
+            return status, str(body or "")
+        finally:
+            self.clear_requests()
+
     def read_current_page(self) -> tuple[str, str, str]:
         """Atomically read `(url, title, html)` of the active document."""
         raw = self.execute_script(

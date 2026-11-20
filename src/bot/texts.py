@@ -79,7 +79,7 @@ EXPORT_WRONG_NUMBER_TEXT: str = "Число лидов должно быть о�
 # The niche comes from the admin, escaped by the caller; so is the example.
 UNKNOWN_NICHE_TEXT: str = "Неизвестная ниша: {niche}. Пример: <code>/export_unknown 30 {example}</code>"
 UNKNOWN_PROVIDER_TEXT: str = (
-    "Неизвестный источник: {name}. Пример: <code>/provider_on 2gis_scraper</code>, список: /collect_status"
+    "Неизвестный источник: {name}. Пример: <code>/provider_on 2gis_cdp</code>, список: /collect_status"
 )
 
 HELP_HIDDEN_TEXT: str = "Остальные команды доступны только администраторам бота."
@@ -235,7 +235,7 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
                 "provider_on",
                 "Включить источник",
                 "Включить источник после блокировок: [источник]",
-                "/provider_on 2gis_scraper",
+                "/provider_on 2gis_cdp",
             ),
             CommandHelp("chat_id", "ID этого чата", "ID этого чата, для NOTIFY_CHAT_IDS", "/chat_id"),
         ),

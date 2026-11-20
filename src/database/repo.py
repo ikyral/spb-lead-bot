@@ -110,7 +110,13 @@ NEW_STATE_COLUMNS: tuple[str, ...] = (
     "digest_sent_on",
 )
 # The same for the provider_state table.
-NEW_PROVIDER_COLUMNS: tuple[str, ...] = ("requests_total", "key_fingerprint", "requests_day", "requests_day_used")
+NEW_PROVIDER_COLUMNS: tuple[str, ...] = (
+    "requests_total",
+    "key_fingerprint",
+    "requests_day",
+    "requests_day_used",
+    "cursor",
+)
 # Blocks in a row after which a provider stays off until an admin turns it on.
 MAX_CONSECUTIVE_BLOCKS: int = 3
 
@@ -218,6 +224,12 @@ async def _existing_external_ids(session: AsyncSession, external_ids: list[str])
 async def find_existing_external_ids(session: AsyncSession, external_ids: list[str]) -> set[str]:
     """Return the external IDs from the list that are already saved."""
     return await _existing_external_ids(session, external_ids)
+
+
+async def get_known_external_ids_by_prefix(session: AsyncSession, prefix: str) -> set[str]:
+    """Return all saved external IDs starting with `prefix`."""
+    stmt = select(Lead.external_id).where(Lead.external_id.startswith(prefix))
+    return {str(eid) for eid in (await session.scalars(stmt)).all()}
 
 
 async def save_new_leads(
@@ -1264,6 +1276,16 @@ async def enable_provider(session: AsyncSession, name: str) -> None:
     state.consecutive_blocks = 0
     state.blocked_until = None
     state.disabled_at = None
+    await session.commit()
+
+
+async def save_provider_cursors(session: AsyncSession, cursors: dict[str, int]) -> None:
+    """Persist per-provider target cursors."""
+    if not cursors:
+        return
+    for name, pos in cursors.items():
+        state = await _provider_state(session, name)
+        state.cursor = pos
     await session.commit()
 
 

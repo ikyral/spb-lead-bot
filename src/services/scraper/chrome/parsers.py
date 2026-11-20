@@ -178,6 +178,7 @@ class CollectedCards(NamedTuple):
     left_search: str | None = None
     # The list was drawn anew after some clicks and the rest of its links are gone: the page ends here, not an error.
     list_changed: bool = False
+    skipped_known: int = 0
 
 
 def describe_link(href: str) -> str:
@@ -235,15 +236,19 @@ def _is_valid_base64(value: str) -> bool:
     return True
 
 
-def is_search_result_link(node: DOMNode) -> bool:
-    """Match sidebar firm or station links bearing a valid base64 `stat=` query parameter."""
-    if node.local_name != "a":
-        return False
-    href = node.attributes.get("href", "")
+def is_search_result_href(href: str) -> bool:
+    """Match sidebar firm or station hrefs bearing a valid base64 `stat=` query parameter."""
     match = _SEARCH_LINK_RE.search(href)
     if match is None:
         return False
     return _is_valid_base64(match.group(2))
+
+
+def is_search_result_link(node: DOMNode) -> bool:
+    """Match sidebar firm or station links bearing a valid base64 `stat=` query parameter."""
+    if node.local_name != "a":
+        return False
+    return is_search_result_href(node.attributes.get("href", ""))
 
 
 def is_in_building_firm_link(node: DOMNode) -> bool:
@@ -407,6 +412,31 @@ class _BaseChromePageReader:
         ]
         return document
 
+    def _read_search_hrefs(self) -> list[str]:
+        """Read search result hrefs via lightweight JS when supported, falling back to full DOM."""
+        reader = getattr(self._remote, "read_search_link_hrefs", None)
+        if callable(reader):
+            raw_hrefs = reader()
+            if isinstance(raw_hrefs, list):
+                matched = [href for href in raw_hrefs if isinstance(href, str) and is_search_result_href(href)]
+                self._last_firm_hrefs = [href for href in matched if _FIRM_PATH_RE.search(href)]
+                return matched
+        document = self._read_document()
+        return [
+            node.attributes["href"]
+            for node in document.search(is_search_result_link)
+            if "href" in node.attributes
+        ]
+
+    def _read_title(self) -> str:
+        """Read active document title cheaply when supported, falling back to full page snapshot."""
+        reader = getattr(self._remote, "read_title", None)
+        if callable(reader):
+            title = reader()
+            return title if isinstance(title, str) else ""
+        _, title, _ = self._remote.read_current_page()
+        return title
+
     def _log_reading_time(self) -> None:
         """One line for a page: how many reads of the whole page, how long they took, and the quick searches."""
         seconds = self._document_seconds
@@ -545,8 +575,10 @@ class _BaseChromePageReader:
         status: int | None,
         block_checker: BlockChecker | None,
         skip_hrefs: set[str] | None = None,
+        skip_firm_ids: set[str] | frozenset[str] | None = None,
         max_items: int | None = None,
         refetch_on_stale: bool = True,
+        document: DOMNode | None = None,
     ) -> CollectedCards:
         """
         Click each matching link in DOM and collect `/items/byid` payloads.
@@ -554,8 +586,8 @@ class _BaseChromePageReader:
         A card that could not be read after its attempts is left and the next one is tried; after
         `_MAX_UNREAD_IN_A_ROW` such cards in a row the page is left (`unreadable`), so the rest of the budget is kept.
         """
-        document = self._read_document()
-        nodes = find_links(document)
+        resolved_doc = document if document is not None else self._read_document()
+        nodes = find_links(resolved_doc)
         target_items: list[tuple[str, DOMNode]] = []
         seen_hrefs: set[str] = set()
         for node in nodes:
@@ -570,12 +602,17 @@ class _BaseChromePageReader:
         collected: list[dict[str, Any]] = []
         collected_urls: list[str] = []
         attempted_hrefs: set[str] = set()
+        skipped_known = 0
         unread_in_a_row = 0
         total = len(target_items)
 
         for position, (href, node) in enumerate(target_items, start=1):
             if max_items is not None and len(collected) >= max_items:
                 break
+            firm_id = firm_id_from_href(href)
+            if skip_firm_ids and firm_id and firm_id in skip_firm_ids:
+                skipped_known += 1
+                continue
 
             def _refetch(target_href: str = href, initial: DOMNode = node) -> DOMNode | None:
                 if not refetch_on_stale:
@@ -594,16 +631,29 @@ class _BaseChromePageReader:
                     total=total,
                 )
             except _GateStopped:
-                return CollectedCards(collected, collected_urls, attempted_hrefs, None, True)
+                return CollectedCards(
+                    collected, collected_urls, attempted_hrefs, None, True, skipped_known=skipped_known
+                )
             except _LeftSearchPage as left:
                 if left.payload is not None:
                     collected.append(left.payload)
                     if left.url:
                         collected_urls.append(left.url)
-                return CollectedCards(collected, collected_urls, attempted_hrefs, None, False, None, left.where)
+                return CollectedCards(
+                    collected,
+                    collected_urls,
+                    attempted_hrefs,
+                    None,
+                    False,
+                    None,
+                    left.where,
+                    skipped_known=skipped_known,
+                )
 
             if blocked_reason is not None:
-                return CollectedCards(collected, collected_urls, attempted_hrefs, blocked_reason, False)
+                return CollectedCards(
+                    collected, collected_urls, attempted_hrefs, blocked_reason, False, skipped_known=skipped_known
+                )
             if payload is not None:
                 collected.append(payload)
                 unread_in_a_row = 0
@@ -617,7 +667,17 @@ class _BaseChromePageReader:
                     len(collected),
                     total - position + 1,
                 )
-                return CollectedCards(collected, collected_urls, attempted_hrefs, None, False, None, None, True)
+                return CollectedCards(
+                    collected,
+                    collected_urls,
+                    attempted_hrefs,
+                    None,
+                    False,
+                    None,
+                    None,
+                    True,
+                    skipped_known=skipped_known,
+                )
             elif unread is not None:
                 unread_in_a_row += 1
                 if unread_in_a_row >= _MAX_UNREAD_IN_A_ROW:
@@ -628,9 +688,19 @@ class _BaseChromePageReader:
                     logger.warning("Search page left: %s", reason)
                     self._log_page_state("several cards in a row could not be read")
                     self._save_failure_snapshot(reason)
-                    return CollectedCards(collected, collected_urls, attempted_hrefs, None, False, reason)
+                    return CollectedCards(
+                        collected,
+                        collected_urls,
+                        attempted_hrefs,
+                        None,
+                        False,
+                        reason,
+                        skipped_known=skipped_known,
+                    )
 
-        return CollectedCards(collected, collected_urls, attempted_hrefs, None, False)
+        return CollectedCards(
+            collected, collected_urls, attempted_hrefs, None, False, skipped_known=skipped_known
+        )
 
     def _return_to_list(self, firm_id: str | None) -> bool:
         """
@@ -850,6 +920,7 @@ class SearchPageReader(_BaseChromePageReader):
         block_checker: BlockChecker | None = None,
         reset: bool = False,
         continue_current: bool = False,
+        skip_firm_ids: set[str] | frozenset[str] | None = None,
     ) -> ScrapedSearchResult:
         """Read search page `page` for `url`, continuing in-place when sequential."""
         base_url = strip_page_number(url)
@@ -877,7 +948,11 @@ class SearchPageReader(_BaseChromePageReader):
                 snapshot = _snapshot_from_remote(self._remote, status=200, include_state=True)
                 return ScrapedSearchResult(snapshot=snapshot, items=[], has_more=False, stopped=True)
 
-        return self._scrape_current_page(max_items=max_items, block_checker=block_checker)
+        return self._scrape_current_page(
+            max_items=max_items,
+            block_checker=block_checker,
+            skip_firm_ids=skip_firm_ids,
+        )
 
     def _open_first_page(self, base_url: str, *, block_checker: BlockChecker | None) -> ScrapedSearchResult | None:
         self.reset()
@@ -917,7 +992,7 @@ class SearchPageReader(_BaseChromePageReader):
         same_in_a_row = 0
         reads = 0
         while True:
-            self._read_document()
+            self._read_search_hrefs()
             reads += 1
             # The same organizations in the same order: the state in the addresses changes without the list changing.
             current = tuple(firm_id_from_href(href) or href for href in self._last_firm_hrefs)
@@ -999,20 +1074,18 @@ class SearchPageReader(_BaseChromePageReader):
 
     def _page_has_search_links_or_empty(self) -> bool:
         try:
-            doc = self._read_document()
+            if self._read_search_hrefs():
+                return True
+            title = self._read_title()
         except ChromeException:
             return False
-        if doc.search(is_search_result_link):
-            return True
-        _, title, _ = self._remote.read_current_page()
         return bool(_NO_RESULTS_TITLE_RE.search(title))
 
     def _find_search_links(self, document: DOMNode) -> list[DOMNode]:
         return document.search(is_search_result_link)
 
     def _all_search_hrefs(self) -> set[str]:
-        document = self._read_document()
-        return {node.attributes["href"] for node in self._find_search_links(document) if "href" in node.attributes}
+        return set(self._read_search_hrefs())
 
     def _wait_new_links_loaded(self, block_checker: BlockChecker | None) -> tuple[PageSnapshot | None, str | None]:
         """Wait until pagination DOM refreshes so links differ from `self._visited_links`."""
@@ -1029,10 +1102,8 @@ class SearchPageReader(_BaseChromePageReader):
             hrefs = self._all_search_hrefs()
             if hrefs and not hrefs.issubset(self._visited_links):
                 return None, None
-            if not hrefs:
-                _, title, _ = self._remote.read_current_page()
-                if _NO_RESULTS_TITLE_RE.search(title):
-                    return None, None
+            if not hrefs and _NO_RESULTS_TITLE_RE.search(self._read_title()):
+                return None, None
             time.sleep(_SETTLE_POLL_SECONDS)
         return None, None
 
@@ -1076,6 +1147,7 @@ class SearchPageReader(_BaseChromePageReader):
         *,
         max_items: int | None,
         block_checker: BlockChecker | None,
+        skip_firm_ids: set[str] | frozenset[str] | None = None,
     ) -> ScrapedSearchResult:
         self._document_seconds = []
         self._lookup_seconds = []
@@ -1100,9 +1172,17 @@ class SearchPageReader(_BaseChromePageReader):
             _firm_links_only,
             status=200,
             block_checker=block_checker,
+            skip_firm_ids=skip_firm_ids,
             max_items=max_items,
             refetch_on_stale=True,
+            document=document,
         )
+        if collected.skipped_known > 0:
+            logger.info(
+                "Search page %d: skipped %d already-known organizations",
+                self._current_page,
+                collected.skipped_known,
+            )
         items, item_urls, blocked_reason, stopped = (
             collected.items,
             collected.urls,
@@ -1115,7 +1195,13 @@ class SearchPageReader(_BaseChromePageReader):
         if self._options.use_gc and self._current_page % self._options.gc_pages_interval == 0:
             self._remote.execute_script("window.gc && window.gc()")
 
-        if not items and blocked_reason is None and not stopped and left_search is None:
+        if (
+            not items
+            and collected.skipped_known == 0
+            and blocked_reason is None
+            and not stopped
+            and left_search is None
+        ):
             items, item_urls = _collect_json_responses(
                 self._remote,
                 lambda resp_url: "api.2gis." in resp_url,
@@ -1382,6 +1468,7 @@ class ChromeScraperSession:
         block_checker: BlockChecker | None = None,
         reset: bool = False,
         continue_current: bool = False,
+        skip_firm_ids: set[str] | frozenset[str] | None = None,
     ) -> ScrapedSearchResult:
         """Scrape a search or `/inside/` listing via `SearchPageReader` / `InBuildingPageReader`."""
         return await self._run_locked(
@@ -1392,6 +1479,7 @@ class ChromeScraperSession:
             block_checker,
             reset,
             continue_current,
+            skip_firm_ids,
         )
 
     def _read_search_sync(
@@ -1402,6 +1490,7 @@ class ChromeScraperSession:
         block_checker: BlockChecker | None,
         reset: bool,
         continue_current: bool,
+        skip_firm_ids: set[str] | frozenset[str] | None,
     ) -> ScrapedSearchResult:
         self._require_remote()
         kind = classify_2gis_url(url)
@@ -1426,9 +1515,20 @@ class ChromeScraperSession:
             block_checker=block_checker,
             reset=reset,
             continue_current=continue_current,
+            skip_firm_ids=skip_firm_ids,
         )
         self._cards_since_start += len(result.items)
         return result
+
+    async def fetch_text(self, url: str) -> tuple[int | None, str]:
+        """Navigate to a plain-text URL in Chrome (e.g. robots.txt over SOCKS5) and return `(status, text)`."""
+        return await self._run_locked(self._fetch_text_sync, url)
+
+    def _fetch_text_sync(self, url: str) -> tuple[int | None, str]:
+        remote = self._require_remote()
+        if self._search_reader is not None:
+            self._search_reader.reset()
+        return remote.fetch_plain_text(url)
 
     async def read_page(self) -> PageSnapshot | None:
         """Read current page URL/title/HTML/state without navigating."""
