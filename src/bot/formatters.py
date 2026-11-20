@@ -581,7 +581,8 @@ def format_collection_report(report: RunReport) -> str:
         f"• Новых сохранено: <b>{result.saved_new}</b>",
         f"• Дубликатов пропущено: <b>{result.duplicates}</b>",
         f"• Ошибок: <b>{result.errors}</b>",
-        f"• Запросов к API: <b>{result.requests}</b>",
+        f"• Страниц поиска: <b>{result.requests}</b>",
+        f"• Карточек открыто: <b>{result.cards_opened}</b>",
         f"• Длительность: <b>{report.duration_seconds:.0f} с</b>",
         f"\n📦 В запасе: <b>{report.pool_size}</b>",
     ]

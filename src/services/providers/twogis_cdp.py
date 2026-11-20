@@ -285,6 +285,7 @@ class TwoGisCdpProvider(BaseMapProvider):
             self.run_counted = self.run_counted or self._pages > 0
             raise
         self.run_counted = self.run_counted or self._pages > 0
+        self.cards_opened += len(result.items)
 
         places = self._places(result.items, query, area)
         self._remember_places(places)
@@ -304,6 +305,7 @@ class TwoGisCdpProvider(BaseMapProvider):
                 except ProviderBlockedError as exc:
                     self._stop_on_block(str(exc))
                     raise ProviderBlockedError(str(exc), partial=places) from None
+                self.cards_opened += len(result.items)
                 retry_places = self._places(result.items, query, area)
                 self._remember_places(retry_places)
                 places = self._dedupe_places(places, retry_places)
@@ -361,6 +363,7 @@ class TwoGisCdpProvider(BaseMapProvider):
         self._known_firm_ids = set()
         self.human_check_passed = False
         self.run_counted = False
+        self.cards_opened = 0
         if session is not None:
             await session.close()
 

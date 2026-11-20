@@ -1667,6 +1667,7 @@ async def test_assisted_captcha_wait_happy_path_with_partial_places() -> None:
         assert provider.human_check_passed is True
         assert provider.run_counted is True
         assert provider._results == 2
+        assert provider.cards_opened == 3  # 1 before the captcha, 2 after
         assert session.brought_to_front == 1
         assert session.read_search_calls[1]["reset"] is True
         assert session.read_search_calls[1]["continue_current"] is True

@@ -194,6 +194,8 @@ class CollectResult:
     duplicates: int = 0
     errors: int = 0
     requests: int = 0
+    # Organization cards actually opened and read (found counts places that passed filters and merging).
+    cards_opened: int = 0
     next_cursor: int = 0
     targets_processed: int = 0
     # Problems that need the owner's attention (key, quota, no access to contacts).
@@ -552,6 +554,7 @@ async def collect_leads(
             provider.name for provider in providers if provider.human_check_passed or provider.ignore_interval
         }
         not_counted = [p.name for p in usable if p.min_hours_between_runs and not p.run_counted]
+        result.cards_opened = sum(p.cards_opened for p in providers)
         await _close_providers(providers)
 
     cursors_to_save: dict[str, int] = {}
