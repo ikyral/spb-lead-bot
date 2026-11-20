@@ -61,8 +61,8 @@ class Provider(BaseMapProvider):
         return SearchPage(
             places=[
                 RawPlace(
-                    external_id=f"fake_{number}",
-                    source="fake",
+                    external_id=f"2gis_{number}",
+                    source="2gis",
                     name=f"Организация {number}",
                     category="dentist_clinic",
                     phone=f"+7 812 555-{number:02d}-{number:02d}",
@@ -299,7 +299,9 @@ async def test_enough_leads_in_the_pool_means_no_extra_collection(session_maker)
     provider = Provider()
     runner = _runner(session_maker, provider, Reports(), min_pool=1)
     async with session_maker() as session:
-        session.add(Lead(external_id="a", source="x", name="n", category="c", site_status="no_site"))
+        session.add(
+            Lead(external_id="a", source="x", name="n", category="c", site_status="no_site", site_source="2gis")
+        )
         await session.commit()
     await runner.check_pool()
     assert provider.calls == 0 and not runner.is_running

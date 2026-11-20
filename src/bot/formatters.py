@@ -504,6 +504,8 @@ def _pool_stats_lines(stats: PoolStats) -> list[str]:
     lines.append(f"🌐 Вердиктов «Сайт есть» вручную: <b>{stats.manual_site_found}</b>")
     if stats.chains:
         lines.append(f"🔗 Сетей не выдаётся: <b>{stats.chains}</b>")
+    if stats.unverified_osm:
+        lines.append(f"🕵️ не проверены (OSM): <b>{stats.unverified_osm}</b>")
     if stats.by_niche:
         lines += ["", "<b>Запас по нишам:</b>"]
         niches = sorted(stats.by_niche.items(), key=lambda item: (-item[1], item[0]))
@@ -701,7 +703,7 @@ def format_help(is_admin: bool, sections: tuple[HelpSection, ...] = HELP_SECTION
     return split_messages(blocks, separator="\n")
 
 
-def format_niche_table(stats: list[NicheStats]) -> list[str]:
+def format_niche_table(stats: list[NicheStats], unverified_osm: int = 0) -> list[str]:
     """The table of /niches, in as many messages as it takes. Each message is a table of its own."""
     if not stats:
         return ["Лидов пока нет, считать нечего."]
@@ -725,7 +727,10 @@ def format_niche_table(stats: list[NicheStats]) -> list[str]:
             current = []
         current.append(row)
     tables.append(_niche_table(header, current))
-    return split_messages([legend, *tables])
+    parts = [legend, *tables]
+    if unverified_osm:
+        parts.append(f"не проверены (OSM): {unverified_osm} (в выдачу не попадают)")
+    return split_messages(parts)
 
 
 def _niche_table(header: str, rows: list[str]) -> str:

@@ -12,6 +12,7 @@ from sqlalchemy import (
     case,
     func,
     inspect,
+    not_,
     or_,
     select,
     text,
@@ -52,6 +53,7 @@ from src.services.site_status import (
     SITE_NO_SITE,
     SITE_UNKNOWN,
     SOURCE_MANUAL,
+    UNVERIFIED_SITE_SOURCES,
     UNVERIFIED_STATUSES,
     issue_group,
 )
@@ -282,12 +284,21 @@ async def get_leads(
     return list(result.scalars().all())
 
 
+def _unverified_osm_clause() -> ColumnElement[bool]:
+    """The same as is_unverified_no_site, in SQL: "no site" from OSM or from an unknown source."""
+    return and_(
+        Lead.site_status == SITE_NO_SITE,
+        or_(Lead.site_source.is_(None), Lead.site_source.in_(UNVERIFIED_SITE_SOURCES)),
+    )
+
+
 def _in_pool_clause() -> ColumnElement[bool]:
-    """Leads that may still be handed out: new, without a known site, not part of a chain."""
+    """Leads that may still be handed out: new, without a known site, not part of a chain, not unverified OSM."""
     return and_(
         Lead.crm_status == STATUS_NEW,
         Lead.site_status != SITE_FOUND,
         func.coalesce(Lead.is_chain, False).is_(False),
+        not_(_unverified_osm_clause()),
     )
 
 
@@ -810,6 +821,18 @@ async def count_new_leads(session: AsyncSession) -> int:
     return int(result.scalar_one())
 
 
+async def count_unverified_osm_leads(session: AsyncSession) -> int:
+    """New non-chain leads that are hidden because their "no site" from OSM was never checked."""
+    result = await session.execute(
+        select(func.count(Lead.id)).where(
+            Lead.crm_status == STATUS_NEW,
+            func.coalesce(Lead.is_chain, False).is_(False),
+            _unverified_osm_clause(),
+        )
+    )
+    return int(result.scalar_one())
+
+
 async def count_unknown_site_leads(session: AsyncSession) -> int:
     """How many leads of the pool have no verdict about the site yet."""
     result = await session.execute(
@@ -827,6 +850,8 @@ class PoolStats:
     # Verdicts 'there is a site' given by hand: the leads a source should not have offered.
     manual_site_found: int
     chains: int
+    # New leads with an unchecked "no site" from OSM: kept in the base, never handed out.
+    unverified_osm: int = 0
 
     @property
     def waiting_for_check(self) -> int:
@@ -851,6 +876,7 @@ async def get_pool_stats(session: AsyncSession) -> PoolStats:
         by_niche=await counts(Lead.category),
         manual_site_found=int(manual.scalar_one()),
         chains=int(chains.scalar_one()),
+        unverified_osm=await count_unverified_osm_leads(session),
     )
 
 

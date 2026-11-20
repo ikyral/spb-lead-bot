@@ -492,6 +492,7 @@ def _lead(number: int) -> Lead:
         name=f"Организация {number}",
         category="dentist_clinic",
         site_status="no_site",
+        site_source="2gis",
         score=50,
         crm_status=STATUS_NEW,
         created_at=datetime(2026, 11, 5, 10, 0, tzinfo=UTC) + timedelta(minutes=number),
