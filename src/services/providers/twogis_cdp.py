@@ -79,6 +79,22 @@ PROVIDER_NAME: str = "2gis_cdp"
 # 2GIS takes a bare name of a district for a street or another city ("Калининский" finds Tver), so a district is
 # asked for as "<name> район".
 DISTRICT_WORD: str = "район"
+# 2GIS also reads "<name> район" as a district of a Leningrad-oblast town or of another region. Server journal of
+# 2026-11-19..20: "Выборгский район" opened /pikalevo/ or a search without a city, "Калининский район" opened
+# /vsevolozhsk/, "Приморский район" a search without a city; the other districts always stayed in /spb/. These
+# districts get the city name added. To be confirmed by the first real run.
+AMBIGUOUS_DISTRICTS: frozenset[str] = frozenset({"Выборгский", "Приморский", "Калининский"})
+CITY_WORD: str = "Санкт-Петербург"
+
+
+def build_search_text(query_text: str, district: str | None) -> str:
+    """The text typed into the 2GIS search: only the text, the target itself (progress key, cursor) is unchanged."""
+    if not district:
+        return query_text
+    text = f"{query_text} {district} {DISTRICT_WORD}"
+    return f"{text} {CITY_WORD}" if district in AMBIGUOUS_DISTRICTS else text
+
+
 # Below this no pause is possible, whatever the settings say.
 MIN_PAUSE_SECONDS: float = 3.0
 # 2GIS answers 404 to a search that found nothing ("Точных совпадений нет"). That is an empty result, but a ban could
@@ -294,7 +310,7 @@ class TwoGisCdpProvider(BaseMapProvider):
             logger.error("2gis_cdp stopped, the proxy does not work: %s", exc)
             raise
         await self._robots_rules()  # before any page: unknown rules mean nothing is opened
-        self._search_text = f"{query.text} {area.district} {DISTRICT_WORD}" if area.district else query.text
+        self._search_text = build_search_text(query.text, area.district)
         self._stop_error = None
         url = twogis_site.build_search_url(self._options.city_slug, self._search_text)
         try:
