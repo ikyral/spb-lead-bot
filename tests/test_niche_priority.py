@@ -395,9 +395,9 @@ async def test_the_command_with_only_a_niche_takes_the_default_number(session_ma
 
 
 async def test_the_command_finds_a_niche_of_several_words(session_maker, monkeypatch) -> None:
-    await _add(session_maker, *_unknown("ремонт обуви", 2))
+    await _add(session_maker, *_unknown("ремонт сумок", 2))
 
-    message = await _export(session_maker, monkeypatch, "5 Ремонт обуви")
+    message = await _export(session_maker, monkeypatch, "5 Ремонт сумок")
 
     assert _sent(message)["count"] == 2
 

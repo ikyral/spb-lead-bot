@@ -347,7 +347,7 @@
 
 ### Ниши
 
-Ключи: `dentist_clinic`, `auto_repair`, `beauty`, `legal_b2b`, `barbershop`, `nails`, `massage`, `tire_service`, `detailing`, `cleaning`, `renovation`, `appliance_repair`, `workshop`, `tutors`, `photographers`, `florists`, `pet_services`, `fitness_studios`, `furniture_custom`, `kids_centers`, а также `hotels` и `horeca` с пониженным весом.
+Ключи: `dentist_clinic`, `auto_repair`, `beauty`, `legal_b2b`, `barbershop`, `nails`, `massage`, `tire_service`, `detailing`, `cleaning`, `renovation`, `appliance_repair`, `workshop`, `tutors`, `photographers`, `florists`, `pet_services`, `fitness_studios`, `furniture_custom`, `kids_centers`, `shoe_repair`, `key_making`, `clothing_repair`, `watch_repair`, `phone_repair`, `brows`, `dry_cleaning`, `street_food`, `framing`, `bike_repair`, а также `hotels` и `horeca` с пониженным весом.
 
 Чтобы собирать только часть ниш, перечислите их в `.env`. При пустом `COLLECT_QUERIES` целей 22 ниши × 10 районов, а браузер читает за запуск не больше `SCRAPER_CDP_MAX_RESULTS_PER_RUN` организаций, поэтому с меньшим числом ниш круг замыкается быстрее.
 
