@@ -156,6 +156,67 @@ TARGET_CATEGORIES: dict[str, dict[str, Any]] = {
         "queries_2gis": ("детский развивающий центр", "детский центр"),
         "high_margin": False,
     },
+    # Small repair and service points: a missing site is the norm, one search phrase per niche.
+    "shoe_repair": {
+        "title": "👞 Ремонт обуви",
+        "osm_tags": [("craft", "shoemaker")],
+        "queries_2gis": ("ремонт обуви",),
+        "high_margin": False,
+    },
+    "key_making": {
+        "title": "🔑 Изготовление ключей",
+        "osm_tags": [("shop", "locksmith"), ("craft", "locksmith")],
+        "queries_2gis": ("изготовление ключей",),
+        "high_margin": False,
+    },
+    "clothing_repair": {
+        "title": "🧵 Ремонт одежды",
+        "osm_tags": [("craft", "tailor")],
+        "queries_2gis": ("ремонт одежды",),
+        "high_margin": False,
+    },
+    "watch_repair": {
+        "title": "⌚ Ремонт часов",
+        "osm_tags": [("craft", "watchmaker")],
+        "queries_2gis": ("ремонт часов",),
+        "high_margin": False,
+    },
+    "phone_repair": {
+        "title": "📱 Ремонт телефонов",
+        "osm_tags": [],
+        "queries_2gis": ("ремонт телефонов",),
+        "high_margin": False,
+    },
+    "brows": {
+        "title": "✨ Брови и ресницы",
+        "osm_tags": [],
+        "queries_2gis": ("студия бровей",),
+        "high_margin": False,
+    },
+    "dry_cleaning": {
+        "title": "👔 Химчистка",
+        "osm_tags": [("shop", "dry_cleaning")],
+        "queries_2gis": ("химчистка",),
+        "high_margin": False,
+    },
+    "street_food": {
+        "title": "🌯 Шаурма и быстрая еда",
+        "osm_tags": [],
+        "queries_2gis": ("шаурма",),
+        "high_margin": False,
+    },
+    "framing": {
+        "title": "🖼 Багетная мастерская",
+        "osm_tags": [("shop", "frame")],
+        "queries_2gis": ("багетная мастерская",),
+        "high_margin": False,
+    },
+    "bike_repair": {
+        "title": "🚲 Ремонт велосипедов",
+        "osm_tags": [("shop", "bicycle")],
+        "queries_2gis": ("ремонт велосипедов",),
+        "high_margin": False,
+    },
 }
 
 

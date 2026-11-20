@@ -107,21 +107,28 @@ def test_default_targets_are_all_categories_in_all_districts() -> None:
     phrases = sum(len(category["queries_2gis"]) for category in TARGET_CATEGORIES.values())
     assert len(config.targets) == phrases * len(SPB_DISTRICTS)
     assert config.providers == ["2gis_cdp", "osm"]  # the browser reader of 2GIS is the main source
-    assert len(config.targets) == 370  # 37 searches (a niche may have several) in 10 districts
+    assert len(config.targets) == 470  # 47 searches (a niche may have several) in 10 districts
     assert {"pet_services", "fitness_studios", "furniture_custom", "kids_centers"} <= {
         target.query.category for target in config.targets
     }
 
 
 def test_progress_keys_are_unique_and_the_old_targets_keep_theirs(monkeypatch: pytest.MonkeyPatch) -> None:
-    new_niches = {"pet_services", "fitness_studios", "furniture_custom", "kids_centers"}
+    new_niches = {
+        "pet_services",
+        "fitness_studios",
+        "furniture_custom",
+        "kids_centers",
+        *("shoe_repair", "key_making", "clothing_repair", "watch_repair", "phone_repair"),
+        *("brows", "dry_cleaning", "street_food", "framing", "bike_repair"),
+    }
     provider = FakeProvider([])
     provider.name = "2gis"
     targets = _config().targets
     keys = [_progress_key(provider, target) for target in targets]
-    assert len(set(keys)) == len(targets) == 370
+    assert len(set(keys)) == len(targets) == 470
     old_keys = {_progress_key(provider, t) for t in targets if t.query.category not in new_niches}
-    assert len(old_keys) == 270
+    assert len(old_keys) == 270  # niches that existed before the ten small-business ones
     # The same targets built without the new niches give the very same keys.
     for key in new_niches:
         monkeypatch.delitem(TARGET_CATEGORIES, key)

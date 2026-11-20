@@ -40,7 +40,8 @@ from src.services.site_status import (
 from src.services.twogis_links import twogis_card_url, twogis_search_url
 
 DISTRICT_NAMES: list[str] = list(SPB_DISTRICTS.keys())
-CATEGORY_KEYS: list[str] = list(TARGET_CATEGORIES.keys())
+# The manual search reads OSM only, so niches without OSM tags (2GIS-only) are not offered as buttons.
+CATEGORY_KEYS: list[str] = [key for key, category in TARGET_CATEGORIES.items() if category.get("osm_tags")]
 
 ENRICH_REQUEST_CALLBACK: str = "enrich:request"
 # Shown when callback data is malformed, forged, or from a keyboard of an older bot version.

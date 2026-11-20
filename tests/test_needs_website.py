@@ -10,9 +10,11 @@ from aiogram.types import CallbackQuery, Message, User
 from src.bot.formatters import format_funnel_stats, format_issued_lead, format_lead_card, generate_pitch_text
 from src.bot.handlers import issue, leads
 from src.bot.keyboards import (
+    CATEGORY_KEYS,
     SEARCH_BUTTON_TEXT,
     SITE_NO_BUTTON_TEXT,
     SITE_YES_BUTTON_TEXT,
+    get_categories_keyboard,
     get_issued_lead_keyboard,
 )
 from src.config import PROJECT_ROOT, Settings
@@ -35,8 +37,9 @@ from src.services.chains import (
     refresh_chain_flags,
     rescore_new_leads,
 )
+from src.services.collector import _parse_queries
 from src.services.pipeline import import_csv_harvest, save_collected_places
-from src.services.providers.base import TARGET_CATEGORIES, RawPlace
+from src.services.providers.base import SPB_DISTRICTS, TARGET_CATEGORIES, RawPlace
 from src.services.scheduler import TopupDecision, TopupOutcome
 from src.services.scorer import (
     HIGH_MARGIN_CATEGORY_KEYS,
@@ -627,17 +630,59 @@ async def test_csv_import_goes_through_the_same_filter(session_maker, monkeypatc
 
 # ---------- niches ----------
 
+NEW_SMALL_BUSINESS_NICHES = (
+    "shoe_repair",
+    "key_making",
+    "clothing_repair",
+    "watch_repair",
+    "phone_repair",
+    "brows",
+    "dry_cleaning",
+    "street_food",
+    "framing",
+    "bike_repair",
+)
+
 
 def test_every_niche_can_be_searched_in_both_sources() -> None:
-    assert len(TARGET_CATEGORIES) == 22
+    assert len(TARGET_CATEGORIES) == 32
     for key, category in TARGET_CATEGORIES.items():
         assert category["title"], key
         assert category["queries_2gis"], key
-        assert category["osm_tags"], key
+        assert "osm_tags" in category, key  # may be empty: OSM is off in production, 2GIS is the main source
+        assert all(len(tag) == 2 for tag in category["osm_tags"]), key
     assert {"barbershop", "tire_service", "cleaning", "renovation", "florists", "hotels", "horeca"} <= set(
         TARGET_CATEGORIES
     )
     assert {"pet_services", "fitness_studios", "furniture_custom", "kids_centers"} <= set(TARGET_CATEGORIES)
+    assert set(NEW_SMALL_BUSINESS_NICHES) <= set(TARGET_CATEGORIES)
+    for key in NEW_SMALL_BUSINESS_NICHES:
+        assert TARGET_CATEGORIES[key]["title"] and TARGET_CATEGORIES[key]["queries_2gis"], key
+        assert not TARGET_CATEGORIES[key]["high_margin"], key
+
+
+def test_no_search_phrase_is_shared_between_niches() -> None:
+    phrases = [phrase for category in TARGET_CATEGORIES.values() for phrase in category["queries_2gis"]]
+    assert len(phrases) == len(set(phrases))
+
+
+def test_every_niche_gives_searches_of_its_phrases() -> None:
+    for key in NEW_SMALL_BUSINESS_NICHES:
+        queries = _parse_queries(key)
+        assert [query.text for query in queries] == list(TARGET_CATEGORIES[key]["queries_2gis"]), key
+        assert {query.category for query in queries} == {key}
+
+
+def test_category_buttons_fit_into_telegram_for_every_district() -> None:
+    assert len(CATEGORY_KEYS) + 1 <= 100
+    assert all(TARGET_CATEGORIES[key]["osm_tags"] for key in CATEGORY_KEYS)
+    assert {"phone_repair", "brows", "street_food"}.isdisjoint(CATEGORY_KEYS)
+    for district in SPB_DISTRICTS:
+        markup = get_categories_keyboard(district)
+        assert len(markup.inline_keyboard) == len(CATEGORY_KEYS) + 1
+        for row in markup.inline_keyboard:
+            for button in row:
+                assert button.callback_data and len(button.callback_data.encode()) <= 64, (district, button.text)
 
 
 def test_high_margin_niches_keep_their_bonus_when_rescored() -> None:
