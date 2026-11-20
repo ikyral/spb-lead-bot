@@ -297,6 +297,8 @@ class BaseMapProvider(ABC):
     # False: the run told nothing about the site (no connection, a format the code does not understand),
     # so it does not use up min_hours_between_runs.
     run_counted: bool = True
+    # Organization cards opened and read during this run (for the summary; set by providers that open cards).
+    cards_opened: int = 0
     # Prefix of external_id stored in the database; when set, the collector supplies known IDs before the run.
     external_id_prefix: str | None = None
 

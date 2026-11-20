@@ -841,7 +841,7 @@ def test_main_menu_has_the_batch_button() -> None:
 def test_collection_report_escapes_error_text() -> None:
     report = MagicMock(
         status="partial",
-        result=CollectResult(found=3, saved_new=1, errors=1, last_error="<ошибка> & код"),
+        result=CollectResult(found=3, saved_new=1, errors=1, requests=4, cards_opened=9, last_error="<ошибка> & код"),
         duration_seconds=12.4,
         pool_size=7,
     )
@@ -849,6 +849,8 @@ def test_collection_report_escapes_error_text() -> None:
     assert "&lt;ошибка&gt; &amp; код" in text_
     assert "Новых сохранено: <b>1</b>" in text_
     assert "В запасе: <b>7</b>" in text_
+    assert "Страниц поиска: <b>4</b>\n• Карточек открыто: <b>9</b>" in text_
+    assert "Запросов к API" not in text_
 
 
 async def test_notifier_sends_alerts_and_summary_to_all_admins_silently_at_night() -> None:

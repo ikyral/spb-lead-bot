@@ -293,6 +293,15 @@ async def _all_leads(session_maker) -> list[Lead]:
         return list((await session.scalars(select(Lead).order_by(Lead.id))).all())
 
 
+async def test_collection_reports_cards_opened_by_providers(session_maker, no_site_checks) -> None:
+    provider = FakeProvider(pages=[[_place(1)]])
+    provider.cards_opened = 5
+    result = await collect_leads(session_maker, [provider], _one_target())
+
+    assert result.cards_opened == 5
+    assert result.found == 1
+
+
 async def test_collection_paginates_normalizes_and_saves(session_maker, no_site_checks) -> None:
     provider = FakeProvider(pages=[[_place(1, phone="8 812 555-01-01", email="Info@A.ru")], [_place(2)]])
     result = await collect_leads(session_maker, [provider], _one_target())
