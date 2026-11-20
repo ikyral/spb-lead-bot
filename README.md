@@ -98,7 +98,7 @@
 
 1. **Сбор** идёт по расписанию (`COLLECT_CRON`, по умолчанию `0 4 * * *`), параллельных запусков не бывает. Сохраняются организации без рабочего сайта (те же проверка сайта и скоринг, что и при ручном поиске) и организации из 2ГИС без контактов, см. «Лиды без контактов». После сбора приходит короткий итог без звука, и только если появились новые лиды.
 2. **Если новых лидов меньше `LEADS_MIN_POOL`** (по умолчанию 60), бот запускает внеочередной сбор. Запас проверяется каждые 15 минут и после каждой выдачи; внеочередной сбор идёт не чаще раза в час.
-3. **Кнопка «📦 Следующие 30»** (или `/next_leads`) выдаёт новые лиды в порядке уверенности, что сайт нужен, см. «Нужен ли сайт». Лиды получают статус «выдан». Нажатие работает только с базой, к внешним источникам бот в этот момент не обращается. Каждый лид приходит отдельным сообщением с кнопками «Написал», «Ответили», «Отказ», «Нет ответа»; результат сохраняется в поле `contact_status`, его можно менять. Сообщения идут по одному в секунду (ограничение Telegram), поэтому пачка из 30 лидов приходит примерно за 30 секунд. Бот сразу отвечает на нажатие «⏳ Выдаю лиды…», а карточки отправляет в фоне, не задерживая другие команды. Пока пачка отправляется, повторное нажатие новую не выдаёт. Если бот перезапускается посреди пачки, неотправленные лиды возвращаются в запас. Если Telegram не принял сообщение, лид возвращается в запас.
+3. **Кнопка «📦 Следующие 30»** (или `/next_leads`) выдаёт новые лиды в порядке уверенности, что сайт нужен, см. «Нужен ли сайт». Лиды получают статус «выдан». Нажатие работает только с базой, к внешним источникам бот в этот момент не обращается. Пачка приходит одним сообщением с кнопками перелистывания `⬅️` / `1 / N` / `➡️`, а также кнопками «Написал», «Ответили», «Отказ», «Нет ответа»; результат сохраняется в поле `contact_status`, его можно менять. Состав пачки хранится в базе (`issued_batches`), поэтому перелистывание работает и после перезапуска бота. Пока пачка отправляется, повторное нажатие новую не выдаёт. Если Telegram не принял сообщение или бот остановился до отправки, лиды возвращаются в запас.
 4. **Если новых лидов меньше размера пачки,** бот выдаёт сколько есть и запускает сбор в фоне (с учётом ограничения раз в час и суточного лимита), о чём сообщает.
 
 Выданный лид больше не выдаётся и не перезаписывается, даже если организация снова найдена при сборе.
@@ -369,7 +369,7 @@
 
 ### Обновление схемы базы и откат
 
-Новые колонки `leads.email`, `leads.source_url`, `leads.issued_at`, `leads.contact_status`, `leads.contact_status_by_id`, `leads.contact_status_by`, `leads.contact_status_at`, `leads.exported_at`, `leads.imported_at`, `leads.rubric`, `leads.site_url`, `leads.site_confidence`, `leads.site_source`, `leads.site_checked_at`, `leads.is_chain`, `leads.contact_links`, `leads.remind_at`, `leads.issued_to_user_id`, `leads.owner_user_id`, `leads.owner_name`, `leads.owned_until`, `leads.reserved_by`, `leads.reserved_until`, `collector_state.key_warning_mark`, `collector_state.scraper_check_runs`, `collector_state.digest_sent_on`, `provider_state.requests_total`, `provider_state.key_fingerprint`, `provider_state.cursor`, индекс и таблицы `collector_state`, `provider_state`, `import_log`, `search_progress` появляются сами при запуске бота, существующие лиды не меняются и попадают в очередь выдачи. Перед обновлением сделайте копию файла базы.
+Новые колонки `leads.email`, `leads.source_url`, `leads.issued_at`, `leads.contact_status`, `leads.contact_status_by_id`, `leads.contact_status_by`, `leads.contact_status_at`, `leads.exported_at`, `leads.imported_at`, `leads.rubric`, `leads.site_url`, `leads.site_confidence`, `leads.site_source`, `leads.site_checked_at`, `leads.is_chain`, `leads.contact_links`, `leads.remind_at`, `leads.issued_to_user_id`, `leads.owner_user_id`, `leads.owner_name`, `leads.owned_until`, `leads.reserved_by`, `leads.reserved_until`, `collector_state.key_warning_mark`, `collector_state.scraper_check_runs`, `collector_state.digest_sent_on`, `provider_state.requests_total`, `provider_state.key_fingerprint`, `provider_state.cursor`, индекс и таблицы `collector_state`, `provider_state`, `import_log`, `issued_batches`, `search_progress` появляются сами при запуске бота, существующие лиды не меняются и попадают в очередь выдачи. Перед обновлением сделайте копию файла базы.
 
 Старая версия бота работает с обновлённой базой без изменений, но не покажет новые статусы в своих счётчиках. Чтобы полностью убрать изменения (SQLite 3.35+), остановите бота и выполните. Первые две строки нужны потому, что старая версия показала бы новые статусы сайта как «Есть сайт»:
 
@@ -403,6 +403,7 @@
     ALTER TABLE leads DROP COLUMN reserved_by;
     ALTER TABLE leads DROP COLUMN reserved_until;
     DROP TABLE import_log;
+    DROP TABLE issued_batches;
     DROP TABLE collector_state;
     DROP TABLE provider_state;
     DROP TABLE search_progress;

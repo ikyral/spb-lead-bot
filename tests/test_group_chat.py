@@ -28,7 +28,7 @@ from src.bot.notifier import AdminNotifier
 from src.bot.texts import ADMIN_ONLY_TEXT, BATCH_BUSY_TEXT, BATCH_BUSY_TOAST, BATCH_STARTED_TOAST
 from src.config import Settings
 from src.database.models import CONTACT_CONTACTED, CONTACT_REJECTED, STATUS_ISSUED, STATUS_NEW, Lead
-from src.database.repo import count_issued_leads, count_new_leads, issue_next_leads
+from src.database.repo import count_issued_leads, count_new_leads, get_issued_batch, issue_next_leads
 from src.services.collector import CollectResult
 from src.services.scheduler import TopupDecision, TopupOutcome
 
@@ -416,6 +416,7 @@ async def test_stranger_addressing_this_bot_is_refused(telegram) -> None:
         "panel:status",
         "panel:stats",
         f"ls:1:{CONTACT_CONTACTED}",
+        "lb:1:1",
         "lead:1:work:0",
         "export:all",
     ],
@@ -551,33 +552,47 @@ async def _add_leads(session_maker, count: int) -> None:
         await session.commit()
 
 
+def _batch_id_of(message: MagicMock) -> int:
+    for call in message.answer.await_args_list:
+        markup = call.kwargs.get("reply_markup")
+        if markup is None:
+            continue
+        for row in markup.inline_keyboard:
+            for button in row:
+                data = button.callback_data or ""
+                if data.startswith("lb:") and data != "lb:noop":
+                    return int(data.split(":")[1])
+    raise AssertionError("No batch card found in messages")
+
+
 async def test_batch_goes_to_the_chat_where_the_button_was_pressed(batch_env) -> None:
     await _add_leads(batch_env, 3)
     message = _group_message()
 
     await issue.handle_next_batch(message, _runner())
 
-    assert len(_cards(message)) == 3
+    assert len(_cards(message)) == 1
     message.bot.send_message.assert_not_awaited()  # nothing goes anywhere else
     async with batch_env() as session:
         assert await count_issued_leads(session) == 3
+        assert len(await get_issued_batch(session, _batch_id_of(message)) or []) == 3
 
 
-async def test_group_gets_group_pauses_and_a_warning_about_the_time(batch_env) -> None:
+async def test_group_gets_one_browsable_card_without_delay_warning(batch_env) -> None:
     await _add_leads(batch_env, 3)
     message = _group_message()
     await issue.handle_next_batch(message, _runner())
-    assert batch_env.pauses == [issue.GROUP_MESSAGE_PAUSE_SECONDS] * 2
-    assert issue.GROUP_MESSAGE_PAUSE_SECONDS * 20 >= 60  # at most 20 messages a minute
-    assert "⏳" in message.answer.await_args_list[0].args[0]
+    assert batch_env.pauses == []
+    assert len(message.answer.await_args_list) == 2  # one browsable card + closing summary
+    assert "Лид 1 из 3" in message.answer.await_args_list[0].args[0]
 
 
-async def test_private_chat_keeps_its_faster_pace(batch_env) -> None:
+async def test_private_chat_gets_one_browsable_card_and_summary(batch_env) -> None:
     await _add_leads(batch_env, 3)
     message = _group_message(chat_id=ADMIN)
     await issue.handle_next_batch(message, _runner())
-    assert batch_env.pauses == [issue.MESSAGE_PAUSE_SECONDS] * 2
-    assert len(message.answer.await_args_list) == 4  # no warning about the time
+    assert batch_env.pauses == []
+    assert len(message.answer.await_args_list) == 2  # one browsable card + closing summary
 
 
 async def test_closing_message_in_a_group_offers_the_next_batch(batch_env) -> None:
@@ -595,7 +610,9 @@ async def test_presses_from_different_chats_at_once_do_not_overlap(batch_env) ->
 
     await asyncio.gather(*(issue.handle_next_batch(message, _runner()) for message in messages))
 
-    batches = [set(_cards(message)) for message in messages]
+    assert [len(_cards(message)) for message in messages] == [1, 1, 1]
+    async with batch_env() as session:
+        batches = [set(await get_issued_batch(session, _batch_id_of(message)) or []) for message in messages]
     assert [len(batch) for batch in batches] == [3, 3, 3]
     assert len(batches[0] | batches[1] | batches[2]) == 9
 
@@ -622,7 +639,7 @@ async def test_two_admins_in_one_group_get_one_batch_at_a_time(batch_env) -> Non
     # Meanwhile another chat is not held up, and gets different leads.
     other = _group_message(OTHER_GROUP, SECOND_ADMIN)
     await issue.handle_next_batch(other, _runner())
-    assert len(_cards(other)) == 3
+    assert len(_cards(other)) == 1
 
     release.set()
     await task
@@ -642,7 +659,9 @@ async def test_inline_button_hands_out_a_batch(batch_env) -> None:
     await asyncio.gather(*issue._background_batches)
 
     callback.answer.assert_awaited_once_with(BATCH_STARTED_TOAST)
-    assert len(_cards(callback.message)) == 3
+    assert len(_cards(callback.message)) == 1
+    async with batch_env() as session:
+        assert await count_issued_leads(session) == 3
 
 
 async def test_inline_button_during_a_batch_only_says_so(batch_env) -> None:
@@ -788,21 +807,23 @@ def test_user_label() -> None:
     assert format_user_label(None, "Анна Иванова") == "Анна Иванова"
 
 
-async def test_flood_wait_on_the_batch_notice_does_not_stop_the_batch(batch_env) -> None:
+async def test_flood_wait_in_a_group_retries_and_sends_the_batch(batch_env) -> None:
     await _add_leads(batch_env, 2)
     message = _group_message()
     calls = 0
 
-    async def flood_on_the_notice(*args, **kwargs):
+    async def flood_once(*args, **kwargs):
         nonlocal calls
         calls += 1
         if calls == 1:
             raise TelegramRetryAfter(method=METHOD, message="flood", retry_after=5)
 
-    message.answer = AsyncMock(side_effect=flood_on_the_notice)
+    message.answer = AsyncMock(side_effect=flood_once)
     await issue.handle_next_batch(message, _runner())
 
-    assert len(_cards(message)) == 2
+    assert len(set(_cards(message))) == 1
+    assert len(_cards(message)) == 2  # first attempt hit flood wait, retry sent the same card
+    assert batch_env.pauses == [6]
     async with batch_env() as session:
         assert await count_issued_leads(session) == 2
 
@@ -855,7 +876,7 @@ async def test_double_tap_hands_out_one_batch(batch_env) -> None:
     await asyncio.gather(*issue._background_batches)
 
     second.answer.assert_awaited_once_with(BATCH_BUSY_TOAST)
-    assert len(_cards(first.message)) == 3
+    assert len(_cards(first.message)) == 1
     assert _cards(second.message) == []
     async with batch_env() as session:
         assert await count_issued_leads(session) == 3
@@ -885,31 +906,29 @@ async def test_a_button_too_old_to_answer_still_gets_its_batch(batch_env) -> Non
     await issue.handle_next_batch_button(callback, _runner())
     await asyncio.gather(*issue._background_batches)
 
-    assert len(_cards(callback.message)) == 3
+    assert len(_cards(callback.message)) == 1
+    async with batch_env() as session:
+        assert await count_issued_leads(session) == 3
 
 
 async def test_stopping_the_bot_returns_the_leads_not_yet_sent(batch_env, monkeypatch) -> None:
     await _add_leads(batch_env, 3)
-    sent: list[int] = []
     never = asyncio.Event()
     hanging = asyncio.Event()
 
-    async def send_one_then_hang(message, lead) -> None:
-        if sent:
-            hanging.set()
-            await never.wait()
-        sent.append(lead.id)
+    async def hang_on_card(message, lead, batch=None) -> None:
+        hanging.set()
+        await never.wait()
 
-    monkeypatch.setattr(issue, "_send_card", send_one_then_hang)
+    monkeypatch.setattr(issue, "_send_card", hang_on_card)
     await issue.handle_next_batch_request(_group_message(), _runner())
     # Wait for the batch itself, not a number of loop turns: the database works in a thread.
     await asyncio.wait_for(hanging.wait(), timeout=10)
-    assert len(sent) == 1
 
     await issue.stop_background_batches()
 
     assert issue._background_batches == set()
     assert issue._issuing_to == set()
     async with batch_env() as session:
-        assert await count_issued_leads(session) == 1
-        assert await count_new_leads(session) == 2
+        assert await count_issued_leads(session) == 0
+        assert await count_new_leads(session) == 3

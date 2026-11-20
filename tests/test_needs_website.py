@@ -423,7 +423,6 @@ def _runner() -> MagicMock:
 
 async def _run_batch(monkeypatch, session_maker, **overrides) -> tuple[str, MagicMock]:
     monkeypatch.setattr(issue, "async_session_maker", session_maker)
-    monkeypatch.setattr(issue, "MESSAGE_PAUSE_SECONDS", 0)
     monkeypatch.setattr(issue, "settings", Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=1, **overrides))
     message, runner = _batch_message(), _runner()
     await issue._issue_batch(message, runner)
