@@ -70,17 +70,23 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     mode.add_argument(
         "--enable-provider",
         metavar="ИСТОЧНИК",
-        help="снять автоотключение и паузу источника после блокировок, например 2gis_scraper",
+        help="снять автоотключение и паузу источника после блокировок, например 2gis_cdp",
     )
     mode.add_argument(
         "--check",
         action="store_true",
-        help="вместе с --assisted: проверить парсер на одной странице поиска и одной карточке, ничего не сохраняя",
+        help=(
+            "вместе с --assisted: проверить парсер Playwright (2gis_scraper) на одной странице поиска и одной "
+            "карточке, ничего не сохраняя"
+        ),
     )
     mode.add_argument(
         "--enrich",
         metavar="ФАЙЛ",
-        help="вместе с --assisted: прочитать карточки из файла команды /export_unknown и записать файл для бота",
+        help=(
+            "вместе с --assisted: прочитать карточки через Playwright (2gis_scraper) из файла команды "
+            "/export_unknown и записать файл для бота"
+        ),
     )
     mode.add_argument(
         "--enrich-latest",
@@ -206,7 +212,7 @@ async def _collect(
             f"режим с участием человека нужен парсеру: добавьте {SCRAPER_PROVIDER_NAME} или {CDP_PROVIDER_NAME} "
             "в COLLECTOR_PROVIDERS"
         )
-    cdp_options = CdpOptions.from_settings(current, ignore_interval=ignore_interval and assisted)
+    cdp_options = CdpOptions.from_settings(current, ignore_interval=ignore_interval and assisted, assisted=assisted)
     if not current.SCRAPER_HEADLESS and not assisted:
         logger.warning("SCRAPER_HEADLESS=false is for manual debugging only: do not use it on a schedule")
     provider_set = build_providers(
@@ -421,6 +427,15 @@ def _scraper_provider(options: ScraperOptions) -> TwoGisScraperProvider:
     return TwoGisScraperProvider(options=options)
 
 
+def _min_hours_between_runs(name: str, current: Settings) -> float:
+    """Minimum interval between runs configured for a provider."""
+    if name == CDP_PROVIDER_NAME:
+        return current.SCRAPER_CDP_MIN_HOURS_BETWEEN_RUNS
+    if name == SCRAPER_PROVIDER_NAME:
+        return current.SCRAPER_MIN_HOURS_BETWEEN_RUNS
+    return 0.0
+
+
 async def _run(args: argparse.Namespace, current: Settings) -> int:
     db_path = resolve_path(current.COLLECTOR_DB_PATH)
     await asyncio.to_thread(db_path.parent.mkdir, parents=True, exist_ok=True)
@@ -468,11 +483,11 @@ async def _run(args: argparse.Namespace, current: Settings) -> int:
             states = await get_provider_states(session)
         outcome.refused = _refused_providers(states, names)
         if outcome.report is not None:
-            hours = timedelta(hours=current.SCRAPER_MIN_HOURS_BETWEEN_RUNS)
             for name, reason in outcome.report.result.skipped.items():
                 last_run = states[name].last_run_at if name in states else None
-                if reason == REST_REASON and last_run is not None:
-                    outcome.rest_until[name] = last_run + hours
+                hours = _min_hours_between_runs(name, current)
+                if reason == REST_REASON and last_run is not None and hours > 0:
+                    outcome.rest_until[name] = last_run + timedelta(hours=hours)
     finally:
         await engine.dispose()
 
