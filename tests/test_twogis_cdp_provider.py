@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -27,17 +27,18 @@ from src.services.api_client import (
     ProviderUnavailableError,
 )
 from src.services.collector import collect_leads, load_collector_config
-from src.services.providers import registry
+from src.services.providers import registry, twogis_cdp
 from src.services.providers.base import SearchArea, SearchQuery
 from src.services.providers.registry import build_providers
 from src.services.providers.twogis_cdp import MIN_PAUSE_SECONDS, CdpOptions, TwoGisCdpProvider
 from src.services.scraper import twogis_site
 from src.services.scraper.chrome import parsers, remote
 from src.services.scraper.chrome.dom import DOMNode
-from src.services.scraper.chrome.parsers import ChromeScraperSession, Gate
+from src.services.scraper.chrome.parsers import ChromeScraperSession, Gate, ScrapedSearchResult
 from src.services.scraper.chrome.remote import ChromeRemote
 from src.services.scraper.chrome.utils import ensure_local_cdp_url
 from src.services.scraper.robots import RobotsNoConnectionError, RobotsRules, RobotsUnavailableError
+from src.services.scraper.snapshot import PageSnapshot
 from src.services.twogis_links import build_card_url
 
 QUERY = SearchQuery(text="стоматология", category="dentist_clinic", high_margin=True)
@@ -808,7 +809,7 @@ async def test_the_link_is_taken_anew_right_before_every_click() -> None:
 
 async def test_a_link_that_left_the_page_before_its_click_is_not_clicked(caplog: pytest.LogCaptureFixture) -> None:
     # 101 is in the list when it is read, and gone when its turn comes (the list was redrawn once more).
-    remote_ = ScriptedRemote(lambda n: ["101", "102"] if n <= 6 else ["102"], _cards("101", "102"))
+    remote_ = ScriptedRemote(lambda n: ["101", "102"] if n <= 5 else ["102"], _cards("101", "102"))
     harness = Harness(remote_)
     try:
         with caplog.at_level("INFO"):
@@ -942,7 +943,7 @@ async def test_a_link_the_quick_search_misses_is_looked_for_in_the_whole_page_be
 
 
 async def test_the_state_of_the_page_is_logged_when_a_link_has_left_it(caplog: pytest.LogCaptureFixture) -> None:
-    remote_ = QuickFinderRemote(lambda n: ["101", "102"] if n <= 6 else ["102", "103"], _cards("101", "102", "103"))
+    remote_ = QuickFinderRemote(lambda n: ["101", "102"] if n <= 5 else ["102", "103"], _cards("101", "102", "103"))
     remote_.missing = {"101"}
     harness = Harness(remote_)
     try:
@@ -1502,7 +1503,347 @@ def test_chrome_remote_checks_its_devtools_address(monkeypatch: pytest.MonkeyPat
     assert closed == [True]  # the browser it started is closed again
 
 
-# ---------- 8. nothing that hides automation ----------
+# ---------- 8. known-ID skipping, assisted captcha waiting, and SOCKS5 robots.txt ----------
+
+
+async def test_known_external_ids_skip_clicking_and_deduplicate_within_run() -> None:
+    fake = FakeRemote(
+        pages={
+            1: _doc(["101", "102"], next_page=2),
+            2: _doc(["201", "202"]),
+        },
+        cards={fid: _card(fid) for fid in ("101", "102", "201", "202")},
+    )
+    harness = Harness(fake)
+    provider = harness.provider
+    assert provider.external_id_prefix == "2gis_"
+    provider.set_known_external_ids({"2gis_101", "2gis_102_branch", "osm_999", "2gis_"})
+    try:
+        # Page 1 has only already-known firms: returns empty places with has_more=True, no block.
+        page1 = await provider.search(QUERY, AREA, page=1)
+        assert page1.places == []
+        assert page1.has_more is True
+        assert fake.clicks == []
+
+        page2 = await provider.search(QUERY, AREA, page=2)
+        assert [place.external_id for place in page2.places] == ["2gis_201", "2gis_202"]
+        assert page2.has_more is False
+
+        # Second query in same run: 201 and 202 were remembered after page 2, so they are skipped too.
+        fake.pages = {1: _doc(["201", "202", "301"])}
+        fake.cards["301"] = _card("301")
+        page3 = await provider.search(_query(2), AREA, page=1)
+        assert [place.external_id for place in page3.places] == ["2gis_301"]
+        assert not any("/firm/201" in c or "/firm/202" in c for c in fake.clicks[3:])
+    finally:
+        await provider.close()
+    assert provider._known_firm_ids == set()
+
+
+def test_cdp_options_from_settings_assisted_mode() -> None:
+    settings = _settings(
+        TWOGIS_HEADLESS=True,
+        SCRAPER_ASSISTED_WAIT_MINUTES=7.5,
+        SCRAPER_ASSISTED_MAX_CAPTCHAS=3,
+    )
+    plain = CdpOptions.from_settings(settings)
+    assert plain.assisted is False
+    assert plain.headless is True
+
+    assisted = CdpOptions.from_settings(settings, ignore_interval=True, assisted=True)
+    assert assisted.assisted is True
+    assert assisted.headless is False
+    assert assisted.ignore_interval is True
+    assert assisted.assisted_wait_minutes == 7.5
+    assert assisted.assisted_max_captchas == 3
+
+
+class _AssistedSession:
+    def __init__(
+        self,
+        search_outcomes: list[ScrapedSearchResult],
+        poll_snapshots: list[PageSnapshot | Exception],
+    ) -> None:
+        self.search_outcomes = list(search_outcomes)
+        self.poll_snapshots = list(poll_snapshots)
+        self.read_search_calls: list[dict[str, Any]] = []
+        self.brought_to_front = 0
+        self.closed = 0
+
+    async def start(self) -> None:
+        return None
+
+    async def read_search(
+        self,
+        url: str,
+        page: int = 1,
+        *,
+        max_items: int | None = None,
+        block_checker: Any = None,
+        reset: bool = False,
+        continue_current: bool = False,
+        skip_firm_ids: set[str] | frozenset[str] | None = None,
+    ) -> ScrapedSearchResult:
+        self.read_search_calls.append(
+            {
+                "url": url,
+                "page": page,
+                "max_items": max_items,
+                "reset": reset,
+                "continue_current": continue_current,
+                "skip_firm_ids": set(skip_firm_ids or ()),
+            }
+        )
+        return self.search_outcomes.pop(0)
+
+    async def read_page(self) -> PageSnapshot | None:
+        nxt = self.poll_snapshots.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+
+    async def bring_to_front(self) -> None:
+        self.brought_to_front += 1
+
+    async def fetch_text(self, url: str) -> tuple[int | None, str]:
+        return 200, ""
+
+    async def close(self) -> None:
+        self.closed += 1
+
+
+def _card_item(firm_id: str) -> dict[str, Any]:
+    return json.loads(_card(firm_id)["body"])
+
+
+async def test_assisted_captcha_wait_happy_path_with_partial_places() -> None:
+    captcha_snap = PageSnapshot(status=200, final_url=CAPTCHA_PAGE[0], title=CAPTCHA_PAGE[1], html=CAPTCHA_PAGE[2])
+    ok_snap = PageSnapshot(status=200, final_url=SEARCH_PAGE[0], title=SEARCH_PAGE[1], html=SEARCH_PAGE[2])
+    session = _AssistedSession(
+        search_outcomes=[
+            ScrapedSearchResult(
+                snapshot=captcha_snap,
+                items=[_card_item("101")],
+                has_more=False,
+                blocked_reason="сайт показал капчу",
+                links_found=2,
+            ),
+            ScrapedSearchResult(
+                snapshot=ok_snap,
+                items=[_card_item("101"), _card_item("102")],
+                has_more=True,
+                links_found=2,
+            ),
+        ],
+        poll_snapshots=[captcha_snap, ok_snap],
+    )
+    notes: list[str] = []
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    now = 0.0
+
+    def fake_clock() -> float:
+        nonlocal now
+        now += 1.0
+        return now
+
+    provider = TwoGisCdpProvider(
+        CdpOptions(assisted=True, assisted_wait_minutes=2.0, assisted_max_captchas=2),
+        session_factory=lambda _gate: session,
+        robots_loader=_rules,
+        notify=notes.append,
+        clock=fake_clock,
+        async_sleep=fake_sleep,
+    )
+    try:
+        page = await provider.search(QUERY, AREA, page=1)
+        assert [p.external_id for p in page.places] == ["2gis_101", "2gis_102"]
+        assert page.has_more is True
+        assert provider.human_check_passed is True
+        assert provider.run_counted is True
+        assert provider._results == 2
+        assert session.brought_to_front == 1
+        assert session.read_search_calls[1]["reset"] is True
+        assert session.read_search_calls[1]["continue_current"] is True
+        assert "101" in session.read_search_calls[1]["skip_firm_ids"]
+        assert any("Пройдите проверку" in n for n in notes)
+        assert any("Проверка пройдена" in n for n in notes)
+        assert sleeps == [1.5, 1.5]
+    finally:
+        await provider.close()
+    assert provider.human_check_passed is False
+    assert provider._captchas == 0
+
+
+async def test_assisted_captcha_timeout_closed_repeat_and_max_limit() -> None:
+    captcha_snap = PageSnapshot(status=200, final_url=CAPTCHA_PAGE[0], title=CAPTCHA_PAGE[1], html=CAPTCHA_PAGE[2])
+    ok_snap = PageSnapshot(status=200, final_url=SEARCH_PAGE[0], title=SEARCH_PAGE[1], html=SEARCH_PAGE[2])
+
+    async def noop_sleep(_delay: float) -> None:
+        return None
+
+    # 1. Timeout
+    ticks = iter([0.0, 1.0, 61.0])
+    timeout_session = _AssistedSession(
+        search_outcomes=[
+            ScrapedSearchResult(snapshot=captcha_snap, items=[], has_more=False, blocked_reason="сайт показал капчу"),
+        ],
+        poll_snapshots=[captcha_snap],
+    )
+    timeout_provider = TwoGisCdpProvider(
+        CdpOptions(assisted=True, assisted_wait_minutes=1.0),
+        session_factory=lambda _gate: timeout_session,
+        robots_loader=_rules,
+        notify=lambda _m: None,
+        clock=lambda: next(ticks),
+        async_sleep=noop_sleep,
+    )
+    with pytest.raises(ProviderBlockedError, match="капча не пройдена за 1 мин"):
+        await timeout_provider.search(QUERY, AREA)
+    assert timeout_provider.human_check_passed is False
+    assert timeout_provider.run_counted is True
+    await timeout_provider.close()
+
+    # 2. Closed browser window while polling
+    closed_session = _AssistedSession(
+        search_outcomes=[
+            ScrapedSearchResult(snapshot=captcha_snap, items=[], has_more=False, blocked_reason="сайт показал капчу"),
+        ],
+        poll_snapshots=[ProviderUnavailableError("окно браузера закрыто")],
+    )
+    closed_provider = TwoGisCdpProvider(
+        CdpOptions(assisted=True),
+        session_factory=lambda _gate: closed_session,
+        robots_loader=_rules,
+        notify=lambda _m: None,
+        clock=lambda: 0.0,
+        async_sleep=noop_sleep,
+    )
+    with pytest.raises(ProviderBlockedError, match="окно браузера закрыто"):
+        await closed_provider.search(QUERY, AREA)
+    await closed_provider.close()
+
+    # 3. Captcha repeats immediately after solving -> preserves partial places
+    repeat_session = _AssistedSession(
+        search_outcomes=[
+            ScrapedSearchResult(
+                snapshot=captcha_snap,
+                items=[_card_item("101")],
+                has_more=False,
+                blocked_reason="сайт показал капчу",
+            ),
+            ScrapedSearchResult(
+                snapshot=captcha_snap,
+                items=[],
+                has_more=False,
+                blocked_reason="сайт показал капчу",
+            ),
+        ],
+        poll_snapshots=[ok_snap],
+    )
+    repeat_provider = TwoGisCdpProvider(
+        CdpOptions(assisted=True),
+        session_factory=lambda _gate: repeat_session,
+        robots_loader=_rules,
+        notify=lambda _m: None,
+        clock=lambda: 0.0,
+        async_sleep=noop_sleep,
+    )
+    with pytest.raises(ProviderBlockedError, match="капча появилась снова сразу после прохождения") as caught:
+        await repeat_provider.search(QUERY, AREA)
+    assert [p.external_id for p in caught.value.partial] == ["2gis_101"]
+    await repeat_provider.close()
+
+    # 4. Max captchas exceeded on second captcha in same run
+    max_session = _AssistedSession(
+        search_outcomes=[
+            ScrapedSearchResult(snapshot=captcha_snap, items=[], has_more=False, blocked_reason="сайт показал капчу"),
+            ScrapedSearchResult(snapshot=ok_snap, items=[_card_item("101")], has_more=False, links_found=1),
+            ScrapedSearchResult(snapshot=captcha_snap, items=[], has_more=False, blocked_reason="сайт показал капчу"),
+        ],
+        poll_snapshots=[ok_snap],
+    )
+    max_provider = TwoGisCdpProvider(
+        CdpOptions(assisted=True, assisted_max_captchas=1),
+        session_factory=lambda _gate: max_session,
+        robots_loader=_rules,
+        notify=lambda _m: None,
+        clock=lambda: 0.0,
+        async_sleep=noop_sleep,
+    )
+    first_page = await max_provider.search(QUERY, AREA)
+    assert [p.external_id for p in first_page.places] == ["2gis_101"]
+    with pytest.raises(ProviderBlockedError, match="запросов к человеку за запуск уже 1"):
+        await max_provider.search(_query(2), AREA)
+    await max_provider.close()
+
+
+async def test_socks5_robots_fallback_via_chrome_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def missing_socks(*_args: Any, **_kwargs: Any) -> RobotsRules:
+        raise RobotsUnavailableError("для SOCKS-прокси нужен пакет httpx[socks]")
+
+    monkeypatch.setattr(twogis_cdp, "fetch_robots", missing_socks)
+
+    class _RobotsSession:
+        def __init__(self, response: tuple[int | None, str]) -> None:
+            self.response = response
+            self.fetched_urls: list[str] = []
+
+        async def start(self) -> None:
+            return None
+
+        async def read_search(self, *_args: Any, **_kwargs: Any) -> ScrapedSearchResult:
+            raise AssertionError("not expected")
+
+        async def read_page(self) -> PageSnapshot | None:
+            return None
+
+        async def bring_to_front(self) -> None:
+            return None
+
+        async def fetch_text(self, url: str) -> tuple[int | None, str]:
+            self.fetched_urls.append(url)
+            return self.response
+
+        async def close(self) -> None:
+            return None
+
+    socks_opts = CdpOptions(proxy=SecretStr("socks5://127.0.0.1:1080"))
+
+    provider_200 = TwoGisCdpProvider(socks_opts)
+    session_200 = _RobotsSession((200, "User-agent: *\nDisallow: /private\n"))
+    provider_200._session = session_200
+    rules_200 = await provider_200._fetch_robots()
+    assert session_200.fetched_urls == ["https://2gis.ru/robots.txt"]
+    assert not rules_200.is_allowed("https://2gis.ru/private")
+    assert rules_200.is_allowed("https://2gis.ru/spb/search/x")
+
+    provider_404 = TwoGisCdpProvider(socks_opts)
+    provider_404._session = _RobotsSession((404, "Not Found"))
+    rules_404 = await provider_404._fetch_robots()
+    assert rules_404.is_allowed("https://2gis.ru/private")
+
+    provider_500 = TwoGisCdpProvider(socks_opts)
+    provider_500._session = _RobotsSession((500, "Server Error"))
+    with pytest.raises(RobotsUnavailableError, match="код 500"):
+        await provider_500._fetch_robots()
+
+    provider_net = TwoGisCdpProvider(socks_opts)
+    provider_net._session = _RobotsSession((-1, ""))
+    with pytest.raises(RobotsNoConnectionError):
+        await provider_net._fetch_robots()
+
+    # Non-SOCKS proxy does not use Chrome fallback.
+    http_provider = TwoGisCdpProvider(CdpOptions(proxy=SecretStr("http://127.0.0.1:8080")))
+    http_provider._session = _RobotsSession((200, ""))
+    with pytest.raises(RobotsUnavailableError, match="httpx"):
+        await http_provider._fetch_robots()
+
+
+# ---------- 9. nothing that hides automation ----------
 
 FORBIDDEN_WORDS = (
     "user_agent",
