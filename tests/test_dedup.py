@@ -6,6 +6,7 @@ from src.services.dedup import (
     DuplicateIndex,
     coords_from_map_url,
     distance_m,
+    mask_phone,
     merge_duplicate_places,
     normalize_name,
     normalize_phones,
@@ -151,3 +152,53 @@ def test_duplicate_index_matches_existing_leads() -> None:
     assert index.find("Зерно, кофейня", None, _map_url(59.9301, 30.3101)) == 1
     assert index.find("Зерно", None, None) is None
     assert index.find("Пекарня", "+7 999 000-00-00", _map_url(59.93, 30.31)) is None
+
+
+# ---------- which duplicate was merged, and by which rule ----------
+
+
+def _named(external_id: str, name: str, **fields: str) -> RawPlace:
+    return RawPlace(external_id=external_id, source="2gis", name=name, category="dentist_clinic", **fields)
+
+
+@pytest.mark.parametrize(
+    ("second", "rule"),
+    [
+        (_named("2gis_702", "Другое имя", phone="8 (812) 555-01-45"), "phone ********45"),
+        (_named("2gis_702", "Улыбка, стоматология", address="Невский, 22"), "name+address"),
+        (_named("2gis_702", "«Улыбка»", map_url=_map_url(59.9301, 30.31)), "name+coordinates"),
+    ],
+)
+def test_a_merge_is_logged_with_both_ids_and_the_rule(
+    second: RawPlace, rule: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    first = _named(
+        "2gis_701", "Улыбка", phone="+7 812 555-01-45", address="Невский, 22", map_url=_map_url(59.93, 30.31)
+    )
+    with caplog.at_level("INFO", logger="src.services.dedup"):
+        merged = merge_duplicate_places([first, second])
+    assert [place.external_id for place in merged] == ["2gis_701"]
+    lines = [record.getMessage() for record in caplog.records if record.name == "src.services.dedup"]
+    assert lines == [f"Merged duplicate: {second.name} (2gis_702) -> 2gis_701, by {rule}"]
+    assert "5550145" not in caplog.text and "555-01-45" not in caplog.text  # never the whole phone
+
+
+def test_nothing_is_logged_without_a_merge(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("INFO", logger="src.services.dedup"):
+        merged = merge_duplicate_places([_named("2gis_1", "Улыбка"), _named("2gis_2", "Кафе")])
+    assert len(merged) == 2
+    assert "Merged duplicate" not in caplog.text
+
+
+def test_a_phone_is_masked_but_its_last_two_digits() -> None:
+    assert mask_phone("8125550145") == "********45"
+    assert mask_phone("+7 (812) 555-01-45") == "*********45"
+    assert mask_phone("5") == "5"
+
+
+def test_find_and_find_with_rule_agree() -> None:
+    index = DuplicateIndex()
+    index.add(0, "Улыбка", "+7 812 555-01-01", _map_url(59.93, 30.31), "Невский, 22")
+    assert index.find_with_rule("X", "8 812 555 01 01", None) == (0, "phone ********01")
+    assert index.find("X", "8 812 555 01 01", None) == 0
+    assert index.find_with_rule("X", None, None) is None and index.find("X", None, None) is None

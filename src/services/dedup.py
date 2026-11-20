@@ -1,5 +1,6 @@
 """Cross-source duplicate detection for places (OSM / 2GIS / CSV have different external IDs)."""
 
+import logging
 import math
 import re
 from dataclasses import replace
@@ -7,6 +8,8 @@ from dataclasses import replace
 from src.services.checker import is_social_domain, url_host
 from src.services.providers.base import RawPlace
 from src.services.twogis_links import twogis_card_url
+
+logger = logging.getLogger(__name__)
 
 # Places with the same normalized name closer than this are treated as one business.
 SAME_PLACE_MAX_DISTANCE_M: float = 150.0
@@ -45,6 +48,12 @@ def normalize_phones(phone: str | None) -> set[str]:
         if len(digits) >= 7:
             numbers.add(digits)
     return numbers
+
+
+def mask_phone(number: str) -> str:
+    """A phone number for a log: every digit but the last two is hidden ('8125550145' -> '********45')."""
+    digits = _NON_DIGITS_RE.sub("", number)
+    return "*" * max(0, len(digits) - 2) + digits[-2:]
 
 
 def normalize_name(name: str | None) -> str:
@@ -105,18 +114,29 @@ class DuplicateIndex:
 
     def find(self, name: str | None, phone: str | None, map_url: str | None, address: str | None = None) -> int | None:
         """Return the key of a matching known business, or None."""
+        match = self.find_with_rule(name, phone, map_url, address)
+        return None if match is None else match[0]
+
+    def find_with_rule(
+        self, name: str | None, phone: str | None, map_url: str | None, address: str | None = None
+    ) -> tuple[int, str] | None:
+        """
+        The key of a matching known business and the rule that matched, or None.
+
+        The rule is 'phone <masked number>', 'name+address' or 'name+coordinates'; a phone is never shown in full.
+        """
         for number in normalize_phones(phone):
             if number in self._by_phone:
-                return self._by_phone[number]
+                return self._by_phone[number], f"phone {mask_phone(number)}"
         norm_name = normalize_name(name)
         norm_address = normalize_address_key(address)
         if norm_name and norm_address and (norm_name, norm_address) in self._by_name_address:
-            return self._by_name_address[(norm_name, norm_address)]
+            return self._by_name_address[(norm_name, norm_address)], "name+address"
         coords = coords_from_map_url(map_url)
         if norm_name and coords:
             for key, other in self._by_name.get(norm_name, []):
                 if distance_m(coords, other) <= SAME_PLACE_MAX_DISTANCE_M:
-                    return key
+                    return key, "name+coordinates"
         return None
 
 
@@ -157,11 +177,19 @@ def merge_duplicate_places(places: list[RawPlace]) -> list[RawPlace]:
     merged: list[RawPlace] = []
     index = DuplicateIndex()
     for place in places:
-        key = index.find(place.name, place.phone, place.map_url, place.address)
-        if key is None:
+        match = index.find_with_rule(place.name, place.phone, place.map_url, place.address)
+        if match is None:
             merged.append(replace(place))
             key = len(merged) - 1
         else:
+            key, rule = match
+            logger.info(
+                "Merged duplicate: %s (%s) -> %s, by %s",
+                place.name,
+                place.external_id,
+                merged[key].external_id,
+                rule,
+            )
             _fill_from_duplicate(merged[key], place)
         index.add(key, place.name, place.phone, place.map_url, place.address)
     return merged
