@@ -602,8 +602,8 @@ class TwoGisCdpProvider(BaseMapProvider):
             if status is not None and 400 <= status < 500:
                 return RobotsRules()
             if status is None or status < 0:
-                raise RobotsNoConnectionError("не удалось загрузить robots.txt через браузер")
-            raise RobotsUnavailableError(f"код {status}")
+                raise RobotsNoConnectionError("не удалось загрузить robots.txt через браузер") from None
+            raise RobotsUnavailableError(f"код {status}") from None
 
     async def _robots_rules(self) -> RobotsRules:
         if self._robots is None:
