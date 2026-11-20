@@ -367,6 +367,17 @@
 
 Провайдер Яндекса оставлен заглушкой (`src/services/providers/yandex.py`), запросы к Яндексу бот не отправляет. [Условия API](https://yandex.ru/dev/tariffs/doc/ru/geosearch/terms/) разрешают кэшировать ответы не дольше 30 дней и показывать данные только на фоне Яндекс Карт, а бот хранит лиды бессрочно и отправляет их в Telegram.
 
+### Автообновление и сбор
+
+Сервер обновляется сам: таймер `spb-lead-bot-update.timer` раз в 5 минут запускает скрипт `/opt/spb-lead-bot-update.sh` (он лежит вне репозитория, работает от `leadbot`). Эталонная копия скрипта: `deploy/spb-lead-bot-update.sh`. Если в базе идёт сбор (`collector_state`: `last_status = 'running'`, запуск начался меньше 3 часов назад), скрипт пишет «collection in progress, update postponed» и выходит без изменений, следующая попытка через 5 минут. Если проверить базу не удалось (нет `sqlite3`, файл не читается), обновление идёт как обычно.
+
+Установка после merge (на сервере, сначала копия старого скрипта):
+
+    sudo cp -p /opt/spb-lead-bot-update.sh /opt/spb-lead-bot-update.sh.bak
+    sudo install -o leadbot -g leadbot -m 750 /opt/spb-lead-bot/deploy/spb-lead-bot-update.sh /opt/spb-lead-bot-update.sh
+
+Проверка: `journalctl -u spb-lead-bot-update -n 30` (во время сбора там строка «collection in progress»). Откат: `sudo cp -p /opt/spb-lead-bot-update.sh.bak /opt/spb-lead-bot-update.sh`.
+
 ### Обновление схемы базы и откат
 
 Новые колонки `leads.email`, `leads.source_url`, `leads.issued_at`, `leads.contact_status`, `leads.contact_status_by_id`, `leads.contact_status_by`, `leads.contact_status_at`, `leads.exported_at`, `leads.imported_at`, `leads.rubric`, `leads.site_url`, `leads.site_confidence`, `leads.site_source`, `leads.site_checked_at`, `leads.is_chain`, `leads.contact_links`, `leads.remind_at`, `leads.issued_to_user_id`, `leads.owner_user_id`, `leads.owner_name`, `leads.owned_until`, `leads.reserved_by`, `leads.reserved_until`, `collector_state.key_warning_mark`, `collector_state.scraper_check_runs`, `collector_state.digest_sent_on`, `provider_state.requests_total`, `provider_state.key_fingerprint`, `provider_state.cursor`, индекс и таблицы `collector_state`, `provider_state`, `import_log`, `search_progress` появляются сами при запуске бота, существующие лиды не меняются и попадают в очередь выдачи. Перед обновлением сделайте копию файла базы.
