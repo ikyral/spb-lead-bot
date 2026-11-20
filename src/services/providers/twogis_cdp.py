@@ -8,10 +8,16 @@ the country of the exit IP: from the wrong one, or with a dead proxy, nothing is
 That is a problem of the network of this side, not a refusal of the site, and it is reported as such.
 The browser keeps its own defaults: nothing changes how it presents itself or hides that it is driven.
 
-Every action that reaches the site goes through one gate, in this order: the limit of pages per
-run (each opened page, pagination click and card counts), robots.txt for the exact URL (a card by
-its canonical link, without stat=), a random pause of at least MIN_PAUSE_SECONDS before every
-action but the first of a run. Only then the action.
+Every action that reaches the site goes through one gate, in this order: the limits per run (loads
+of search pages, i.e. the first page of a target and every pagination click, count against the
+page limit; every card click, retries included, against the separate click limit, which is never
+above the limit of results), robots.txt for the exact URL (a card by its canonical link, without
+stat=), a random pause of at least MIN_PAUSE_SECONDS before every action but the first of a run.
+Only then the action.
+
+A search that 2GIS sends to another city (2gis.ru/<other city>/search/..., no captcha, no refusing
+status) is not a refusal: the search page of the city is opened once more, and if 2GIS sends it away
+again the target is skipped as a format error. A captcha, 401/403/429 and a page not of 2GIS stay refusals.
 
 At the first sign of a refusal (captcha, 401/403/429, an empty page, a page not of 2GIS, a search
 page that is not understood) it stops and never tries to pass the check itself. Only the owner's --assisted run on their
@@ -27,6 +33,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import unquote
 
 from pydantic import SecretStr
 
@@ -52,6 +59,7 @@ from src.services.scraper.chrome.parsers import (
     GateAction,
     GateDecision,
     ScrapedSearchResult,
+    foreign_search_city,
 )
 from src.services.scraper.chrome.proxy import parse_proxy
 from src.services.scraper.robots import (
@@ -88,6 +96,8 @@ class CdpOptions:
     max_delay_seconds: float = 8.0
     max_pages_per_run: int = 60
     max_results_per_run: int = 30
+    # Card clicks per run, retries included; 0 = as many as max_results_per_run, never more than that.
+    max_card_clicks_per_run: int = 0
     min_hours_between_runs: float = 20.0
     page_timeout_seconds: float = 45.0
     profile_dir: Path | None = None
@@ -118,6 +128,18 @@ class CdpOptions:
             raise ValueError("минимальная пауза не может быть больше максимальной")
         if self.max_pages_per_run < 1 or self.max_results_per_run < 1:
             raise ValueError("лимиты страниц и результатов за запуск должны быть не меньше 1")
+        if self.max_card_clicks_per_run < 0:
+            raise ValueError("лимит кликов по карточкам за запуск не может быть меньше 0")
+
+    @property
+    def card_click_limit(self) -> int:
+        """
+        Card clicks allowed per run, retries included: the setting, but never above the limit of results.
+
+        So a run asks 2GIS for no more than max_results_per_run cards plus the loads of its search pages.
+        """
+        limit = self.max_card_clicks_per_run or self.max_results_per_run
+        return min(limit, self.max_results_per_run)
 
     @classmethod
     def from_settings(
@@ -134,6 +156,7 @@ class CdpOptions:
             max_delay_seconds=settings.SCRAPER_CDP_MAX_DELAY_SECONDS,
             max_pages_per_run=settings.SCRAPER_CDP_MAX_PAGES_PER_RUN,
             max_results_per_run=settings.SCRAPER_CDP_MAX_RESULTS_PER_RUN,
+            max_card_clicks_per_run=settings.SCRAPER_CDP_MAX_CARD_CLICKS_PER_RUN,
             min_hours_between_runs=settings.SCRAPER_CDP_MIN_HOURS_BETWEEN_RUNS,
             page_timeout_seconds=settings.SCRAPER_CDP_PAGE_TIMEOUT_SECONDS,
             profile_dir=resolve_path(settings.TWOGIS_PROFILE_DIR),
@@ -215,13 +238,17 @@ class TwoGisCdpProvider(BaseMapProvider):
         self._async_sleep = async_sleep
         self._session: CdpSession | None = None
         self._robots: RobotsRules | None = None
+        # Every action that went through the gate (for the pause before the next one), then by kind for the limits.
         self._pages = 0
+        self._page_loads = 0
+        self._card_clicks = 0
         self._results = 0
         self._captchas = 0
         self._search_text = ""
         self._stop_error: ProviderError | None = None
         self._blocked: str | None = None
-        self._budget_ended = False
+        # Why the budget of the run has ended: the next searches stop with the same reason.
+        self._budget_ended: str | None = None
         self._proxy_failure: ProviderProxyError | None = None
         self._empty_in_a_row = 0
         self._left_search_pages = 0
@@ -253,8 +280,8 @@ class TwoGisCdpProvider(BaseMapProvider):
             raise self._proxy_failure  # the proxy does not work: nothing more is tried in this run
         if self._blocked is not None:
             raise ProviderBlockedError(self._blocked)
-        if self._budget_ended:
-            raise ProviderBudgetExhausted("лимит страниц за запуск")
+        if self._budget_ended is not None:
+            raise ProviderBudgetExhausted(self._budget_ended)
         if self._results >= self._options.max_results_per_run:
             raise ProviderBudgetExhausted("лимит результатов за запуск")
 
@@ -270,14 +297,7 @@ class TwoGisCdpProvider(BaseMapProvider):
         self._stop_error = None
         url = twogis_site.build_search_url(self._options.city_slug, self._search_text)
         try:
-            result = await session.read_search(
-                url,
-                page,
-                max_items=self._options.max_results_per_run - self._results,
-                block_checker=self._block_reason,
-                continue_current=True,
-                skip_firm_ids=self._known_firm_ids,
-            )
+            result = await self._read_search_in_city(session, url, page, query, area)
         except ProviderNoConnectionError:
             raise
         except ProviderError:
@@ -342,7 +362,7 @@ class TwoGisCdpProvider(BaseMapProvider):
         stop = self._stop_error
         if stop is not None:
             if isinstance(stop, ProviderBudgetExhausted):
-                self._budget_ended = True
+                self._budget_ended = str(stop)
                 if places:
                     return SearchPage(places=places, has_more=False)
             raise stop
@@ -353,10 +373,10 @@ class TwoGisCdpProvider(BaseMapProvider):
         """End the run: the browser is closed and the limits start over next time."""
         session, self._session = self._session, None
         self._robots = None
-        self._pages = self._results = self._captchas = 0
+        self._pages = self._page_loads = self._card_clicks = self._results = self._captchas = 0
         self._stop_error = None
         self._blocked = None
-        self._budget_ended = False
+        self._budget_ended = None
         self._proxy_failure = None
         self._empty_in_a_row = 0
         self._left_search_pages = 0
@@ -370,7 +390,12 @@ class TwoGisCdpProvider(BaseMapProvider):
     # ---------- the gate: called in the worker thread before every navigation and click ----------
 
     def _gate(self, action: GateAction) -> GateDecision:
-        if self._pages >= self._options.max_pages_per_run:
+        # Only loads of search pages count against the page limit; card clicks (retries too) have their own limit.
+        if action.kind == "card":
+            if self._card_clicks >= self._options.card_click_limit:
+                self._stop_error = ProviderBudgetExhausted("лимит кликов по карточкам за запуск")
+                return GateDecision.STOP
+        elif self._page_loads >= self._options.max_pages_per_run:
             self._stop_error = ProviderBudgetExhausted("лимит страниц за запуск")
             return GateDecision.STOP
 
@@ -389,6 +414,10 @@ class TwoGisCdpProvider(BaseMapProvider):
         if self._pages:
             self._sleep(self._pause_seconds())
         self._pages += 1
+        if action.kind == "card":
+            self._card_clicks += 1
+        else:
+            self._page_loads += 1
         return GateDecision.GO
 
     def _action_url(self, action: GateAction) -> str | None:
@@ -459,6 +488,88 @@ class TwoGisCdpProvider(BaseMapProvider):
         if reason is None:
             reason = self._count_empty_searches(result)
         return reason
+
+    def _foreign_city_url(self, result: ScrapedSearchResult) -> str | None:
+        """
+        The address of another city the search ended on, if that is all that is wrong with the page.
+
+        A captcha, a refusing status or a page not of 2GIS on the way stay refusals: then None.
+        """
+        address = result.foreign_city_url
+        if address is None or result.blocked_reason is not None or self._block_reason(result.snapshot) is not None:
+            return None
+        if foreign_search_city(address, self._options.city_slug) is None:
+            return None
+        return address
+
+    async def _read_search_in_city(
+        self,
+        session: CdpSession,
+        url: str,
+        page: int,
+        query: SearchQuery,
+        area: SearchArea,
+    ) -> ScrapedSearchResult:
+        """
+        Read the page of the target; if 2GIS sent the search to another city, open the city's search page once more.
+
+        Sent away again: the target is skipped as a format error (the collector moves its cursor on, no block).
+        """
+        result = await session.read_search(
+            url,
+            page,
+            max_items=self._options.max_results_per_run - self._results,
+            block_checker=self._block_reason,
+            continue_current=True,
+            skip_firm_ids=self._known_firm_ids,
+        )
+        foreign = self._foreign_city_url(result)
+        if foreign is None:
+            return result
+        logger.warning(
+            "2gis_cdp: the search went to another city, not a block: opened %s, ended on %s; "
+            "the search page of the city is opened once more",
+            unquote(url),
+            unquote(foreign),
+        )
+        retry = await session.read_search(
+            url,
+            page,
+            max_items=max(0, self._options.max_results_per_run - self._results - len(result.items)),
+            block_checker=self._block_reason,
+            reset=True,
+            continue_current=True,
+            skip_firm_ids=self._known_firm_ids | self._payload_firm_ids(result.items),
+        )
+        combined = replace(retry, items=[*result.items, *retry.items])
+        again = self._foreign_city_url(retry)
+        if again is None:
+            return combined
+        logger.warning(
+            "2gis_cdp: the search went to another city again: opened %s, ended on %s; the target is skipped",
+            unquote(url),
+            unquote(again),
+        )
+        places = self._places(combined.items, query, area)
+        self._remember_places(places)
+        self._results += len(places)
+        city = foreign_search_city(again, self._options.city_slug)
+        raise ProviderFormatError(
+            f"2ГИС дважды увёл поиск в другой город ({city}): цель пропущена, это не блокировка",
+            partial=places,
+        )
+
+    @staticmethod
+    def _payload_firm_ids(payloads: list[dict[str, Any]]) -> set[str]:
+        """Numbers of the organizations in card payloads (`/items/byid`), without the branch suffix."""
+        ids: set[str] = set()
+        for payload in payloads:
+            result = payload.get("result")
+            items = result.get("items") if isinstance(result, dict) else None
+            for item in items if isinstance(items, list) else []:
+                if isinstance(item, dict) and (firm_id := str(item.get("id") or "").split("_", 1)[0]):
+                    ids.add(firm_id)
+        return ids
 
     @staticmethod
     def _dedupe_places(first: list[RawPlace], second: list[RawPlace]) -> list[RawPlace]:

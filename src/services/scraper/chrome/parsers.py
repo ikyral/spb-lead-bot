@@ -34,6 +34,7 @@ from src.services.api_client import (
     ProviderUnavailableError,
 )
 from src.services.scraper.snapshot import PageSnapshot
+from src.services.scraper.twogis_site import is_site_response
 
 from .exceptions import ChromeException, ChromePathNotFound, ChromeRuntimeException, ProxyError
 from .filters import IN_BUILDING_URL_PATTERN, ITEM_RESPONSE_PATTERN
@@ -58,6 +59,7 @@ _SEARCH_LINK_RE = re.compile(r"/(firm|station)/[^/?#]+.*[?&]stat=([^&#]+)")
 _FIRM_PATH_RE = re.compile(r"/firm/[^/?#]+")
 _FIRM_ID_RE = re.compile(r"/firm/([0-9]+)")
 _FIRM_CITY_RE = re.compile(r"^/([^/?#]+)/firm/")
+_SEARCH_CITY_RE = re.compile(r"^/([^/?#]+)/search(?:/|$)")
 _IN_BUILDING_FIRM_RE = re.compile(r"/firm/[^/?#]+/?$")
 _NO_RESULTS_TITLE_RE = re.compile(r"Ничего не найдено|Не найдено", re.IGNORECASE)
 _IN_BUILDING_PATTERN = re.compile(IN_BUILDING_URL_PATTERN)
@@ -74,6 +76,9 @@ _STALE_DOM_TIMEOUT_SECONDS = 15.0
 _MAX_BACK_STEPS = 2
 _LINK_GONE = "the link is no longer on the page"
 _BACK_WAIT_SECONDS = 8.0
+# The list may be drawn anew after some clicks (2GIS sorts it again for its map): it is read again this many times
+# per page, once it has settled, and only organizations not yet clicked are clicked. After that the page is left.
+_MAX_LIST_REREADS = 2
 # The list of results is redrawn for a while after the page is loaded (2GIS sorts it again for the area of its map):
 # the clicks wait until it has not changed this many reads in a row, but not longer than the limit.
 _LINKS_STABLE_READS = 2
@@ -154,6 +159,8 @@ class ScrapedSearchResult:
     unreadable: str | None = None
     # A click led away from the search page (to a page of another kind or another city): where to, without the number.
     left_search: str | None = None
+    # The search ended on a search page of another city (opened or after a click): its address. Not a block by itself.
+    foreign_city_url: str | None = None
 
 
 class _LeftSearchPage(Exception):
@@ -179,6 +186,8 @@ class CollectedCards(NamedTuple):
     # The list was drawn anew after some clicks and the rest of its links are gone: the page ends here, not an error.
     list_changed: bool = False
     skipped_known: int = 0
+    # When the list changed: how many of its links were not reached.
+    left_on_page: int = 0
 
 
 def describe_link(href: str) -> str:
@@ -211,6 +220,23 @@ def link_city(href: str) -> str | None:
     """The city of a link to an organization (`/<city>/firm/<id>`): the whole first segment of the path, or None."""
     match = _FIRM_CITY_RE.match(urlsplit(href).path)
     return match.group(1) if match else None
+
+
+def foreign_search_city(url: str, city_slug: str | None) -> str | None:
+    """
+    The city of a search address of 2GIS when it is not `city_slug`: `https://2gis.ru/pikalevo/search/x` -> 'pikalevo'.
+
+    None for the city itself, for any other kind of page and for an address that is not of 2GIS. A bare path counts.
+    """
+    if not city_slug:
+        return None
+    parts = urlsplit(url)
+    if parts.netloc and not is_site_response(url):
+        return None
+    match = _SEARCH_CITY_RE.match(parts.path)
+    if match is None or match.group(1) == city_slug:
+        return None
+    return match.group(1)
 
 
 def is_link_of_firm(href: str, firm_id: str) -> bool:
@@ -448,6 +474,21 @@ class _BaseChromePageReader:
                 sum(self._lookup_seconds),
             )
 
+    def _current_address(self) -> str | None:
+        """The address the tab shows now, or None if it is not known."""
+        try:
+            raw = self._remote.execute_script("String(location.href)")
+        except ChromeException:
+            return None
+        return raw if isinstance(raw, str) and raw else None
+
+    def _foreign_city_address(self) -> str | None:
+        """The address of the tab if it is a search page of another city than the one searched, else None."""
+        address = self._current_address()
+        if address is None or foreign_search_city(address, self._city_slug) is None:
+            return None
+        return address
+
     def _search_page_left(self) -> str | None:
         """Where the browser is if it is no longer on a search page of the city (kind of page only), else None."""
         if self._city_slug is None:
@@ -575,12 +616,16 @@ class _BaseChromePageReader:
         max_items: int | None = None,
         refetch_on_stale: bool = True,
         document: DOMNode | None = None,
+        already_read: int = 0,
+        announce_list_changed: bool = True,
     ) -> CollectedCards:
         """
         Click each matching link in DOM and collect `/items/byid` payloads.
 
         A card that could not be read after its attempts is left and the next one is tried; after
         `_MAX_UNREAD_IN_A_ROW` such cards in a row the page is left (`unreadable`), so the rest of the budget is kept.
+        `already_read`: cards of this page read by earlier passes, so a link gone at once still means a changed list.
+        `announce_list_changed`: write the line about a changed list here; off when the caller reads the list again.
         """
         resolved_doc = document if document is not None else self._read_document()
         nodes = find_links(resolved_doc)
@@ -655,14 +700,15 @@ class _BaseChromePageReader:
                 unread_in_a_row = 0
                 if response_url:
                     collected_urls.append(response_url)
-            elif unread == _LINK_GONE and collected:
+            elif unread == _LINK_GONE and (collected or already_read):
                 # 2GIS draws the list anew for the map after some clicks ("Back" leads only to cards read before):
-                # what was read is kept, the rest of the page is left for a later run.
-                logger.info(
-                    "The list changed after %d cards: the other %d of the page are left for a later run",
-                    len(collected),
-                    total - position + 1,
-                )
+                # what was read is kept, the rest of the page is left for a later run (or for a new read of the list).
+                if announce_list_changed:
+                    logger.info(
+                        "The list changed after %d cards: the other %d of the page are left for a later run",
+                        already_read + len(collected),
+                        total - position + 1,
+                    )
                 return CollectedCards(
                     collected,
                     collected_urls,
@@ -673,6 +719,7 @@ class _BaseChromePageReader:
                     None,
                     True,
                     skipped_known=skipped_known,
+                    left_on_page=total - position + 1,
                 )
             elif unread is not None:
                 unread_in_a_row += 1
@@ -968,6 +1015,13 @@ class SearchPageReader(_BaseChromePageReader):
                 blocked_reason=blocked_reason,
             )
 
+        foreign_url = self._foreign_city_address()
+        if foreign_url is not None:
+            # 2GIS sent the search to another city: nothing of that page is clicked, the provider decides what next.
+            logger.info("The search page went to another city: %s", unquote(foreign_url))
+            snapshot = _snapshot_from_remote(self._remote, status=status, include_state=False)
+            return ScrapedSearchResult(snapshot=snapshot, items=[], has_more=False, foreign_city_url=foreign_url)
+
         self._active_base_url = base_url
         self._current_page = 1
         return None
@@ -1170,32 +1224,37 @@ class SearchPageReader(_BaseChromePageReader):
             max_items=max_items,
             refetch_on_stale=True,
             document=document,
+            announce_list_changed=False,
         )
-        if collected.skipped_known > 0:
+        skipped_known = collected.skipped_known
+        if skipped_known > 0:
             logger.info(
                 "Search page %d: skipped %d already-known organizations",
                 self._current_page,
-                collected.skipped_known,
+                skipped_known,
             )
-        items, item_urls, blocked_reason, stopped = (
-            collected.items,
-            collected.urls,
-            collected.blocked_reason,
-            collected.stopped,
+        items, item_urls = list(collected.items), list(collected.urls)
+        collected = self._read_changed_list_again(
+            collected,
+            _firm_links_only,
+            items,
+            item_urls,
+            all_hrefs,
+            block_checker=block_checker,
+            skip_firm_ids=skip_firm_ids,
+            max_items=max_items,
         )
+        blocked_reason, stopped = collected.blocked_reason, collected.stopped
         left_search = collected.left_search
+        foreign_url = None
+        if left_search is not None and foreign_search_city(left_search, self._city_slug) is not None:
+            foreign_url = self._current_address() or left_search
         self._visited_links.update(all_hrefs)
 
         if self._options.use_gc and self._current_page % self._options.gc_pages_interval == 0:
             self._remote.execute_script("window.gc && window.gc()")
 
-        if (
-            not items
-            and collected.skipped_known == 0
-            and blocked_reason is None
-            and not stopped
-            and left_search is None
-        ):
+        if not items and skipped_known == 0 and blocked_reason is None and not stopped and left_search is None:
             items, item_urls = _collect_json_responses(
                 self._remote,
                 lambda resp_url: "api.2gis." in resp_url,
@@ -1222,7 +1281,64 @@ class SearchPageReader(_BaseChromePageReader):
             nothing_found=not all_hrefs and bool(_NO_RESULTS_TITLE_RE.search(snapshot.title)),
             unreadable=collected.unreadable,
             left_search=left_search,
+            foreign_city_url=foreign_url,
         )
+
+    def _read_changed_list_again(
+        self,
+        collected: CollectedCards,
+        find_links: Callable[[DOMNode], list[DOMNode]],
+        items: list[dict[str, Any]],
+        item_urls: list[str],
+        all_hrefs: set[str],
+        *,
+        block_checker: BlockChecker | None,
+        skip_firm_ids: set[str] | frozenset[str] | None,
+        max_items: int | None,
+    ) -> CollectedCards:
+        """
+        The list was drawn anew after some clicks: wait until it settles, read it again, click what was not clicked.
+
+        Organizations clicked on this page and those already known (`skip_firm_ids`) are not clicked again. At most
+        `_MAX_LIST_REREADS` new reads per page, then the rest of the page is left for a later run as before.
+        `items`, `item_urls` and `all_hrefs` get what the new reads give; the last pass is returned.
+        """
+        processed = {firm_id for href in collected.attempted if (firm_id := firm_id_from_href(href))}
+        rereads = 0
+        while collected.list_changed and rereads < _MAX_LIST_REREADS and (max_items is None or len(items) < max_items):
+            rereads += 1
+            logger.info(
+                "The list changed after %d cards: it is read again once it has settled (%d of %d)",
+                len(items),
+                rereads,
+                _MAX_LIST_REREADS,
+            )
+            self._wait_for_stable_links()
+            document = self._read_document()
+            all_hrefs.update(
+                node.attributes["href"] for node in self._find_search_links(document) if "href" in node.attributes
+            )
+            collected = self._collect_items_from_links(
+                find_links,
+                status=200,
+                block_checker=block_checker,
+                skip_firm_ids={*(skip_firm_ids or ()), *processed},
+                max_items=None if max_items is None else max_items - len(items),
+                refetch_on_stale=True,
+                document=document,
+                already_read=len(items),
+                announce_list_changed=False,
+            )
+            items.extend(collected.items)
+            item_urls.extend(collected.urls)
+            processed.update(firm_id for href in collected.attempted if (firm_id := firm_id_from_href(href)))
+        if collected.list_changed:
+            logger.info(
+                "The list changed after %d cards: the other %d of the page are left for a later run",
+                len(items),
+                collected.left_on_page,
+            )
+        return collected
 
 
 class InBuildingPageReader(_BaseChromePageReader):

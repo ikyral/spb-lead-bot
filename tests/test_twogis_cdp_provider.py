@@ -361,32 +361,94 @@ async def test_search_page_forbidden_by_robots_is_not_opened() -> None:
 # ---------- 3. the limit of pages per run ----------
 
 
-@pytest.mark.parametrize("limit", [2, 3, 4])
-async def test_page_limit_counts_navigations_and_every_card(limit: int) -> None:
+async def test_page_limit_counts_only_loads_of_search_pages_not_card_clicks() -> None:
     firm_ids = ["101", "102", "103", "104", "105"]
-    fake = FakeRemote(pages={1: _doc(firm_ids, next_page=2)}, cards={fid: _card(fid) for fid in firm_ids})
-    harness = Harness(fake, max_pages_per_run=limit)
-    try:
-        page = await harness.provider.search(QUERY, AREA)
-        # Partial: what was read before the limit, and no more pages.
-        assert len(page.places) == limit - 1
-        assert page.has_more is False
-        with pytest.raises(ProviderBudgetExhausted):
-            await harness.provider.search(QUERY, AREA, page=2)
-    finally:
-        await harness.provider.close()
-    assert fake.actions() <= limit
-
-
-async def test_limit_reached_before_anything_is_read_ends_the_provider() -> None:
-    fake = FakeRemote(pages={1: _doc(["101"])}, cards={"101": _card("101")})
+    fake = FakeRemote(
+        pages={1: _doc(firm_ids, next_page=2), 2: _doc(["201"])},
+        cards={fid: _card(fid) for fid in [*firm_ids, "201"]},
+    )
     harness = Harness(fake, max_pages_per_run=1)
     try:
-        with pytest.raises(ProviderBudgetExhausted):
+        page = await harness.provider.search(QUERY, AREA)
+        # One load of a search page, five card clicks: the clicks do not spend the page limit.
+        assert len(page.places) == 5
+        assert len(fake.navigations) == 1 and len(fake.clicks) == 5
+        with pytest.raises(ProviderBudgetExhausted, match="лимит страниц"):
+            await harness.provider.search(QUERY, AREA, page=2)  # the pagination click would be the second load
+        with pytest.raises(ProviderBudgetExhausted, match="лимит страниц"):
+            await harness.provider.search(_query(2), AREA)  # nor is another target opened
+    finally:
+        await harness.provider.close()
+    assert len(fake.navigations) == 1 and len(fake.clicks) == 5
+    assert not any("/page/" in href for href in fake.clicks)
+
+
+async def test_page_limit_counts_the_first_page_and_every_pagination_click() -> None:
+    fake = FakeRemote(
+        pages={1: _doc(["101"], next_page=2), 2: _doc(["201"], next_page=3), 3: _doc(["301"])},
+        cards=_cards("101", "201", "301"),
+    )
+    harness = Harness(fake, max_pages_per_run=2)
+    try:
+        assert len((await harness.provider.search(QUERY, AREA, page=1)).places) == 1
+        assert len((await harness.provider.search(QUERY, AREA, page=2)).places) == 1
+        with pytest.raises(ProviderBudgetExhausted, match="лимит страниц"):
+            await harness.provider.search(QUERY, AREA, page=3)
+    finally:
+        await harness.provider.close()
+    assert len(fake.navigations) == 1
+    assert [href for href in fake.clicks if "/page/" in href] == ["/spb/search/x/page/2"]
+
+
+async def test_card_clicks_have_their_own_limit_with_every_retry_counted() -> None:
+    # No card answers: every card is tried three times, and every attempt is a click of the limit.
+    fake = FakeRemote(pages={1: _doc(["101", "102", "103"])}, cards={})
+    harness = Harness(fake, max_results_per_run=4, max_card_clicks_per_run=4)
+    try:
+        with pytest.raises(ProviderBudgetExhausted, match="лимит кликов по карточкам"):
+            await harness.provider.search(QUERY, AREA)
+        with pytest.raises(ProviderBudgetExhausted, match="лимит кликов по карточкам"):
+            await harness.provider.search(_query(2), AREA)  # the run is over for this source
+    finally:
+        await harness.provider.close()
+    assert len(fake.clicks) == 4 and len(fake.navigations) == 1
+    assert fake.clicks[:3] == ["/spb/firm/101?stat=c3RhdA%3D%3D"] * 3  # the retries of the first card
+    assert harness.notes == []  # a limit of this side, not a refusal
+
+
+async def test_cards_that_give_nothing_still_spend_clicks_so_a_run_asks_for_no_more_cards_than_results() -> None:
+    firm_ids = ["101", "102", "103", "104", "105"]
+    fake = FakeRemote(pages={1: _doc(firm_ids)}, cards={fid: _card(fid, status=404) for fid in firm_ids})
+    harness = Harness(fake, max_results_per_run=3, max_card_clicks_per_run=50)  # above results: taken down to 3
+    try:
+        with pytest.raises(ProviderBudgetExhausted, match="лимит кликов"):
             await harness.provider.search(QUERY, AREA)
     finally:
         await harness.provider.close()
-    assert fake.actions() == 1
+    assert len(fake.clicks) == 3
+
+
+@pytest.mark.parametrize(
+    ("clicks", "results", "expected"),
+    [(0, 30, 30), (10, 30, 10), (30, 30, 30), (100, 30, 30), (0, 50, 50), (300, 50, 50)],
+)
+def test_the_click_limit_defaults_to_the_results_and_is_never_above_them(
+    clicks: int, results: int, expected: int
+) -> None:
+    settings = _settings(SCRAPER_CDP_MAX_CARD_CLICKS_PER_RUN=clicks, SCRAPER_CDP_MAX_RESULTS_PER_RUN=results)
+    assert CdpOptions.from_settings(settings).card_click_limit == expected
+
+
+def test_the_click_limit_setting_is_validated() -> None:
+    assert _settings().SCRAPER_CDP_MAX_CARD_CLICKS_PER_RUN == 0
+    with pytest.raises(ValidationError):
+        _settings(SCRAPER_CDP_MAX_CARD_CLICKS_PER_RUN=-1)
+    with pytest.raises(ValidationError):
+        _settings(SCRAPER_CDP_MAX_CARD_CLICKS_PER_RUN=301)
+    with pytest.raises(ValueError):
+        CdpOptions(max_card_clicks_per_run=-1)
+    env_lines = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+    assert "SCRAPER_CDP_MAX_CARD_CLICKS_PER_RUN=0" in env_lines
 
 
 # ---------- 4. on the schedule ----------
@@ -835,9 +897,55 @@ async def test_links_that_are_gone_after_some_cards_were_read_end_the_page_quiet
     finally:
         await harness.provider.close()
     assert [place.external_id for place in page.places] == ["2gis_101"]  # what was read is kept
-    assert page.has_more is False and harness.notes == []  # the page ends, the run goes on, no refusal
-    assert "The list changed after 1 cards: the other 2 of the page are left for a later run" in caplog.text
+    assert harness.notes == []  # the page ends, the run goes on, no refusal
+    # The list is read again: it has nothing new, so nothing more is clicked.
+    assert "The list changed after 1 cards: it is read again once it has settled (1 of 2)" in caplog.text
+    assert len(remote_.clicks) == 1
     assert "Search page left" not in caplog.text
+
+
+async def test_a_changed_list_is_read_again_and_only_new_organizations_are_clicked(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # After the first click the list is drawn anew: 102 is gone, 104 and 105 came, 103 stays. 105 is in the DB already.
+    remote_ = ScriptedRemote(
+        lambda n: ["101", "104", "105", "103"] if remote_.clicks else ["101", "102", "103"],
+        _cards("101", "102", "103", "104", "105"),
+    )
+    harness = Harness(remote_)
+    harness.provider.set_known_external_ids({"2gis_105"})
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101", "2gis_104", "2gis_103"]
+    clicked = [_FIRM_RE.search(href).group(1) for href in remote_.clicks]  # type: ignore[union-attr]
+    assert clicked == ["101", "104", "103"]  # 101 not again, 105 (known) never
+    assert "it is read again once it has settled (1 of 2)" in caplog.text
+    assert "left for a later run" not in caplog.text
+    assert harness.notes == []
+
+
+async def test_a_list_that_keeps_changing_is_read_again_at_most_twice_then_left(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Every click draws the list anew: the next link is always gone by its turn.
+    remote_ = ScriptedRemote(
+        lambda n: [str(200 + len(remote_.clicks)), str(300 + len(remote_.clicks))],
+        _cards("200", "201", "202", "203", "300", "301", "302", "303"),
+    )
+    harness = Harness(remote_)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_200", "2gis_201", "2gis_202"]
+    assert len(remote_.clicks) == 3  # one click per pass: the first read and two new reads
+    assert "(2 of 2)" in caplog.text and "(3 of 2)" not in caplog.text
+    assert "The list changed after 3 cards: the other 1 of the page are left for a later run" in caplog.text
+    assert page.has_more is False and harness.notes == []
 
 
 # ---------- a link is found by the browser itself, not by reading the whole page; what a failure looks like ----------
@@ -1872,3 +1980,132 @@ def test_sources_contain_nothing_that_hides_automation() -> None:
         text = Path(path).read_text(encoding="utf-8").lower()
         found = [word for word in FORBIDDEN_WORDS if word in text]
         assert found == [], f"{path.name}: {found}"
+
+
+# ---------- a search sent to another city is not a block ----------
+
+PIKALEVO_SEARCH = "https://2gis.ru/pikalevo/search/шаурма Выборгский район?m=34.1,59.5/11"
+
+
+class CityRedirectRemote(UrlRemote):
+    """A tab that 2GIS sends to another city the first `redirects` times a page is opened, or after a click."""
+
+    def __init__(self, *args: Any, redirects: int = 0, html: str = "<html></html>", **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.redirects = redirects
+        self.html = html
+
+    def navigate(self, url: str, timeout: int = 60) -> None:
+        super().navigate(url, timeout)
+        if self.redirects > 0:
+            self.redirects -= 1
+            self.url = PIKALEVO_SEARCH
+
+    def perform_click(self, node: DOMNode) -> None:
+        FakeRemote.perform_click(self, node)
+        if any(marker in node.attributes["href"] for marker in self.leave_on):
+            self.url = PIKALEVO_SEARCH
+
+    def read_current_page(self) -> tuple[str, str, str]:
+        return self.url or SPB_SEARCH, "Поиск — 2ГИС", self.html
+
+
+@pytest.mark.parametrize(
+    ("url", "city"),
+    [
+        (PIKALEVO_SEARCH, "pikalevo"),
+        ("/pikalevo/search", "pikalevo"),
+        ("https://2gis.ru/spb/search/x", None),
+        ("https://2gis.ru/pikalevo/firm/1", None),
+        ("https://example.com/pikalevo/search/x", None),
+        ("https://captcha.2gis.ru/pikalevo/search/x", "pikalevo"),  # the captcha itself is caught before this
+    ],
+)
+def test_a_search_of_another_city_is_told_by_the_first_segment(url: str, city: str | None) -> None:
+    assert parsers.foreign_search_city(url, "spb") == city
+    assert parsers.foreign_search_city(url, None) is None
+
+
+async def test_a_search_sent_to_another_city_once_is_opened_again_and_read(caplog: pytest.LogCaptureFixture) -> None:
+    fake = CityRedirectRemote(pages={1: _doc(["101", "102"])}, cards=_cards("101", "102"), redirects=1)
+    harness = Harness(fake)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101", "2gis_102"]
+    assert len(fake.navigations) == 2 and all("/spb/search/" in url for url in fake.navigations)
+    assert harness.notes == []  # not a refusal: nobody is told about a block
+    warning = next(
+        record
+        for record in caplog.records
+        if record.name == twogis_cdp.__name__ and "went to another city" in record.getMessage()
+    )
+    assert warning.levelname == "WARNING"
+    assert "https://2gis.ru/spb/search/автосервис Калининский район" in warning.getMessage()
+    assert "https://2gis.ru/pikalevo/search/" in warning.getMessage()
+
+
+async def test_a_search_sent_to_another_city_twice_skips_the_target_without_a_block(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = CityRedirectRemote(pages={1: _doc(["101"])}, cards=_cards("101"), redirects=2)
+    harness = Harness(fake)
+    try:
+        with caplog.at_level("WARNING"), pytest.raises(ProviderFormatError, match="pikalevo"):
+            await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert len(fake.navigations) == 2 and fake.clicks == []  # once more, not more
+    assert harness.notes == []
+    assert "went to another city again" in caplog.text and "the target is skipped" in caplog.text
+
+
+async def test_a_click_that_leads_to_another_city_opens_the_search_again_and_goes_on() -> None:
+    stat = "?stat=c3RhdA%3D%3D"
+    fake = CityRedirectRemote(
+        pages={1: _doc_with([f"/spb/firm/101{stat}", f"/spb/firm/102{stat}", f"/spb/firm/103{stat}"])},
+        cards=_cards("101", "102", "103"),
+        leave_on=("/firm/102",),
+    )
+    harness = Harness(fake)
+    try:
+        page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    assert [place.external_id for place in page.places] == ["2gis_101", "2gis_102", "2gis_103"]
+    clicked = [_FIRM_RE.search(href).group(1) for href in fake.clicks]  # type: ignore[union-attr]
+    assert clicked == ["101", "102", "103"]  # the cards read before are not clicked again
+    assert len(fake.navigations) == 2 and harness.notes == []
+    assert harness.provider._left_search_pages == 0
+
+
+async def test_a_captcha_on_a_page_of_another_city_is_still_a_block(memory_session_maker) -> None:
+    fake = CityRedirectRemote(pages={1: _doc(["101"])}, cards=_cards("101"), redirects=5, html=CAPTCHA_PAGE[2])
+    harness = Harness(fake, min_hours_between_runs=0)
+    with pytest.raises(ProviderBlockedError, match="капч"):
+        await harness.provider.search(AUTO, KALININSKY)
+    assert len(fake.navigations) == 1  # not opened again: a refusal stops at once
+    assert harness.notes and "капч" in harness.notes[0]
+    await harness.provider.close()
+
+    settings = _settings(COLLECT_QUERIES="dentist_clinic,barbershop", COLLECT_DISTRICTS="Центральный")
+    await collect_leads(memory_session_maker, [harness.provider], load_collector_config(settings))
+    async with memory_session_maker() as session:
+        state = (await get_provider_states(session))["2gis_cdp"]
+    assert state.consecutive_blocks == 1 and state.blocked_until is not None
+
+
+async def test_two_redirects_to_another_city_move_the_cursor_on_and_count_no_block(memory_session_maker) -> None:
+    settings = _settings(COLLECT_QUERIES="dentist_clinic,barbershop", COLLECT_DISTRICTS="Центральный")
+    config = load_collector_config(settings)
+    fake = CityRedirectRemote(pages={1: _doc(["101"])}, cards=_cards("101"), redirects=2)
+    harness = Harness(fake, min_hours_between_runs=0)
+    result = await collect_leads(memory_session_maker, [harness.provider], config)
+    async with memory_session_maker() as session:
+        state = (await get_provider_states(session))["2gis_cdp"]
+    assert state.consecutive_blocks == 0 and state.blocked_until is None and state.disabled_at is None
+    assert state.cursor == 1  # the target is skipped like any format error
+    assert result.errors == 1 and "другой город" in (result.last_error or "")
+    assert harness.notes == []
