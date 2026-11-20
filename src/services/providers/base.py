@@ -171,7 +171,7 @@ TARGET_CATEGORIES: dict[str, dict[str, Any]] = {
     },
     "clothing_repair": {
         "title": "🧵 Ремонт одежды",
-        "osm_tags": [],
+        "osm_tags": [("craft", "tailor")],
         "queries_2gis": ("ремонт одежды",),
         "high_margin": False,
     },
@@ -207,7 +207,7 @@ TARGET_CATEGORIES: dict[str, dict[str, Any]] = {
     },
     "framing": {
         "title": "🖼 Багетная мастерская",
-        "osm_tags": [],
+        "osm_tags": [("shop", "frame")],
         "queries_2gis": ("багетная мастерская",),
         "high_margin": False,
     },

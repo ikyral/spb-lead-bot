@@ -675,9 +675,11 @@ def test_every_niche_gives_searches_of_its_phrases() -> None:
 
 def test_category_buttons_fit_into_telegram_for_every_district() -> None:
     assert len(CATEGORY_KEYS) + 1 <= 100
+    assert all(TARGET_CATEGORIES[key]["osm_tags"] for key in CATEGORY_KEYS)
+    assert {"phone_repair", "brows", "street_food"}.isdisjoint(CATEGORY_KEYS)
     for district in SPB_DISTRICTS:
         markup = get_categories_keyboard(district)
-        assert len(markup.inline_keyboard) == len(TARGET_CATEGORIES) + 1
+        assert len(markup.inline_keyboard) == len(CATEGORY_KEYS) + 1
         for row in markup.inline_keyboard:
             for button in row:
                 assert button.callback_data and len(button.callback_data.encode()) <= 64, (district, button.text)

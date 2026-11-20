@@ -7,8 +7,8 @@ from aiogram.types import CallbackQuery, Message
 
 from src.bot.handlers import leads as leads_handlers
 from src.bot.handlers import search
-from src.bot.keyboards import STALE_BUTTON_TEXT, get_categories_keyboard, get_districts_keyboard
-from src.services.providers.base import SPB_DISTRICTS, TARGET_CATEGORIES
+from src.bot.keyboards import CATEGORY_KEYS, STALE_BUTTON_TEXT, get_categories_keyboard, get_districts_keyboard
+from src.services.providers.base import SPB_DISTRICTS
 
 
 def _callback(data: str) -> MagicMock:
@@ -47,7 +47,7 @@ def test_keyboards_use_stable_keys_not_positions() -> None:
             for btn in row
             if btn.callback_data != "dist_back"
         }
-        assert cat_data == {f"cat:{district}:{key}" for key in TARGET_CATEGORIES}
+        assert cat_data == {f"cat:{district}:{key}" for key in CATEGORY_KEYS}
         assert all(len(data.encode("utf-8")) <= 64 for data in cat_data)
 
 
@@ -90,6 +90,20 @@ async def test_category_button_harvests_selected_district_and_category(monkeypat
     await search.handle_category_chosen(_callback("cat:Невский:hotels"))
 
     assert (calls[0]["district_name"], calls[0]["category_key"]) == ("Невский", "hotels")
+
+
+@pytest.mark.asyncio
+async def test_niche_without_osm_tags_is_refused_without_harvest(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_harvest(**kwargs):
+        raise AssertionError("harvest must not run for a 2GIS-only niche")
+
+    monkeypatch.setattr(search, "run_lead_harvest", fake_harvest)
+    cb = _callback("cat:Невский:phone_repair")
+
+    await search.handle_category_chosen(cb)
+
+    cb.answer.assert_awaited_once()
+    assert cb.answer.await_args.kwargs.get("show_alert") is True
 
 
 @pytest.mark.asyncio

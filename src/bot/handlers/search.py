@@ -160,6 +160,9 @@ async def handle_category_chosen(callback: CallbackQuery) -> None:
         await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
         return
     _, district_name, category_key = parts
+    if not TARGET_CATEGORIES[category_key].get("osm_tags"):
+        await callback.answer("Эта ниша собирается только через 2ГИС (по расписанию или --assisted)", show_alert=True)
+        return
     category_title = TARGET_CATEGORIES[category_key]["title"]
 
     await callback.answer()
