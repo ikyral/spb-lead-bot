@@ -363,6 +363,7 @@ class TwoGisCdpProvider(BaseMapProvider):
         self._known_firm_ids = set()
         self.human_check_passed = False
         self.run_counted = False
+        self.cards_opened = 0
         if session is not None:
             await session.close()
 
