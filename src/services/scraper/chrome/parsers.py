@@ -422,11 +422,7 @@ class _BaseChromePageReader:
                 self._last_firm_hrefs = [href for href in matched if _FIRM_PATH_RE.search(href)]
                 return matched
         document = self._read_document()
-        return [
-            node.attributes["href"]
-            for node in document.search(is_search_result_link)
-            if "href" in node.attributes
-        ]
+        return [node.attributes["href"] for node in document.search(is_search_result_link) if "href" in node.attributes]
 
     def _read_title(self) -> str:
         """Read active document title cheaply when supported, falling back to full page snapshot."""
@@ -698,9 +694,7 @@ class _BaseChromePageReader:
                         skipped_known=skipped_known,
                     )
 
-        return CollectedCards(
-            collected, collected_urls, attempted_hrefs, None, False, skipped_known=skipped_known
-        )
+        return CollectedCards(collected, collected_urls, attempted_hrefs, None, False, skipped_known=skipped_known)
 
     def _return_to_list(self, firm_id: str | None) -> bool:
         """
