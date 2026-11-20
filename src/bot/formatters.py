@@ -586,6 +586,13 @@ def format_collection_report(report: RunReport) -> str:
         f"• Длительность: <b>{report.duration_seconds:.0f} с</b>",
         f"\n📦 В запасе: <b>{report.pool_size}</b>",
     ]
+    if result.format_errors:
+        lines.insert(6, f"• Пропущено целей из-за ошибки формата: <b>{result.format_errors}</b>")
+    lines += [
+        f"⛔ {html.escape(name)}: сбор остановлен предохранителем после повторных ошибок формата, "
+        "это не блокировка: паузы нет, следующий сбор пойдёт как обычно"
+        for name in result.format_fuse_providers
+    ]
     if result.last_error:
         lines.append(f"\n⚠️ Последняя ошибка: {html.escape(result.last_error)}")
     lines += [f"⏭ {html.escape(name)} пропущен: {html.escape(why)}" for name, why in result.skipped.items()]

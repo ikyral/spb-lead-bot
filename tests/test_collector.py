@@ -27,7 +27,14 @@ from src.services.api_client import (
     ProviderStoppedError,
     ProviderTemporaryError,
 )
-from src.services.collector import MAX_CONSECUTIVE_FAILURES, _progress_key, collect_leads, load_collector_config
+from src.services.collector import (
+    MAX_CONSECUTIVE_FAILURES,
+    MAX_FORMAT_ERRORS_IN_A_ROW,
+    MAX_FORMAT_ERRORS_PER_RUN,
+    _progress_key,
+    collect_leads,
+    load_collector_config,
+)
 from src.services.providers import OSMOverpassProvider
 from src.services.providers.base import (
     SPB_DISTRICTS,
@@ -718,13 +725,121 @@ async def test_format_error_on_first_page_moves_the_cursor_on(session_maker, no_
     categories = [target.query.category for target in config.targets]
     broken = FakeProvider(error=ProviderFormatError("5 карточек подряд не прочитаны"), name="2gis_cdp")
     first = await collect_leads(session_maker, [broken], config)
-    assert broken.calls == [(categories[0], 1)]
-    assert first.errors == 1
-    assert await _cursor_of(session_maker, "2gis_cdp") == 1
+    # Each error skips only its target; the fuse ends the run after MAX_FORMAT_ERRORS_IN_A_ROW in a row.
+    assert broken.calls == [(categories[0], 1), (categories[1], 1)]
+    assert first.errors == first.format_errors == MAX_FORMAT_ERRORS_IN_A_ROW
+    assert await _cursor_of(session_maker, "2gis_cdp") == 2
 
     again = FakeProvider(pages=[[_place(1)]], name="2gis_cdp")
     await collect_leads(session_maker, [again], config, cursor=first.next_cursor)
-    assert again.calls[0] == (categories[1], 1)
+    assert again.calls[0] == (categories[2], 1)
+
+
+class ScriptedProvider(FakeProvider):
+    """Answers each search call with the next prepared outcome: a list of places or an error to raise."""
+
+    def __init__(self, outcomes: list, name: str = "2gis_cdp") -> None:
+        super().__init__(name=name)
+        self.outcomes = list(outcomes)
+
+    async def search(self, query, area, page=1, page_size=50) -> SearchPage:
+        self.calls.append((query.category, page))
+        outcome = self.outcomes.pop(0) if self.outcomes else []
+        if isinstance(outcome, Exception):
+            raise outcome
+        return SearchPage(places=outcome, has_more=False)
+
+
+def _six_targets():
+    return _config(COLLECT_QUERIES=_CURSOR_QUERIES, COLLECT_DISTRICTS="Центральный,Адмиралтейский")
+
+
+async def _state_of(session_maker, name: str) -> ProviderState:
+    async with session_maker() as session:
+        return (await get_provider_states(session))[name]
+
+
+async def test_format_error_skips_only_its_target(session_maker, no_site_checks, caplog) -> None:
+    config = _cursor_config()
+    provider = ScriptedProvider([ProviderFormatError("2ГИС дважды увёл поиск в другой город", partial=[_place(1)])])
+    with caplog.at_level("WARNING"):
+        result = await collect_leads(session_maker, [provider], config)
+    assert len(provider.calls) == 3  # the run went on after the error
+    assert result.format_errors == 1
+    assert result.errors == 1
+    assert result.format_fuse_providers == []
+    assert result.saved_new == 1  # the partial places of the skipped target are kept
+    state = await _state_of(session_maker, "2gis_cdp")
+    assert state.cursor == 0  # three targets, each moved the cursor: back to the start
+    assert state.consecutive_blocks == 0
+    assert state.blocked_until is None
+    skipped = [r for r in caplog.records if "after a format error" in r.getMessage()]
+    assert len(skipped) == 1
+    assert skipped[0].levelname == "WARNING"
+    assert "Центральный" in skipped[0].getMessage()
+
+
+async def test_format_error_then_success_moves_the_cursor_twice(session_maker, no_site_checks) -> None:
+    config = _cursor_config(COLLECT_MAX_REQUESTS_PER_RUN=2)
+    provider = ScriptedProvider([ProviderFormatError("формат"), [_place(1)]])
+    result = await collect_leads(session_maker, [provider], config)
+    assert len(provider.calls) == 2
+    assert result.format_errors == 1
+    assert await _cursor_of(session_maker, "2gis_cdp") == 2
+    state = await _state_of(session_maker, "2gis_cdp")
+    assert state.consecutive_blocks == 0
+    assert state.blocked_until is None
+
+
+async def test_two_format_errors_in_a_row_end_the_run_by_the_fuse(session_maker, no_site_checks) -> None:
+    config = _six_targets()
+    provider = ScriptedProvider([ProviderFormatError("первая"), ProviderFormatError("вторая"), [_place(1)]])
+    result = await collect_leads(session_maker, [provider], config)
+    assert len(provider.calls) == MAX_FORMAT_ERRORS_IN_A_ROW == 2
+    assert result.format_errors == 2
+    assert result.format_fuse_providers == ["2gis_cdp"]
+    assert any("не блокировка" in alert for alert in result.alerts)
+    state = await _state_of(session_maker, "2gis_cdp")
+    assert state.cursor == 2
+    assert state.consecutive_blocks == 0
+    assert state.blocked_until is None
+    assert state.disabled_at is None
+
+
+async def test_three_format_errors_in_a_run_end_it_at_the_third(session_maker, no_site_checks) -> None:
+    config = _six_targets()
+    error = ProviderFormatError
+    provider = ScriptedProvider([error("1"), [_place(1)], error("2"), [_place(2)], error("3"), [_place(3)]])
+    result = await collect_leads(session_maker, [provider], config)
+    assert len(provider.calls) == 5
+    assert result.format_errors == MAX_FORMAT_ERRORS_PER_RUN == 3
+    assert result.format_fuse_providers == ["2gis_cdp"]
+    state = await _state_of(session_maker, "2gis_cdp")
+    assert state.cursor == 5
+    assert state.consecutive_blocks == 0
+    assert state.blocked_until is None
+
+
+async def test_a_success_between_format_errors_resets_the_streak(session_maker, no_site_checks) -> None:
+    config = _cursor_config()
+    provider = ScriptedProvider([ProviderFormatError("1"), [_place(1)], ProviderFormatError("2")])
+    result = await collect_leads(session_maker, [provider], config)
+    assert len(provider.calls) == 3
+    assert result.format_errors == 2
+    assert result.format_fuse_providers == []
+
+
+async def test_a_block_after_a_format_error_still_stops_and_counts(session_maker, no_site_checks) -> None:
+    config = _six_targets()
+    provider = ScriptedProvider([ProviderFormatError("формат"), ProviderBlockedError("капча"), [_place(1)]])
+    result = await collect_leads(session_maker, [provider], config)
+    assert len(provider.calls) == 2
+    assert result.format_errors == 1
+    assert result.format_fuse_providers == []
+    state = await _state_of(session_maker, "2gis_cdp")
+    assert state.consecutive_blocks == 1
+    assert state.blocked_until is not None
+    assert state.cursor == 1  # the format error moved it, the block did not
 
 
 @pytest.mark.parametrize(

@@ -2106,6 +2106,9 @@ async def test_two_redirects_to_another_city_move_the_cursor_on_and_count_no_blo
     async with memory_session_maker() as session:
         state = (await get_provider_states(session))["2gis_cdp"]
     assert state.consecutive_blocks == 0 and state.blocked_until is None and state.disabled_at is None
-    assert state.cursor == 1  # the target is skipped like any format error
-    assert result.errors == 1 and "другой город" in (result.last_error or "")
+    # The first target is skipped like any format error, the run goes on with the second one.
+    assert state.cursor == 0
+    assert result.errors == result.format_errors == 1 and "другой город" in (result.last_error or "")
+    assert result.format_fuse_providers == []
+    assert len(fake.navigations) == 3  # the first target and its one re-open, then the second target
     assert harness.notes == []

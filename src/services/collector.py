@@ -33,6 +33,7 @@ from src.services.api_client import (
     ProviderBlockedError,
     ProviderBudgetExhausted,
     ProviderError,
+    ProviderFormatError,
     ProviderNoConnectionError,
     ProviderProxyError,
     ProviderQuotaError,
@@ -57,6 +58,10 @@ logger = logging.getLogger(__name__)
 
 # A provider failing this many times in a row is skipped for the rest of the run.
 MAX_CONSECUTIVE_FAILURES: int = 3
+# A format error skips only its target; this many in a row (a successful target resets the streak)
+# or this many in one run end the run for the provider: the page or the code needs checking.
+MAX_FORMAT_ERRORS_IN_A_ROW: int = 2
+MAX_FORMAT_ERRORS_PER_RUN: int = 3
 # Cron numbers the weekdays from Sunday (0 or 7), APScheduler from Monday.
 _CRON_WEEKDAYS: tuple[str, ...] = ("sun", "mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _WEEKDAY_NUMBER_RE = re.compile(r"(?<![/\d])[0-7](?!\d)")
@@ -198,6 +203,10 @@ class CollectResult:
     cards_opened: int = 0
     next_cursor: int = 0
     targets_processed: int = 0
+    # Targets skipped because a page could not be understood (format error), and providers whose run
+    # was ended by the fuse on such errors.
+    format_errors: int = 0
+    format_fuse_providers: list[str] = field(default_factory=list)
     # Problems that need the owner's attention (key, quota, no access to contacts).
     alerts: list[str] = field(default_factory=list)
     last_error: str | None = None
@@ -265,6 +274,8 @@ class _Collection:
         self.places: list[RawPlace] = []
         self.seen_ids: set[str] = set()
         self.failures_in_a_row: dict[str, int] = {}
+        self.format_errors_in_a_row: dict[str, int] = {}
+        self.format_errors_total: dict[str, int] = {}
         self.known_progress = known_progress or {}
         self.new_progress: dict[str, SearchProgress] = {}
         self.walked_targets: dict[str, int] = {}
@@ -314,6 +325,10 @@ class _Collection:
             except ProviderProxyError as exc:
                 self._stop_on_proxy(provider, exc)
                 return any_page_succeeded
+            except ProviderFormatError as exc:
+                self._add_places(exc.partial, collected)
+                self._skip_on_format_error(provider, target, exc)
+                return True
             except ProviderStoppedError as exc:
                 self._add_places(exc.partial, collected)
                 self._stop_provider(provider, exc)
@@ -349,6 +364,7 @@ class _Collection:
 
             any_page_succeeded = True
             self.failures_in_a_row[provider.name] = 0
+            self.format_errors_in_a_row[provider.name] = 0
             self.succeeded.add(provider.name)
             if search_page.warning:
                 logger.warning("Provider %s: %s", provider.name, search_page.warning)
@@ -389,6 +405,44 @@ class _Collection:
         logger.error("Provider %s stopped for this run: %s", provider.name, error)
         self.record_error(str(error))
         self.alert(str(error))
+        self.drop_provider(provider)
+
+    def _skip_on_format_error(self, provider: BaseMapProvider, target: SearchTarget, error: ProviderError) -> None:
+        """
+        The target is skipped and the provider goes on with the next one: not a block, nothing is paused.
+
+        A fuse ends the run for the provider after MAX_FORMAT_ERRORS_IN_A_ROW in a row or
+        MAX_FORMAT_ERRORS_PER_RUN in total, still without a pause or a counted block.
+        """
+        self.record_error(str(error))
+        self.result.format_errors += 1
+        in_a_row = self.format_errors_in_a_row.get(provider.name, 0) + 1
+        total = self.format_errors_total.get(provider.name, 0) + 1
+        self.format_errors_in_a_row[provider.name] = in_a_row
+        self.format_errors_total[provider.name] = total
+        logger.warning(
+            "Provider %s skipped target %s (%s) x %s after a format error, not a block: %s",
+            provider.name,
+            target.query.category,
+            target.query.text,
+            target.area.district,
+            error,
+        )
+        if in_a_row < MAX_FORMAT_ERRORS_IN_A_ROW and total < MAX_FORMAT_ERRORS_PER_RUN:
+            return
+        logger.warning(
+            "Provider %s stopped for this run by the format error fuse: %d in a row, %d in this run",
+            provider.name,
+            in_a_row,
+            total,
+        )
+        if provider.name not in self.result.format_fuse_providers:
+            self.result.format_fuse_providers.append(provider.name)
+        self.alert(
+            f"{provider.name}: сбор остановлен до следующего запуска после ошибок формата ({in_a_row} подряд, "
+            f"{total} за сбор), последняя: {error}. Это не блокировка: паузы и счётчик блокировок не менялись. "
+            "Страницу или код надо проверить"
+        )
         self.drop_provider(provider)
 
     def _stop_on_proxy(self, provider: BaseMapProvider, error: ProviderProxyError) -> None:
