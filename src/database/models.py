@@ -147,6 +147,8 @@ class ProviderState(Base):
     # Requests sent on requests_day (the local date of the computer, ISO format), for a daily ceiling.
     requests_day: Mapped[str | None] = mapped_column(String(10), nullable=True, default=None)
     requests_day_used: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Position in the list of search targets for this provider; None inherits CollectorState.cursor.
+    cursor: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
 
 
 class SearchProgress(Base):

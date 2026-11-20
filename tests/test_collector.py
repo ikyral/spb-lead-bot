@@ -1,7 +1,7 @@
 """Tests for collection settings, the 2GIS page parser and one collection pass."""
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -12,11 +12,12 @@ from sqlalchemy import select
 from src.bot.formatters import format_issued_lead
 from src.bot.keyboards import get_issued_lead_keyboard
 from src.config import Settings
-from src.database.models import CONTACT_CONTACTED, STATUS_ISSUED, Lead
-from src.database.repo import issue_next_leads, set_contact_status
+from src.database.models import CONTACT_CONTACTED, STATUS_ISSUED, Lead, ProviderState
+from src.database.repo import get_provider_states, issue_next_leads, set_contact_status
 from src.services import pipeline
 from src.services.api_client import (
     ProviderAuthError,
+    ProviderBudgetExhausted,
     ProviderQuotaError,
     ProviderTemporaryError,
 )
@@ -444,7 +445,8 @@ async def test_request_budget_is_never_exceeded_and_the_next_run_continues(sessi
     assert [call[0] for call in second.calls] == categories[2:4]
     assert result.next_cursor == 4
 
-    third = FakeProvider(pages=[[_place(3)]])
+    # Separate provider name so ProviderState('fake').cursor from the first two runs does not override `cursor`.
+    third = FakeProvider(pages=[[_place(3)]], name="wrap")
     await collect_leads(session_maker, [third], config, cursor=len(categories) - 1)
     assert [call[0] for call in third.calls] == [categories[-1], categories[0]]  # wraps around
 
@@ -521,3 +523,157 @@ def test_a_niche_gives_one_target_per_phrase_and_district_and_only_the_first_rea
     assert [query.text for query in first_district] == list(phrases)
     assert first_district[0].osm_tags and all(query.osm_tags == () for query in first_district[1:])
     assert {query.category for query in first_district} == {"fitness_studios"}
+
+
+async def test_providers_keep_independent_cursors_when_one_stops_on_budget(session_maker, no_site_checks) -> None:
+    """When 2gis_cdp stops on budget early and osm keeps going, 2gis_cdp does not skip targets on the next run."""
+
+    class BudgetLimitedCdp(BaseMapProvider):
+        name = "2gis_cdp"
+
+        def __init__(self, remaining_targets: int) -> None:
+            self.remaining_targets = remaining_targets
+            self.completed: list[str] = []
+
+        async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:
+            return []
+
+        async def search(self, query, area, page=1, page_size=50) -> SearchPage:
+            if self.remaining_targets <= 0:
+                raise ProviderBudgetExhausted("дневной лимит карточек")
+            self.remaining_targets -= 1
+            self.completed.append(query.category)
+            return SearchPage(places=[_place(len(self.completed), source="2gis")])
+
+    config = _config(
+        COLLECT_QUERIES="dentist_clinic,barbershop,tire_service,florists,cleaning",
+        COLLECT_DISTRICTS="Центральный",
+        COLLECT_MAX_REQUESTS_PER_RUN=4,
+    )
+    categories = [target.query.category for target in config.targets]
+    assert len(categories) == 5
+
+    cdp1 = BudgetLimitedCdp(remaining_targets=1)
+    osm1 = FakeProvider(pages=[[_place(10, source="osm")]], name="osm")
+    first = await collect_leads(session_maker, [cdp1, osm1], config)
+    assert cdp1.completed == [categories[0]]
+    assert [call[0] for call in osm1.calls] == categories[:2]
+    assert first.next_cursor == 2
+
+    async with session_maker() as session:
+        states = await get_provider_states(session)
+    assert states["2gis_cdp"].cursor == 1
+    assert states["osm"].cursor == 2
+
+    cdp2 = BudgetLimitedCdp(remaining_targets=1)
+    osm2 = FakeProvider(pages=[[_place(20, source="osm")]], name="osm")
+    await collect_leads(session_maker, [cdp2, osm2], config, cursor=first.next_cursor)
+    assert cdp2.completed == [categories[1]]
+    assert [call[0] for call in osm2.calls] == categories[2:4]
+
+    async with session_maker() as session:
+        states = await get_provider_states(session)
+    assert states["2gis_cdp"].cursor == 2
+    assert states["osm"].cursor == 4
+
+
+async def test_skipped_provider_with_null_cursor_is_not_dragged_forward(session_maker, no_site_checks) -> None:
+    """A resting/blocked provider whose cursor is still None freezes at start instead of following CollectorState."""
+    config = _config(
+        COLLECT_QUERIES="dentist_clinic,barbershop,tire_service,florists,cleaning",
+        COLLECT_DISTRICTS="Центральный",
+        COLLECT_MAX_REQUESTS_PER_RUN=2,
+    )
+    categories = [target.query.category for target in config.targets]
+    async with session_maker() as session:
+        session.add(ProviderState(name="2gis_cdp", consecutive_blocks=0, last_run_at=datetime.now(UTC), cursor=None))
+        await session.commit()
+
+    resting_cdp = FakeProvider(pages=[[_place(1, source="2gis")]], name="2gis_cdp")
+    resting_cdp.min_hours_between_runs = 20.0
+    osm = FakeProvider(pages=[[_place(2, source="osm")]], name="osm")
+
+    first = await collect_leads(session_maker, [resting_cdp, osm], config, cursor=1)
+    assert resting_cdp.calls == []
+    assert [call[0] for call in osm.calls] == categories[1:3]
+    assert first.next_cursor == 3
+
+    async with session_maker() as session:
+        states = await get_provider_states(session)
+    assert states["2gis_cdp"].cursor == 1
+    assert states["osm"].cursor == 3
+
+    # Once the rest ends, 2gis_cdp resumes at target 1 even though `cursor=first.next_cursor` is 3.
+    resting_cdp.ignore_interval = True
+    second = await collect_leads(
+        session_maker,
+        [resting_cdp, FakeProvider(pages=[[_place(3, source="osm")]], name="osm")],
+        config,
+        cursor=first.next_cursor,
+        max_requests=2,
+    )
+    assert resting_cdp.calls == [(categories[1], 1)]
+    assert second.errors == 0
+
+
+async def test_collect_leads_passes_known_external_ids_by_prefix(session_maker, no_site_checks) -> None:
+    async with session_maker() as session:
+        session.add_all(
+            [
+                Lead(
+                    external_id="2gis_101",
+                    source="2gis",
+                    name="Клиника 101",
+                    category="dentist_clinic",
+                    site_status="no_site",
+                    score=70,
+                ),
+                Lead(
+                    external_id="2gis_102",
+                    source="2gis",
+                    name="Клиника 102",
+                    category="dentist_clinic",
+                    site_status="no_site",
+                    score=70,
+                ),
+                Lead(
+                    external_id="osm_201",
+                    source="osm",
+                    name="OSM 201",
+                    category="dentist_clinic",
+                    site_status="no_site",
+                    score=70,
+                ),
+            ]
+        )
+        await session.commit()
+
+    class HintProvider(FakeProvider):
+        external_id_prefix = "2gis_"
+
+        def __init__(self, name: str) -> None:
+            super().__init__(pages=[], name=name)
+            self.received_hints: list[set[str]] = []
+
+        def set_known_external_ids(self, external_ids: set[str]) -> None:
+            self.received_hints.append(set(external_ids))
+            external_ids.add("mutated_locally")
+
+    class PlainProvider(FakeProvider):
+        def __init__(self, name: str) -> None:
+            super().__init__(pages=[], name=name)
+            self.received = False
+
+        def set_known_external_ids(self, external_ids: set[str]) -> None:
+            self.received = True
+
+    first_hint = HintProvider("2gis_cdp")
+    second_hint = HintProvider("2gis_copy")
+    plain = PlainProvider("osm")
+
+    await collect_leads(session_maker, [first_hint, second_hint, plain], _one_target())
+
+    assert first_hint.received_hints == [{"2gis_101", "2gis_102"}]
+    # Second provider with the same prefix receives a fresh set without the first provider's mutation.
+    assert second_hint.received_hints == [{"2gis_101", "2gis_102"}]
+    assert plain.received is False

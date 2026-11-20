@@ -18,12 +18,14 @@ from src.database.models import ProviderState, SearchProgress
 from src.database.repo import (
     MAX_CONSECUTIVE_BLOCKS,
     disable_provider,
+    get_known_external_ids_by_prefix,
     get_provider_states,
     get_search_progress,
     record_provider_block,
     record_provider_run,
     record_provider_success,
     restore_provider_run,
+    save_provider_cursors,
     save_search_progress,
 )
 from src.services.api_client import (
@@ -275,56 +277,63 @@ class _Collection:
         if provider in self.active:
             self.active.remove(provider)
 
-    async def collect_target(self, provider: BaseMapProvider, target: SearchTarget) -> None:
-        """Walk the result pages of one target. Results received before a failure are kept."""
+    async def collect_target(self, provider: BaseMapProvider, target: SearchTarget) -> bool:
+        """
+        Walk the result pages of one target. Results received before a failure are kept.
+
+        Returns True if the target finished (or at least one page succeeded before stopping),
+        False if the provider stopped before finishing a single page of this target.
+        """
         collected = 0
+        pages_succeeded = 0
         first_page = self._first_page(provider, target)
         if first_page is None:
             self.walked_targets[provider.name] = self.walked_targets.get(provider.name, 0) + 1
-            return
+            return True
         for page in range(first_page, first_page + self.config.max_pages):
             if self.result.requests >= self.max_requests:
-                return
+                return pages_succeeded > 0
             self.result.requests += 1
             try:
                 search_page = await provider.search(target.query, target.area, page, self.config.page_size)
             except ProviderBudgetExhausted as exc:
                 logger.info("Provider %s finished for this run: %s", provider.name, exc)
                 self.drop_provider(provider)
-                return
+                return pages_succeeded > 0
             except ProviderBlockedError as exc:
                 self._add_places(exc.partial, collected)
                 await self._handle_block(provider, exc)
-                return
+                return pages_succeeded > 0
             except ProviderProxyError as exc:
                 self._stop_on_proxy(provider, exc)
-                return
+                return pages_succeeded > 0
             except ProviderStoppedError as exc:
                 self._add_places(exc.partial, collected)
                 self._stop_provider(provider, exc)
-                return
+                return pages_succeeded > 0
             except ProviderAuthError as exc:
                 if provider.auth_failure_hint is None:
                     self._stop_provider(provider, exc)
                 else:
                     await self._handle_rejected_key(provider, exc, provider.auth_failure_hint)
-                return
+                return pages_succeeded > 0
             except (ProviderQuotaError, ProviderUnavailableError) as exc:
                 self._stop_provider(provider, exc)
-                return
+                return pages_succeeded > 0
             except ProviderError as exc:
                 logger.warning("Provider %s failed on %s: %s", provider.name, target.query.category, exc)
                 self.record_error(str(exc))
                 self._count_failure(provider, str(exc))
-                return
+                return pages_succeeded > 0
             except Exception:
                 # A bug in one provider must not stop the others.
                 logger.exception("Provider %s crashed on %s", provider.name, target.query.category)
                 text = f"{provider.name}: внутренняя ошибка, подробности в логе"
                 self.record_error(text)
                 self._count_failure(provider, text)
-                return
+                return pages_succeeded > 0
 
+            pages_succeeded += 1
             self.failures_in_a_row[provider.name] = 0
             self.succeeded.add(provider.name)
             if search_page.warning:
@@ -335,7 +344,8 @@ class _Collection:
             collected = self._add_places(search_page.places, collected, whole_page=bool(provider.progress_scope))
             self._remember_progress(provider, target, page, search_page.has_more)
             if collected >= self.config.max_results_per_query or not search_page.has_more:
-                return
+                return True
+        return True
 
     def _first_page(self, provider: BaseMapProvider, target: SearchTarget) -> int | None:
         """Where to continue this target; None if all of its pages were seen recently."""
@@ -471,8 +481,17 @@ async def collect_leads(
     async with session_maker() as session:
         states = await get_provider_states(session)
         known_progress = await get_search_progress(session)
-    skipped = {provider.name: unavailable_reason(provider, states.get(provider.name), now) for provider in providers}
-    usable = [provider for provider in providers if skipped[provider.name] is None]
+        skipped = {
+            provider.name: unavailable_reason(provider, states.get(provider.name), now) for provider in providers
+        }
+        usable = [provider for provider in providers if skipped[provider.name] is None]
+        known_by_prefix: dict[str, set[str]] = {}
+        for provider in usable:
+            prefix = provider.external_id_prefix
+            if prefix:
+                if prefix not in known_by_prefix:
+                    known_by_prefix[prefix] = await get_known_external_ids_by_prefix(session, prefix)
+                provider.set_known_external_ids(set(known_by_prefix[prefix]))
     resting = {name for name, reason in skipped.items() if reason == REST_REASON}
 
     collection = _Collection(usable, config, budget, session_maker, known_progress)
@@ -482,6 +501,16 @@ async def collect_leads(
         logger.info("Provider %s skipped: %s", name, reason)
     targets = config.targets
     start = cursor % len(targets) if targets else 0
+    provider_starts: dict[str, int] = {}
+    provider_steps: dict[str, int] = {}
+    provider_ran: set[str] = set()
+    if targets:
+        for provider in usable:
+            state = states.get(provider.name)
+            provider_starts[provider.name] = (
+                state.cursor if state is not None and state.cursor is not None else cursor
+            ) % len(targets)
+            provider_steps[provider.name] = 0
 
     try:
         async with session_maker() as session:
@@ -491,21 +520,44 @@ async def collect_leads(
         for offset in range(len(targets)):
             if result.requests >= budget or not collection.active:
                 break
-            target = targets[(start + offset) % len(targets)]
+            ran_in_round = False
             for provider in list(collection.active):
+                if result.requests >= budget:
+                    break
                 # A fallback works only while the provider it replaces is out of action;
                 # one that is merely resting until tomorrow does not need replacing.
                 if provider.fallback_for in {other.name for other in collection.active} | resting:
                     continue
-                await collection.collect_target(provider, target)
-            result.targets_processed = offset + 1
+                target = targets[(provider_starts[provider.name] + provider_steps[provider.name]) % len(targets)]
+                provider_ran.add(provider.name)
+                ran_in_round = True
+                if await collection.collect_target(provider, target):
+                    provider_steps[provider.name] += 1
+            if ran_in_round:
+                result.targets_processed = offset + 1
     finally:
         collection.succeeded -= {
             provider.name for provider in providers if provider.human_check_passed or provider.ignore_interval
         }
         not_counted = [p.name for p in usable if p.min_hours_between_runs and not p.run_counted]
         await _close_providers(providers)
-    result.next_cursor = (start + result.targets_processed) % len(targets) if targets else 0
+
+    cursors_to_save: dict[str, int] = {}
+    if targets and provider_ran:
+        for name in provider_ran:
+            cursors_to_save[name] = (provider_starts[name] + provider_steps[name]) % len(targets)
+        for name in result.skipped:
+            state = states.get(name)
+            if state is not None and state.cursor is None:
+                cursors_to_save[name] = start
+    if not targets:
+        result.next_cursor = 0
+    elif len(provider_ran) == 1:
+        only_name = next(iter(provider_ran))
+        result.next_cursor = cursors_to_save[only_name]
+    else:
+        result.next_cursor = (start + result.targets_processed) % len(targets)
+
     for name, count in collection.walked_targets.items():
         if count == len(targets):
             result.skipped[name] = f"все запросы пройдены до конца, повторный обход через {config.recheck_days} дн."
@@ -518,6 +570,7 @@ async def collect_leads(
             await record_provider_success(session, name)
         stats = await save_collected_places(session, collection.places)
         await save_search_progress(session, list(collection.new_progress.values()))
+        await save_provider_cursors(session, cursors_to_save)
     result.found = stats["total_found"]
     result.qualified = stats["qualified"]
     result.saved_new = stats["saved_new"]

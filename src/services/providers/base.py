@@ -236,6 +236,12 @@ class BaseMapProvider(ABC):
     # False: the run told nothing about the site (no connection, a format the code does not understand),
     # so it does not use up min_hours_between_runs.
     run_counted: bool = True
+    # Prefix of external_id stored in the database; when set, the collector supplies known IDs before the run.
+    external_id_prefix: str | None = None
+
+    def set_known_external_ids(self, external_ids: set[str]) -> None:
+        """Optional hint of already-stored external IDs so slow providers can skip known items."""
+        return None
 
     @abstractmethod
     async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:

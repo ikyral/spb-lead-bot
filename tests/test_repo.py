@@ -8,8 +8,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from src.database.models import Lead
-from src.database.repo import get_leads, init_db, save_new_leads, update_crm_status, upsert_lead
+from src.database.models import Lead, ProviderState
+from src.database.repo import (
+    get_known_external_ids_by_prefix,
+    get_leads,
+    get_provider_states,
+    init_db,
+    save_new_leads,
+    save_provider_cursors,
+    update_crm_status,
+    upsert_lead,
+)
 
 LEAD_LIST_INDEX = "ix_leads_crm_status_score"
 
@@ -254,3 +263,60 @@ async def test_created_at_is_read_back_as_aware_utc(engine: AsyncEngine, session
     now = datetime.now(UTC)
     assert abs(now - rows["osm_2"]) < timedelta(minutes=5)
     assert abs(now - rows["osm_3"]) < timedelta(minutes=5)
+
+
+@pytest.mark.asyncio
+async def test_init_db_adds_cursor_column_to_existing_provider_state(engine: AsyncEngine) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE provider_state (
+                    name VARCHAR(32) NOT NULL PRIMARY KEY,
+                    consecutive_blocks INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+        )
+        await conn.execute(text("INSERT INTO provider_state (name, consecutive_blocks) VALUES ('2gis_cdp', 1)"))
+
+    await init_db(engine)
+    await init_db(engine)
+
+    async with engine.connect() as conn:
+        columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(provider_state)"))}
+        cursor = (await conn.execute(text("SELECT cursor FROM provider_state WHERE name = '2gis_cdp'"))).scalar_one()
+
+    assert "cursor" in columns
+    assert cursor is None
+
+
+@pytest.mark.asyncio
+async def test_save_provider_cursors_creates_and_updates_rows(session) -> None:
+    await save_provider_cursors(session, {})
+    assert await get_provider_states(session) == {}
+
+    await save_provider_cursors(session, {"2gis_cdp": 3, "osm": 15})
+    states = await get_provider_states(session)
+    assert states["2gis_cdp"].cursor == 3
+    assert states["osm"].cursor == 15
+
+    await save_provider_cursors(session, {"2gis_cdp": 4})
+    updated = await session.get(ProviderState, "2gis_cdp")
+    assert updated is not None and updated.cursor == 4
+
+
+@pytest.mark.asyncio
+async def test_get_known_external_ids_by_prefix_filters_matches(session) -> None:
+    await save_new_leads(
+        session,
+        [
+            _lead_data(1, external_id="2gis_1001", source="2gis"),
+            _lead_data(2, external_id="2gis_1002_abc", source="2gis"),
+            _lead_data(3, external_id="osm_2001", source="osm"),
+            _lead_data(4, external_id="other_2gis_3001", source="other"),
+        ],
+    )
+
+    assert await get_known_external_ids_by_prefix(session, "2gis_") == {"2gis_1001", "2gis_1002_abc"}
+    assert await get_known_external_ids_by_prefix(session, "missing_") == set()
