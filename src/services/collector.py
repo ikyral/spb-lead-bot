@@ -33,6 +33,7 @@ from src.services.api_client import (
     ProviderBlockedError,
     ProviderBudgetExhausted,
     ProviderError,
+    ProviderNoConnectionError,
     ProviderProxyError,
     ProviderQuotaError,
     ProviderStoppedError,
@@ -281,8 +282,11 @@ class _Collection:
         """
         Walk the result pages of one target. Results received before a failure are kept.
 
-        Returns True if the target finished (or at least one page succeeded before stopping),
-        False if the provider stopped before finishing a single page of this target.
+        Returns True if the cursor may move on to the next target: the target finished, at least one
+        page succeeded, or it failed with an error that is about this target (format error, other
+        provider error), so retrying it every run would stall the cursor forever.
+        Returns False when retrying the same target is right: block, proxy or connection problem,
+        key/quota/availability problem, exhausted budget, or the target was not tried.
         """
         collected = 0
         any_page_succeeded = False
@@ -310,7 +314,8 @@ class _Collection:
             except ProviderStoppedError as exc:
                 self._add_places(exc.partial, collected)
                 self._stop_provider(provider, exc)
-                return any_page_succeeded
+                # A problem on our side of the network says nothing about the target: try it again.
+                return any_page_succeeded or not isinstance(exc, ProviderNoConnectionError)
             except ProviderAuthError as exc:
                 if provider.auth_failure_hint is None:
                     self._stop_provider(provider, exc)
@@ -324,14 +329,14 @@ class _Collection:
                 logger.warning("Provider %s failed on %s: %s", provider.name, target.query.category, exc)
                 self.record_error(str(exc))
                 self._count_failure(provider, str(exc))
-                return any_page_succeeded
+                return True
             except Exception:
                 # A bug in one provider must not stop the others.
                 logger.exception("Provider %s crashed on %s", provider.name, target.query.category)
                 text = f"{provider.name}: внутренняя ошибка, подробности в логе"
                 self.record_error(text)
                 self._count_failure(provider, text)
-                return any_page_succeeded
+                return True
 
             any_page_succeeded = True
             self.failures_in_a_row[provider.name] = 0

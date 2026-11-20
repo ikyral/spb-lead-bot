@@ -14,8 +14,9 @@ its canonical link, without stat=), a random pause of at least MIN_PAUSE_SECONDS
 action but the first of a run. Only then the action.
 
 At the first sign of a refusal (captcha, 401/403/429, an empty page, a page not of 2GIS, a search
-page that is not understood) it stops: nothing waits for the captcha or tries to pass it. The block
-is recorded by the collector like any other; a person may pass the check in the browser between runs.
+page that is not understood) it stops and never tries to pass the check itself. Only the owner's --assisted run on their
+own computer waits for a person to pass the captcha; the server and the scheduled run never wait.
+The block is recorded by the collector like any other.
 """
 
 import asyncio
@@ -289,9 +290,7 @@ class TwoGisCdpProvider(BaseMapProvider):
         self._remember_places(places)
         reason = self._result_problem(result)
         if reason is not None:
-            is_captcha = twogis_site.is_captcha(
-                result.snapshot.final_url, result.snapshot.title, result.snapshot.html
-            )
+            is_captcha = twogis_site.is_captcha(result.snapshot.final_url, result.snapshot.title, result.snapshot.html)
             if is_captcha:
                 self.run_counted = True
             if self._options.assisted and is_captcha:
@@ -310,9 +309,7 @@ class TwoGisCdpProvider(BaseMapProvider):
                 places = self._dedupe_places(places, retry_places)
                 retry_reason = self._result_problem(result)
                 if retry_reason is not None:
-                    if twogis_site.is_captcha(
-                        result.snapshot.final_url, result.snapshot.title, result.snapshot.html
-                    ):
+                    if twogis_site.is_captcha(result.snapshot.final_url, result.snapshot.title, result.snapshot.html):
                         retry_reason = "капча появилась снова сразу после прохождения"
                     self._stop_on_block(retry_reason)
                     raise ProviderBlockedError(retry_reason, partial=places)

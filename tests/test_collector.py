@@ -17,7 +17,11 @@ from src.database.repo import get_provider_states, issue_next_leads, set_contact
 from src.services import pipeline
 from src.services.api_client import (
     ProviderAuthError,
+    ProviderBlockedError,
     ProviderBudgetExhausted,
+    ProviderFormatError,
+    ProviderNoConnectionError,
+    ProviderProxyError,
     ProviderQuotaError,
     ProviderTemporaryError,
 )
@@ -684,3 +688,63 @@ async def test_collect_leads_passes_known_external_ids_by_prefix(session_maker, 
     # Second provider with the same prefix receives a fresh set without the first provider's mutation.
     assert second_hint.received_hints == [{"2gis_101", "2gis_102"}]
     assert plain.received is False
+
+
+_CURSOR_QUERIES = "dentist_clinic,barbershop,tire_service"
+
+
+def _cursor_config(**overrides):
+    return _config(COLLECT_QUERIES=_CURSOR_QUERIES, COLLECT_DISTRICTS="Центральный", **overrides)
+
+
+async def _cursor_of(session_maker, name: str) -> int | None:
+    async with session_maker() as session:
+        return (await get_provider_states(session))[name].cursor
+
+
+async def test_format_error_on_first_page_moves_the_cursor_on(session_maker, no_site_checks) -> None:
+    config = _cursor_config()
+    categories = [target.query.category for target in config.targets]
+    broken = FakeProvider(error=ProviderFormatError("5 карточек подряд не прочитаны"), name="2gis_cdp")
+    first = await collect_leads(session_maker, [broken], config)
+    assert broken.calls == [(categories[0], 1)]
+    assert first.errors == 1
+    assert await _cursor_of(session_maker, "2gis_cdp") == 1
+
+    again = FakeProvider(pages=[[_place(1)]], name="2gis_cdp")
+    await collect_leads(session_maker, [again], config, cursor=first.next_cursor)
+    assert again.calls[0] == (categories[1], 1)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ProviderBlockedError("captcha"),
+        ProviderProxyError("proxy"),
+        ProviderNoConnectionError("no connection"),
+    ],
+)
+async def test_block_proxy_and_connection_errors_keep_the_cursor(session_maker, no_site_checks, error) -> None:
+    config = _cursor_config()
+    provider = FakeProvider(error=error, name="2gis_cdp")
+    await collect_leads(session_maker, [provider], config)
+    assert await _cursor_of(session_maker, "2gis_cdp") == 0
+
+
+async def test_budget_exhausted_before_a_target_keeps_the_cursor(session_maker, no_site_checks) -> None:
+    config = _cursor_config()
+    provider = FakeProvider(error=ProviderBudgetExhausted("лимит"), name="2gis_cdp")
+    await collect_leads(session_maker, [provider], config)
+    assert await _cursor_of(session_maker, "2gis_cdp") == 0
+
+
+async def test_a_target_with_a_page_and_then_an_error_moves_the_cursor_on(session_maker, no_site_checks) -> None:
+    class PageThenFormatError(FakeProvider):
+        async def search(self, query, area, page=1, page_size=50) -> SearchPage:
+            if page == 1:
+                return SearchPage(places=[_place(1)], has_more=True)
+            raise ProviderFormatError("карточки не прочитаны")
+
+    config = _cursor_config(COLLECT_MAX_REQUESTS_PER_RUN=2)
+    await collect_leads(session_maker, [PageThenFormatError(name="2gis_cdp")], config)
+    assert await _cursor_of(session_maker, "2gis_cdp") == 1
