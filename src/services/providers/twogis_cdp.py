@@ -60,6 +60,7 @@ from src.services.scraper.chrome.parsers import (
     GateDecision,
     ScrapedSearchResult,
     foreign_search_city,
+    is_network_error_page,
 )
 from src.services.scraper.chrome.proxy import parse_proxy
 from src.services.scraper.robots import (
@@ -309,6 +310,7 @@ class TwoGisCdpProvider(BaseMapProvider):
 
         places = self._places(result.items, query, area)
         self._remember_places(places)
+        self._raise_if_network_page(result, places)
         reason = self._result_problem(result)
         if reason is not None:
             is_captcha = twogis_site.is_captcha(result.snapshot.final_url, result.snapshot.title, result.snapshot.html)
@@ -329,6 +331,7 @@ class TwoGisCdpProvider(BaseMapProvider):
                 retry_places = self._places(result.items, query, area)
                 self._remember_places(retry_places)
                 places = self._dedupe_places(places, retry_places)
+                self._raise_if_network_page(result, places)
                 retry_reason = self._result_problem(result)
                 if retry_reason is not None:
                     if twogis_site.is_captcha(result.snapshot.final_url, result.snapshot.title, result.snapshot.html):
@@ -446,8 +449,40 @@ class TwoGisCdpProvider(BaseMapProvider):
         if snapshot.final_url.startswith(("http://", "https://")) and not twogis_site.is_site_response(
             snapshot.final_url
         ):
-            return "открылась страница не с 2ГИС"
+            return TwoGisCdpProvider._not_2gis(snapshot)
         return None
+
+    @staticmethod
+    def _not_2gis(snapshot: PageSnapshot) -> str:
+        """The refusal "a page not of 2GIS", with the page in the log: address without query, status and title."""
+        logger.warning(
+            "2gis_cdp: a page not of 2GIS: %s, status %s, title %r",
+            unquote(twogis_site.page_address(snapshot.final_url)),
+            snapshot.status,
+            snapshot.title[:120],
+        )
+        return f"открылась страница не с 2ГИС ({twogis_site.page_host(snapshot.final_url)})"
+
+    @staticmethod
+    def _raise_if_network_page(result: ScrapedSearchResult, places: list[RawPlace]) -> None:
+        """A page of a network failure of the browser (chrome-error://, net::ERR_*) is no connection, not a refusal."""
+        snapshot = result.snapshot
+        # A sign of a block always wins: the refusal path decides about such a page as before.
+        if twogis_site.detect_block(snapshot.status, snapshot.final_url, snapshot.title, snapshot.html) is not None:
+            return
+        if snapshot.final_url.startswith(("http://", "https://")) and not twogis_site.is_site_response(
+            snapshot.final_url
+        ):
+            return
+        if result.blocked_reason is not None or not is_network_error_page(snapshot.final_url, snapshot.title):
+            return
+        logger.warning(
+            "2gis_cdp: the browser shows a network failure page: %s, status %s, title %r",
+            unquote(twogis_site.page_address(snapshot.final_url)),
+            snapshot.status,
+            snapshot.title[:120],
+        )
+        raise ProviderNoConnectionError(NO_CONNECTION_TEXT, partial=places)
 
     def _page_problem(self, result: ScrapedSearchResult) -> str | None:
         """A page that is not a normal search page of 2GIS counts as a refusal: reading stops."""
@@ -458,7 +493,7 @@ class TwoGisCdpProvider(BaseMapProvider):
         if not snapshot.title.strip():
             return "страница пришла пустой"
         if not twogis_site.is_site_response(snapshot.final_url):
-            return "открылась страница не с 2ГИС"
+            return self._not_2gis(snapshot)
         if result.not_found:
             # A page of 2GIS itself, with no sign of a captcha: the search found nothing. The target is left out.
             logger.info(

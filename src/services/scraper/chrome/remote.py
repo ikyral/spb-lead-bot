@@ -19,6 +19,7 @@ import warnings
 from typing import TYPE_CHECKING, Any
 
 from src.services.api_client import MAX_RESPONSE_BYTES
+from src.services.scraper.twogis_site import is_site_response, page_address
 
 from .browser import ChromeBrowser
 from .dom import DOMNode
@@ -517,7 +518,12 @@ class ChromeRemote:
         return DOMNode(**described)
 
     def go_back(self) -> bool:
-        """The "Back" button of the browser: one step back in the history of the tab. False if there is none."""
+        """
+        The "Back" button of the browser: one step back in the history of the tab. False if there is none.
+
+        Also False, with no navigation, if the previous entry is not a page of 2GIS (the history starts with the
+        neutral pages the browser opens before 2GIS): "Back" never leaves the site.
+        """
         import pychrome
 
         tab = self._require_tab()
@@ -526,8 +532,13 @@ class ChromeRemote:
             index = int(history["currentIndex"])
             if index <= 0:
                 return False
-            tab.Page.navigateToHistoryEntry(entryId=history["entries"][index - 1]["id"])
-        except (pychrome.CallMethodException, KeyError, IndexError, TypeError, ValueError) as exc:
+            previous = history["entries"][index - 1]
+            previous_url = str(previous.get("url") or "")
+            if not previous_url.startswith(("http://", "https://")) or not is_site_response(previous_url):
+                logger.info("Back is not pressed: the previous page is not of 2GIS (%s)", page_address(previous_url))
+                return False
+            tab.Page.navigateToHistoryEntry(entryId=previous["id"])
+        except (pychrome.CallMethodException, AttributeError, KeyError, IndexError, TypeError, ValueError) as exc:
             raise ChromeRuntimeException(f"go back failed: {str(exc)[:80]}") from exc
         return True
 
