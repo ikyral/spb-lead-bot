@@ -285,55 +285,55 @@ class _Collection:
         False if the provider stopped before finishing a single page of this target.
         """
         collected = 0
-        pages_succeeded = 0
+        any_page_succeeded = False
         first_page = self._first_page(provider, target)
         if first_page is None:
             self.walked_targets[provider.name] = self.walked_targets.get(provider.name, 0) + 1
             return True
         for page in range(first_page, first_page + self.config.max_pages):
             if self.result.requests >= self.max_requests:
-                return pages_succeeded > 0
+                return any_page_succeeded
             self.result.requests += 1
             try:
                 search_page = await provider.search(target.query, target.area, page, self.config.page_size)
             except ProviderBudgetExhausted as exc:
                 logger.info("Provider %s finished for this run: %s", provider.name, exc)
                 self.drop_provider(provider)
-                return pages_succeeded > 0
+                return any_page_succeeded
             except ProviderBlockedError as exc:
                 self._add_places(exc.partial, collected)
                 await self._handle_block(provider, exc)
-                return pages_succeeded > 0
+                return any_page_succeeded
             except ProviderProxyError as exc:
                 self._stop_on_proxy(provider, exc)
-                return pages_succeeded > 0
+                return any_page_succeeded
             except ProviderStoppedError as exc:
                 self._add_places(exc.partial, collected)
                 self._stop_provider(provider, exc)
-                return pages_succeeded > 0
+                return any_page_succeeded
             except ProviderAuthError as exc:
                 if provider.auth_failure_hint is None:
                     self._stop_provider(provider, exc)
                 else:
                     await self._handle_rejected_key(provider, exc, provider.auth_failure_hint)
-                return pages_succeeded > 0
+                return any_page_succeeded
             except (ProviderQuotaError, ProviderUnavailableError) as exc:
                 self._stop_provider(provider, exc)
-                return pages_succeeded > 0
+                return any_page_succeeded
             except ProviderError as exc:
                 logger.warning("Provider %s failed on %s: %s", provider.name, target.query.category, exc)
                 self.record_error(str(exc))
                 self._count_failure(provider, str(exc))
-                return pages_succeeded > 0
+                return any_page_succeeded
             except Exception:
                 # A bug in one provider must not stop the others.
                 logger.exception("Provider %s crashed on %s", provider.name, target.query.category)
                 text = f"{provider.name}: внутренняя ошибка, подробности в логе"
                 self.record_error(text)
                 self._count_failure(provider, text)
-                return pages_succeeded > 0
+                return any_page_succeeded
 
-            pages_succeeded += 1
+            any_page_succeeded = True
             self.failures_in_a_row[provider.name] = 0
             self.succeeded.add(provider.name)
             if search_page.warning:

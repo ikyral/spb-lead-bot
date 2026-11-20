@@ -861,21 +861,23 @@ def test_chrome_remote_lightweight_helpers(monkeypatch: pytest.MonkeyPatch, tmp_
         fake_tab.Runtime.evaluate.return_value = {"result": {"value": None}}
         assert remote.read_search_link_hrefs() is None
 
-        remote._chrome_tab.Network.requestWillBeSent(
-            requestId="req-robots",
-            type="Document",
-            request={"url": "https://2gis.ru/robots.txt"},
-        )
-        remote._chrome_tab.Network.responseReceived(
-            requestId="req-robots",
-            type="Document",
-            response={"url": "https://2gis.ru/robots.txt", "status": 200},
-        )
+        def fake_navigate(url: str, timeout: int = 15) -> None:
+            remote._chrome_tab.Network.requestWillBeSent(
+                requestId="req-robots",
+                type="Document",
+                request={"url": url},
+            )
+            remote._chrome_tab.Network.responseReceived(
+                requestId="req-robots",
+                type="Document",
+                response={"url": url, "status": 200},
+            )
+
         fake_tab.Runtime.evaluate.side_effect = [
             {"result": {"value": "complete"}},
             {"result": {"value": "User-agent: *\nDisallow: /private\n"}},
         ]
-        monkeypatch.setattr(remote, "navigate", lambda url, timeout=15: None)
+        monkeypatch.setattr(remote, "navigate", fake_navigate)
         status, body = remote.fetch_plain_text("https://2gis.ru/robots.txt", timeout=15)
         assert status == 200
         assert "Disallow: /private" in body

@@ -1206,33 +1206,35 @@ async def test_the_run_goes_on_with_the_next_query_after_a_page_was_left() -> No
     stat = "?stat=c3RhdA%3D%3D"
     fake = UrlRemote(
         pages={1: _doc_with([f"/spb/firm/101{stat}", f"/spb/firm/102{stat}"])},
-        cards=_cards("101", "102"),
+        cards=_cards("101", "102", "201", "202"),
         leave_on=("/firm/102",),
     )
     harness = Harness(fake)
     try:
         first = await harness.provider.search(AUTO, KALININSKY)
         assert [place.external_id for place in first.places] == ["2gis_101", "2gis_102"]
+        fake.pages = {1: _doc_with([f"/spb/firm/201{stat}", f"/spb/firm/202{stat}"])}
         fake.leave_on = ()  # the next query is read as usual: the page is opened anew
         second = await harness.provider.search(_query(2), KALININSKY)
     finally:
         await harness.provider.close()
-    assert len(second.places) == 2
+    assert [place.external_id for place in second.places] == ["2gis_201", "2gis_202"]
 
 
 async def test_two_pages_left_in_one_run_stop_the_run_with_a_clear_reason() -> None:
     stat = "?stat=c3RhdA%3D%3D"
     fake = UrlRemote(
         pages={1: _doc_with([f"/spb/firm/101{stat}", f"/spb/firm/102{stat}"])},
-        cards=_cards("101", "102"),
-        leave_on=("/firm/102",),
+        cards=_cards("101", "102", "201", "202"),
+        leave_on=("/firm/102", "/firm/202"),
     )
     harness = Harness(fake)
     try:
         await harness.provider.search(AUTO, KALININSKY)  # the first time: the page is over, the run goes on
+        fake.pages = {1: _doc_with([f"/spb/firm/201{stat}", f"/spb/firm/202{stat}"])}
         with pytest.raises(ProviderFormatError, match="клик увёл со страницы поиска 2-й раз за сбор") as stopped:
             await harness.provider.search(_query(2), KALININSKY)
-        assert [place.external_id for place in stopped.value.partial] == ["2gis_101", "2gis_102"]
+        assert [place.external_id for place in stopped.value.partial] == ["2gis_201", "2gis_202"]
         assert harness.notes == []  # not a refusal of the site
     finally:
         await harness.provider.close()
