@@ -25,7 +25,7 @@ from src.database.models import CollectorState, ImportLog, Lead, ProviderState
 from src.database.repo import MAX_CONSECUTIVE_BLOCKS, get_collector_state, get_provider_states
 from src.services import pipeline
 from src.services.api_client import ProviderBlockedError
-from src.services.collector import load_collector_config
+from src.services.collector import CollectResult, load_collector_config
 from src.services.lead_file import parse_lead_file
 from src.services.providers.base import BaseMapProvider, RawPlace, SearchPage
 from src.services.providers.registry import ProviderSet
@@ -451,6 +451,16 @@ async def test_collect_passes_assisted_to_cdp_options(
         (True, True),
         (False, False),
     ]
+
+
+def test_skipped_targets_after_a_format_error_are_printed(capsys: pytest.CaptureFixture[str]) -> None:
+    report = MagicMock(
+        status="partial",
+        duration_seconds=1.0,
+        result=CollectResult(errors=1, format_errors=1, last_error="формат не распознан"),
+    )
+    collector_cli._print_outcome(collector_cli._Outcome(report=report))
+    assert "Пропущено целей из-за ошибки формата: 1. Последняя ошибка: формат не распознан" in capsys.readouterr().out
 
 
 # ---------- a server without its own collection ----------

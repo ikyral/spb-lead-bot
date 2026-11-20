@@ -122,9 +122,12 @@ class Settings(BaseSettings):
     # Нижний предел паузы 3 с задан здесь: меньше поставить нельзя.
     SCRAPER_CDP_MIN_DELAY_SECONDS: float = Field(default=3.0, ge=3.0)
     SCRAPER_CDP_MAX_DELAY_SECONDS: float = Field(default=8.0, ge=3.0)
-    # Считаются открытия страниц, клики по пагинации и каждая открытая карточка.
+    # Считаются только загрузки страниц поиска: первая страница цели и переход по пагинации.
     SCRAPER_CDP_MAX_PAGES_PER_RUN: int = Field(default=60, ge=1, le=200)
     SCRAPER_CDP_MAX_RESULTS_PER_RUN: int = Field(default=30, ge=1, le=300)
+    # Клики по карточкам за запуск, повторные попытки тоже. 0 = равно SCRAPER_CDP_MAX_RESULTS_PER_RUN;
+    # больше него не бывает: значение выше автоматически снижается до SCRAPER_CDP_MAX_RESULTS_PER_RUN.
+    SCRAPER_CDP_MAX_CARD_CLICKS_PER_RUN: int = Field(default=0, ge=0, le=300)
     SCRAPER_CDP_MIN_HOURS_BETWEEN_RUNS: float = Field(default=20.0, ge=0.0)
     SCRAPER_CDP_PAGE_TIMEOUT_SECONDS: float = Field(default=45.0, ge=5.0)
     # Пусто = найти Chrome автоматически.

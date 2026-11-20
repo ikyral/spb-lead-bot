@@ -430,7 +430,8 @@ async def test_an_unknown_search_page_is_not_a_block_and_keeps_the_interval_free
 
     result = await collect_leads(session_maker, [_provider(session)], _config())
 
-    assert FORMAT_TEXT in result.alerts
+    assert result.last_error == FORMAT_TEXT
+    assert result.format_errors == 1
     state = await _scraper_state(session_maker)
     assert state.consecutive_blocks == 0
     assert state.blocked_until is None

@@ -851,6 +851,20 @@ def test_collection_report_escapes_error_text() -> None:
     assert "В запасе: <b>7</b>" in text_
     assert "Страниц поиска: <b>4</b>\n• Карточек открыто: <b>9</b>" in text_
     assert "Запросов к API" not in text_
+    assert "ошибки формата" not in text_
+
+
+def test_collection_report_shows_format_errors_and_the_fuse() -> None:
+    report = MagicMock(
+        status="partial",
+        result=CollectResult(errors=2, format_errors=2, format_fuse_providers=["2gis_cdp"]),
+        duration_seconds=1.0,
+        pool_size=0,
+    )
+    text_ = format_collection_report(report)
+    assert "• Ошибок: <b>2</b>\n• Пропущено целей из-за ошибки формата: <b>2</b>" in text_
+    assert "2gis_cdp: сбор остановлен предохранителем" in text_
+    assert "это не блокировка" in text_
 
 
 async def test_notifier_sends_alerts_and_summary_to_all_admins_silently_at_night() -> None:

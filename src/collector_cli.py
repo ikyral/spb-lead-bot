@@ -162,6 +162,10 @@ def _print_outcome(outcome: _Outcome) -> None:
             f"подходит {result.qualified}, новых {result.saved_new}, дубликатов {result.duplicates}, "
             f"ошибок {result.errors}, страниц поиска {result.requests}."
         )
+        if result.format_errors:
+            print(
+                f"Пропущено целей из-за ошибки формата: {result.format_errors}. Последняя ошибка: {result.last_error}"
+            )
         for name, reason in result.skipped.items():
             print(f"Пропущен {name}: {reason}")
             if reason == REST_REASON:
