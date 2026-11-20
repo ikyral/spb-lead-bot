@@ -555,11 +555,57 @@ async def test_a_district_goes_into_the_search_as_a_name_with_the_word_district(
     fake = FakeRemote(page_info=("https://2gis.ru/spb/search/x", "Ничего не найдено — 2ГИС", "<html></html>"))
     harness = Harness(fake)
     try:
+        await harness.provider.search(QUERY, SearchArea(bbox=(59.9, 30.3, 59.95, 30.4), district="Невский"))
+    finally:
+        await harness.provider.close()
+    assert fake.navigations == [twogis_site.build_search_url("spb", "стоматология Невский район")]
+    assert "%D1%80%D0%B0%D0%B9%D0%BE%D0%BD" in fake.navigations[0]  # the word "район" itself
+
+
+async def test_an_ambiguous_district_gets_the_city_name() -> None:
+    fake = FakeRemote(page_info=("https://2gis.ru/spb/search/x", "Ничего не найдено — 2ГИС", "<html></html>"))
+    harness = Harness(fake)
+    try:
         await harness.provider.search(QUERY, SearchArea(bbox=(59.9, 30.3, 59.95, 30.4), district="Калининский"))
     finally:
         await harness.provider.close()
-    assert fake.navigations == [twogis_site.build_search_url("spb", "стоматология Калининский район")]
-    assert "%D1%80%D0%B0%D0%B9%D0%BE%D0%BD" in fake.navigations[0]  # the word "район" itself
+    assert fake.navigations == [twogis_site.build_search_url("spb", "стоматология Калининский район Санкт-Петербург")]
+    assert "%20" in fake.navigations[0] and "+" not in fake.navigations[0]
+    assert "/spb/search/" in fake.navigations[0]  # the city slug is unchanged
+
+
+@pytest.mark.parametrize("district", sorted(twogis_cdp.AMBIGUOUS_DISTRICTS))
+def test_only_the_districts_with_evidence_are_extended(district: str) -> None:
+    assert twogis_cdp.build_search_text("шаурма", district) == f"шаурма {district} район Санкт-Петербург"
+
+
+def test_other_districts_and_no_district_keep_the_text() -> None:
+    from src.services.providers.base import SPB_DISTRICTS
+
+    for district in set(SPB_DISTRICTS) - twogis_cdp.AMBIGUOUS_DISTRICTS:
+        assert twogis_cdp.build_search_text("шаурма", district) == f"шаурма {district} район"
+    assert twogis_cdp.build_search_text("шаурма", None) == "шаурма"
+    assert set(SPB_DISTRICTS) >= twogis_cdp.AMBIGUOUS_DISTRICTS
+
+
+def test_the_progress_key_does_not_depend_on_the_search_text() -> None:
+    from src.services.collector import SearchTarget, _progress_key
+
+    area = SearchArea(bbox=(59.97, 30.29, 60.09, 30.4), district="Выборгский")
+    harness = Harness(FakeRemote())
+    target = SearchTarget(query=QUERY, area=area)
+    before = _progress_key(harness.provider, target)
+    harness.provider._search_text = twogis_cdp.build_search_text(QUERY.text, area.district)
+    assert _progress_key(harness.provider, target) == before
+
+
+def test_pagination_url_uses_the_same_extended_text() -> None:
+    harness = Harness(FakeRemote())
+    text = twogis_cdp.build_search_text(QUERY.text, "Выборгский")
+    harness.provider._search_text = text
+    url = harness.provider._action_url(parsers.GateAction(kind="page", page=2))
+    assert url == twogis_site.build_search_url("spb", text, 2)
+    assert url is not None and url.endswith("/page/2") and "Санкт-Петербург" not in url  # percent-encoded
 
 
 async def test_an_area_without_a_district_adds_nothing() -> None:
@@ -694,7 +740,7 @@ async def test_the_log_says_which_page_was_opened_what_it_offers_and_what_each_c
     finally:
         await harness.provider.close()
     text = caplog.text
-    assert "Page opened: https://2gis.ru/spb/search/автосервис Калининский район, status 200" in text
+    assert "Page opened: https://2gis.ru/spb/search/автосервис Калининский район Санкт-Петербург, status 200" in text
     assert "Search page 1:" in text and "2 links to organizations (clicked)" in text
     assert "Card 1/2 (firm 101): read" in text and "Card 2/2 (firm 102): read" in text
     assert "Клиника" not in text  # no names of organizations in the log
