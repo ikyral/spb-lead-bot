@@ -2112,3 +2112,178 @@ async def test_two_redirects_to_another_city_move_the_cursor_on_and_count_no_blo
     assert result.format_fuse_providers == []
     assert len(fake.navigations) == 3  # the first target and its one re-open, then the second target
     assert harness.notes == []
+
+
+# ---------- a page not of 2GIS: logged in full, "Back" never leaves 2GIS, a failure page of the browser ----------
+
+
+def _history_tab(entries: list[str], current: int) -> Any:
+    from unittest.mock import MagicMock
+
+    tab = MagicMock()
+    tab._stopped.is_set.return_value = False
+    tab.Page.getNavigationHistory.return_value = {
+        "currentIndex": current,
+        "entries": [{"id": number + 1, "url": url} for number, url in enumerate(entries)],
+    }
+    return tab
+
+
+def _fake_pychrome(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = types.SimpleNamespace(CallMethodException=type("CallMethodException", (Exception,), {}))
+    monkeypatch.setitem(sys.modules, "pychrome", fake)
+
+
+@pytest.mark.parametrize(
+    "previous",
+    [
+        "https://api.ipify.org/?format=json",
+        "http://ip-api.com/json/?fields=countryCode",
+        "about:blank",
+        "chrome-error://chromewebdata/",
+        "",
+    ],
+)
+def test_back_is_not_pressed_when_the_previous_page_is_not_of_2gis(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, previous: str
+) -> None:
+    _fake_pychrome(monkeypatch)
+    chrome = ChromeRemote(parsers.ChromeOptions(), [])
+    tab = _history_tab([previous, "https://2gis.ru/pikalevo/search/x"], current=1)
+    chrome._chrome_tab = tab
+    with caplog.at_level("INFO"):
+        assert chrome.go_back() is False
+    tab.Page.navigateToHistoryEntry.assert_not_called()  # no navigation at all: no request anywhere
+    assert "Back is not pressed" in caplog.text
+    assert "format=json" not in caplog.text and "fields=" not in caplog.text
+
+
+def test_back_goes_to_a_previous_page_of_2gis(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_pychrome(monkeypatch)
+    chrome = ChromeRemote(parsers.ChromeOptions(), [])
+    tab = _history_tab(["https://api.ipify.org/", "https://2gis.ru/spb/search/x", "https://2gis.ru/spb/firm/1"], 2)
+    chrome._chrome_tab = tab
+    assert chrome.go_back() is True
+    tab.Page.navigateToHistoryEntry.assert_called_once_with(entryId=2)
+
+
+class HistoryRemote(UrlRemote):
+    """A tab whose "Back" is the real one of ChromeRemote over a history that starts with a page not of 2GIS."""
+
+    go_back = ChromeRemote.go_back
+    _require_tab = ChromeRemote._require_tab
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._chrome_tab = _history_tab(["https://api.ipify.org/?format=json", SPB_SEARCH], current=1)
+
+
+async def test_a_click_away_with_no_2gis_page_behind_ends_the_page_without_a_block(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _fake_pychrome(monkeypatch)
+    stat = "?stat=c3RhdA%3D%3D"
+    fake = HistoryRemote(
+        pages={1: _doc_with([f"/spb/firm/101{stat}", f"/spb/firm/102{stat}", f"/spb/firm/103{stat}"])},
+        cards=_cards("101", "102", "103"),
+        leave_on=("/firm/102",),
+    )
+    fake.url = SPB_SEARCH
+    harness = Harness(fake)
+    try:
+        with caplog.at_level("INFO"):
+            page = await harness.provider.search(AUTO, KALININSKY)
+    finally:
+        await harness.provider.close()
+    fake._chrome_tab.Page.navigateToHistoryEntry.assert_not_called()
+    assert "Back to the list: the list did not return" in caplog.text
+    assert [place.external_id for place in page.places] == ["2gis_101", "2gis_102"]
+    assert harness.notes == [] and "не с 2ГИС" not in caplog.text
+
+
+async def test_a_page_not_of_2gis_is_logged_with_its_path_status_and_title_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    page_info = ("https://user:secret@evil.example.com:8080/path/x?token=abc#frag", "Чужая страница", "<html></html>")
+    harness = Harness(FakeRemote(pages={1: _doc(["101"])}, page_info=page_info))
+    try:
+        with caplog.at_level("WARNING"), pytest.raises(ProviderBlockedError, match=r"не с 2ГИС \(evil\.example\.com\)"):
+            await harness.provider.search(QUERY, AREA)
+    finally:
+        await harness.provider.close()
+    warning = next(record for record in caplog.records if "a page not of 2GIS" in record.getMessage())
+    message = warning.getMessage()
+    assert warning.levelname == "WARNING"
+    assert "https://evil.example.com:8080/path/x" in message
+    assert "status 200" in message and "Чужая страница" in message
+    for secret in ("token", "abc", "frag", "user", "secret"):
+        assert secret not in message
+
+
+NETWORK_FAILURE_PAGES = [
+    ("chrome-error://chromewebdata/", "2gis.ru", "<html>ERR_PROXY_CONNECTION_FAILED</html>"),
+    ("chrome-error://chromewebdata/", "", ""),
+    ("https://2gis.ru/spb/search/x", "net::ERR_TUNNEL_CONNECTION_FAILED", ""),
+    ("https://2gis.ru/spb/search/x", "net::ERR_TIMED_OUT", ""),
+]
+
+
+@pytest.mark.parametrize("page_info", NETWORK_FAILURE_PAGES)
+async def test_a_network_failure_page_of_the_browser_is_no_connection_not_a_block(
+    page_info: tuple[str, str, str],
+) -> None:
+    harness = Harness(FakeRemote(pages={1: _doc(["101"])}, cards=_cards("101"), page_info=page_info))
+    try:
+        with pytest.raises(ProviderNoConnectionError):
+            await harness.provider.search(QUERY, AREA)
+    finally:
+        await harness.provider.close()
+    assert harness.notes == []
+    assert harness.provider._blocked is None
+
+
+@pytest.mark.parametrize("error", ["net::ERR_PROXY_CONNECTION_FAILED", "net::ERR_TUNNEL_CONNECTION_FAILED"])
+async def test_a_proxy_failure_of_the_document_is_no_connection(error: str) -> None:
+    class FailingRemote(FakeRemote):
+        def get_document_response(self) -> dict[str, Any]:
+            return {"status": -1, "statusText": f"error: {error}", "meta": {"type": "Document"}}
+
+    harness = Harness(FailingRemote(page_info=("chrome-error://chromewebdata/", "2gis.ru", "")))
+    try:
+        with pytest.raises(ProviderNoConnectionError):
+            await harness.provider.search(QUERY, AREA)
+    finally:
+        await harness.provider.close()
+    assert harness.notes == []
+
+
+def test_about_blank_is_not_a_network_failure_page() -> None:
+    assert parsers.is_network_error_page("about:blank", "") is False
+    assert parsers.is_network_error_page("https://2gis.ru/spb/search/x", "Стоматологии — 2ГИС") is False
+    assert parsers.is_network_error_page("https://2gis.ru/x", "net::ERR_ABORTED") is False
+    assert twogis_cdp.TwoGisCdpProvider._block_reason(PageSnapshot(None, "about:blank", "", "")) is None
+
+
+async def test_a_network_failure_page_counts_no_block_in_the_collector(memory_session_maker) -> None:
+    settings = _settings(COLLECT_QUERIES="dentist_clinic", COLLECT_DISTRICTS="Центральный")
+    fake = FakeRemote(pages={1: _doc(["101"])}, page_info=NETWORK_FAILURE_PAGES[0])
+    harness = Harness(fake, min_hours_between_runs=0)
+    await collect_leads(memory_session_maker, [harness.provider], load_collector_config(settings))
+    async with memory_session_maker() as session:
+        state = (await get_provider_states(session)).get("2gis_cdp")
+    assert state is None or (state.consecutive_blocks == 0 and state.blocked_until is None)
+    assert harness.notes == []
+
+
+@pytest.mark.parametrize("page_info", [FOREIGN_PAGE, CAPTCHA_PAGE])
+async def test_a_foreign_host_and_a_captcha_are_still_blocks_in_the_collector(
+    memory_session_maker, page_info: tuple[str, str, str]
+) -> None:
+    settings = _settings(COLLECT_QUERIES="dentist_clinic", COLLECT_DISTRICTS="Центральный")
+    fake = FakeRemote(pages={1: _doc(["101"])}, page_info=page_info)
+    harness = Harness(fake, min_hours_between_runs=0)
+    await collect_leads(memory_session_maker, [harness.provider], load_collector_config(settings))
+    async with memory_session_maker() as session:
+        state = (await get_provider_states(session))["2gis_cdp"]
+    assert state.consecutive_blocks == 1 and state.blocked_until is not None
+    assert fake.clicks == []

@@ -34,7 +34,7 @@ from src.services.api_client import (
     ProviderUnavailableError,
 )
 from src.services.scraper.snapshot import PageSnapshot
-from src.services.scraper.twogis_site import is_site_response
+from src.services.scraper.twogis_site import is_site_response, page_address
 
 from .exceptions import ChromeException, ChromePathNotFound, ChromeRuntimeException, ProxyError
 from .filters import IN_BUILDING_URL_PATTERN, ITEM_RESPONSE_PATTERN
@@ -94,7 +94,13 @@ _NETWORK_ERROR_MARKERS: tuple[str, ...] = (
     "ERR_ADDRESS_UNREACHABLE",
     "ERR_NETWORK_CHANGED",
     "ERR_TIMED_OUT",
+    "ERR_PROXY_CONNECTION_FAILED",
+    "ERR_TUNNEL_CONNECTION_FAILED",
+    "ERR_SOCKS_CONNECTION_FAILED",
 )
+# The page Chrome shows when a page could not be loaded at all: chrome-error://chromewebdata/, net::ERR_* in its title.
+_NETWORK_ERROR_PAGE_SCHEME = "chrome-error:"
+_NETWORK_ERROR_TEXT_RE = re.compile(r"net::ERR_(?!ABORTED)")
 _FATAL_RUNTIME_MARKERS: tuple[str, ...] = (
     "Tab has been stopped",
     "CDP tab connection stopped",
@@ -127,6 +133,17 @@ class _GateStopped(Exception):
     """The gate refused an action that the reading cannot do without."""
 
 
+class _NetworkErrorPage(ChromeException):
+    """The tab shows the page of a network failure of the browser: no connection, not a refusal of the site."""
+
+
+def is_network_error_page(url: str, title: str) -> bool:
+    """Is this the page Chrome shows when nothing could be loaded (chrome-error://, net::ERR_*)? about:blank is not."""
+    if url.startswith(_NETWORK_ERROR_PAGE_SCHEME):
+        return True
+    return bool(_NETWORK_ERROR_TEXT_RE.search(url) or _NETWORK_ERROR_TEXT_RE.search(title))
+
+
 def _translate_chrome_error(exc: ChromeException) -> Exception:
     """Map low-level Chrome CDP exceptions to the provider error hierarchy."""
     if isinstance(exc, ProxyError):
@@ -136,7 +153,7 @@ def _translate_chrome_error(exc: ChromeException) -> Exception:
     if isinstance(exc, ChromeRuntimeException):
         return ProviderUnavailableError(str(exc))
     message = str(exc)
-    if any(marker in message for marker in _NETWORK_ERROR_MARKERS):
+    if isinstance(exc, _NetworkErrorPage) or any(marker in message for marker in _NETWORK_ERROR_MARKERS):
         return ProviderNoConnectionError(NO_CONNECTION_TEXT)
     return ProviderTemporaryError(message or "ошибка Chrome CDP")
 
@@ -343,6 +360,14 @@ def _check_snapshot_block(
         reason = block_checker(snapshot)
         if reason is not None:
             return snapshot, reason
+    if is_network_error_page(snapshot.final_url, snapshot.title):
+        logger.warning(
+            "The browser shows a network failure page: %s, status %s, title %r",
+            page_address(snapshot.final_url),
+            status,
+            snapshot.title[:120],
+        )
+        raise _NetworkErrorPage("the browser shows a network failure page")
     if status is not None and status < 0:
         return snapshot, "сетевая ошибка при загрузке страницы 2ГИС"
     if status in (401, 403, 429):

@@ -64,6 +64,23 @@ def is_site_response(url: str) -> bool:
     return bool(_SITE_HOST_RE.match(urlsplit(url).netloc))
 
 
+def page_address(url: str) -> str:
+    """Scheme, host and path of a page for the log: no login or password, no query, no fragment."""
+    parts = urlsplit(url)
+    try:
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        port = ""
+    host = parts.hostname or ""
+    return f"{parts.scheme}://{host}{port}{parts.path}" if parts.scheme else parts.path
+
+
+def page_host(url: str) -> str:
+    """The host of a page (without a login or a port), or its scheme if it has none: 'example.com', 'chrome-error'."""
+    parts = urlsplit(url)
+    return parts.hostname or parts.scheme or "?"
+
+
 def first_firm_number(html: str) -> str | None:
     """
     A link to some organization in the text of a page, only for the diagnostics to have a card to open.
