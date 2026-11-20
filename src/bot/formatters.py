@@ -39,6 +39,7 @@ from src.bot.texts import (
     PLAN_TITLE,
     REMIND_LINE,
     REQUEST_FILE_HINT,
+    RETURNED_MARK,
     TEAM_EMPTY,
     TEAM_LINE,
     TEAM_OPERATOR_MARK,
@@ -255,14 +256,27 @@ def _card_link_line(lead: Lead) -> str | None:
     return None
 
 
-def _issued_card(lead: Lead, field_limit: int, max_links: int, with_outreach: bool) -> str:
+def _batch_header(position: tuple[int, int] | None) -> list[str]:
+    """Page indicator above a card in a multi-lead batch; empty for a single card."""
+    if position is None or position[1] <= 1:
+        return []
+    return [f"📦 <b>Лид {position[0]} из {position[1]}</b>", ""]
+
+
+def _issued_card(
+    lead: Lead,
+    field_limit: int,
+    max_links: int,
+    with_outreach: bool,
+    position: tuple[int, int] | None = None,
+) -> str:
     def field(value: str) -> str:
         return html.escape(value[:field_limit])
 
     category = lead.rubric or str(TARGET_CATEGORIES.get(lead.category, {}).get("title", lead.category))
     # A link to 2GIS is on the button under the message, see get_issued_lead_keyboard.
     on_button = twogis_card_url(lead.source_url) is not None
-    lines = [f"🏢 <b>{field(lead.name)}</b>", f"🏷 <b>Рубрика:</b> {field(category)}"]
+    lines = [*_batch_header(position), f"🏢 <b>{field(lead.name)}</b>", f"🏷 <b>Рубрика:</b> {field(category)}"]
     if lead.address:
         lines.append(f"📫 <b>Адрес:</b> {field(lead.address)}")
     if lead.phone:
@@ -295,15 +309,21 @@ def _issued_card(lead: Lead, field_limit: int, max_links: int, with_outreach: bo
     return "\n".join(lines)
 
 
-def format_issued_lead(lead: Lead) -> str:
+def format_issued_lead(lead: Lead, position: tuple[int, int] | None = None) -> str:
     """Format a handed-out lead: everything needed to contact the organization, within Telegram's limit."""
     text = ""
     # Shorter fields first, then fewer links, then no ready message: the contacts matter more than the text.
     for field_limit, max_links, with_outreach in _CARD_VARIANTS:
-        text = _issued_card(lead, field_limit, max_links, with_outreach)
+        text = _issued_card(lead, field_limit, max_links, with_outreach, position=position)
         if len(text) <= MAX_MESSAGE_LENGTH:
             break
     return text
+
+
+def format_returned_lead(name: str, position: tuple[int, int] | None = None) -> str:
+    """Format a handed-out lead card after it was returned to the pool."""
+    lines = [*_batch_header(position), f"🏢 <b>{html.escape(name[:_CARD_FIELD_LIMIT])}</b>", RETURNED_MARK]
+    return "\n".join(lines)
 
 
 def _contact_title(link: ContactLink) -> str:

@@ -1,3 +1,4 @@
+import json
 from collections import Counter
 from contextlib import suppress
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ from src.database.models import (
     Base,
     CollectorState,
     ImportLog,
+    IssuedBatch,
     Lead,
     ProviderState,
     SearchProgress,
@@ -456,6 +458,72 @@ async def return_undelivered_leads(session: AsyncSession, lead_ids: list[int]) -
         .values(crm_status=STATUS_NEW, issued_at=None, issued_to_user_id=None)
     )
     await session.commit()
+
+
+def _parse_batch_lead_ids(raw: str) -> list[int] | None:
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(parsed, list) or not all(isinstance(item, int) and not isinstance(item, bool) for item in parsed):
+        return None
+    return parsed
+
+
+async def create_issued_batch(session: AsyncSession, lead_ids: list[int]) -> int:
+    """Save the ordered lead IDs of a browsable batch message and return its ID."""
+    batch = IssuedBatch(lead_ids=json.dumps(lead_ids))
+    session.add(batch)
+    await session.commit()
+    return batch.id
+
+
+async def get_issued_batch(session: AsyncSession, batch_id: int) -> list[int] | None:
+    """Return the ordered lead IDs of a browsable batch, or None if missing."""
+    batch = await session.get(IssuedBatch, batch_id)
+    if batch is None:
+        return None
+    return _parse_batch_lead_ids(batch.lead_ids)
+
+
+async def update_issued_batch(session: AsyncSession, batch_id: int, lead_ids: list[int]) -> None:
+    """Replace the lead IDs of a batch (deleting the row if no leads remain)."""
+    batch = await session.get(IssuedBatch, batch_id)
+    if batch is None:
+        return
+    if not lead_ids:
+        await session.delete(batch)
+    else:
+        batch.lead_ids = json.dumps(lead_ids)
+    await session.commit()
+
+
+async def remove_lead_from_batch(
+    session: AsyncSession, batch_id: int, lead_id: int
+) -> tuple[list[int], int] | None:
+    """Remove a returned lead from its batch. Returns (remaining_ids, old_index), or None if not found."""
+    batch = await session.get(IssuedBatch, batch_id)
+    if batch is None:
+        return None
+    lead_ids = _parse_batch_lead_ids(batch.lead_ids)
+    if lead_ids is None or lead_id not in lead_ids:
+        return None
+    old_index = lead_ids.index(lead_id)
+    remaining = [item for item in lead_ids if item != lead_id]
+    if remaining:
+        batch.lead_ids = json.dumps(remaining)
+    else:
+        await session.delete(batch)
+    await session.commit()
+    return remaining, old_index
+
+
+async def delete_issued_batch(session: AsyncSession, batch_id: int) -> None:
+    """Delete an unused batch row (e.g. when sending the message failed)."""
+    batch = await session.get(IssuedBatch, batch_id)
+    if batch is not None:
+        await session.delete(batch)
+        await session.commit()
 
 
 # ---------- ownership: who works a handed-out lead, and until when ----------

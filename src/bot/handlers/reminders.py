@@ -13,14 +13,14 @@ from src.bot.chats import is_group_chat
 from src.bot.digest import DailyDigest
 from src.bot.formatters import (
     format_followup,
-    format_issued_lead,
     format_msk_date,
     format_plan,
     format_team,
     format_user_label,
     owned_by_text,
 )
-from src.bot.keyboards import STALE_BUTTON_TEXT, get_issued_lead_keyboard
+from src.bot.handlers.issue import load_batch_position, render_issued_card
+from src.bot.keyboards import STALE_BUTTON_TEXT, parse_batch_token
 from src.bot.texts import (
     DIGEST_DONE_MARK,
     DIGEST_LATER_DAYS,
@@ -63,27 +63,47 @@ def _parse(data: str | None, prefix: str) -> tuple[int, str] | None:
     return int(parts[1]), parts[2]
 
 
+def _parse_remind(data: str | None) -> tuple[int, int, int | None] | None:
+    """'rm:<lead id>:<days>' or 'rm:<lead id>:<days>:b<batch id>', or None for a stale or forged button."""
+    parts = (data or "").split(":")
+    if len(parts) not in (3, 4) or parts[0] != "rm":
+        return None
+    if not (parts[1].isascii() and parts[1].isdigit() and parts[2].isascii() and parts[2].isdigit()):
+        return None
+    days = int(parts[2])
+    if days not in REMIND_DAYS:
+        return None
+    batch_id: int | None = None
+    if len(parts) == 4:
+        batch_id = parse_batch_token(parts[3])
+        if batch_id is None:
+            return None
+    return int(parts[1]), days, batch_id
+
+
 @router.callback_query(F.data.startswith("rm:"))
 async def handle_remind(callback: CallbackQuery) -> None:
     """'⏰ 1 д / 3 д / 7 д' under a card: set the reminder, a second press replaces it."""
-    parsed = _parse(callback.data, "rm")
-    if parsed is None or not parsed[1].isdigit() or int(parsed[1]) not in REMIND_DAYS:
+    parsed = _parse_remind(callback.data)
+    if parsed is None:
         await callback.answer(STALE_BUTTON_TEXT, show_alert=True)
         return
-    lead_id, days = parsed[0], int(parsed[1])
+    lead_id, days, batch_id = parsed
     remind_at = datetime.now(UTC) + timedelta(days=days)
     # One quick write before the answer: the answer must not promise a reminder that was not saved.
     async with async_session_maker() as session:
         lead = await set_remind_at(session, lead_id, remind_at)
+        batch = await load_batch_position(session, batch_id, lead_id) if lead is not None else None
     if lead is None:
         await callback.answer(REMIND_IMPOSSIBLE_TOAST, show_alert=True)
         return
     await callback.answer(REMIND_SET_TOAST.format(date=format_msk_date(remind_at)))
     if isinstance(callback.message, Message):
+        text, markup = render_issued_card(lead, batch)
         try:
             await callback.message.edit_text(
-                format_issued_lead(lead),
-                reply_markup=get_issued_lead_keyboard(lead),
+                text,
+                reply_markup=markup,
                 parse_mode="HTML",
                 link_preview_options=_NO_PREVIEW,
             )

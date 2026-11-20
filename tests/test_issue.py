@@ -23,10 +23,12 @@ from src.bot.formatters import (
     format_request_usage,
 )
 from src.bot.handlers import collector as collector_handlers
-from src.bot.handlers import issue, leads
+from src.bot.handlers import issue, leads, reminders
 from src.bot.keyboards import (
+    BATCH_NOOP_CALLBACK,
     LEAD_OUTCOMES,
     STALE_BUTTON_TEXT,
+    BatchPosition,
     get_issued_lead_keyboard,
     get_lead_status_keyboard,
     get_main_menu_keyboard,
@@ -48,6 +50,7 @@ from src.database.models import (
 from src.database.repo import (
     count_issued_leads,
     count_new_leads,
+    get_issued_batch,
     get_status_counts,
     init_db,
     issue_next_leads,
@@ -204,17 +207,29 @@ def _cards(message: MagicMock) -> list:
     return [call for call in message.answer.await_args_list if call.kwargs.get("reply_markup") is not None]
 
 
+def _batch_id_of(card_call) -> int:
+    markup = card_call.kwargs["reply_markup"]
+    for row in markup.inline_keyboard:
+        for button in row:
+            data = button.callback_data or ""
+            if data.startswith("lb:") and data != BATCH_NOOP_CALLBACK:
+                return int(data.split(":")[1])
+    raise AssertionError("No batch navigation button found")
+
+
 @pytest.fixture
 def batch_env(session_maker, monkeypatch: pytest.MonkeyPatch):
-    """Handlers use the module-level session maker; pauses are removed."""
+    """Handlers use the module-level session maker."""
     monkeypatch.setattr(issue, "async_session_maker", session_maker)
-    monkeypatch.setattr(issue, "MESSAGE_PAUSE_SECONDS", 0)
+    monkeypatch.setattr(reminders, "async_session_maker", session_maker)
     monkeypatch.setattr(
         issue,
         "settings",
         Settings(_env_file=None, BOT_TOKEN="t", ADMIN_TG_ID=1, LEADS_BATCH_SIZE=3, LEADS_MAX_NICHE_SHARE=1),
     )
     issue._issuing_to.clear()
+    issue._issuing_users.clear()
+    issue._phone_prompts.clear()
     return session_maker
 
 
@@ -226,10 +241,14 @@ async def test_button_sends_a_full_batch_with_status_buttons(batch_env) -> None:
     await issue.handle_next_batch(message, runner)
 
     cards = _cards(message)
-    assert len(cards) == 3
+    assert len(cards) == 1
+    assert "Лид 1 из 3" in cards[0].args[0]
     assert "Организация 1" in cards[0].args[0]
-    assert "Организация 3" in cards[2].args[0]
     assert cards[0].kwargs["parse_mode"] == "HTML"
+    nav_row = cards[0].kwargs["reply_markup"].inline_keyboard[-1]
+    assert [button.text for button in nav_row] == ["·", "1 / 3", "➡️"]
+    batch_id = _batch_id_of(cards[0])
+    assert nav_row[2].callback_data == f"lb:{batch_id}:1"
     assert "Выдано лидов: <b>3</b>" in _final_text(message)
     assert "В запасе: <b>2</b>" in _final_text(message)
     runner.request_topup.assert_not_awaited()
@@ -279,12 +298,14 @@ async def test_two_admins_pressing_at_once_get_different_leads(batch_env) -> Non
         issue.handle_next_batch(second, _runner()),
     )
 
-    def names(message: MagicMock) -> set[str]:
-        return {call.args[0].split("</b>")[0] for call in _cards(message)}
-
-    assert len(names(first)) == 3
-    assert len(names(second)) == 3
-    assert not names(first) & names(second)
+    assert len(_cards(first)) == 1
+    assert len(_cards(second)) == 1
+    async with batch_env() as session:
+        first_ids = set(await get_issued_batch(session, _batch_id_of(_cards(first)[0])) or [])
+        second_ids = set(await get_issued_batch(session, _batch_id_of(_cards(second)[0])) or [])
+    assert len(first_ids) == 3
+    assert len(second_ids) == 3
+    assert not first_ids & second_ids
 
 
 async def test_pressing_the_button_makes_no_requests_to_external_sources(batch_env) -> None:
@@ -319,7 +340,8 @@ async def test_short_batch_gives_what_is_left_and_tells_about_collection(batch_e
 
     await issue.handle_next_batch(message, runner)
 
-    assert len(_cards(message)) == 2
+    assert len(_cards(message)) == 1
+    assert "Лид 1 из 2" in _cards(message)[0].args[0]
     assert "Выдано лидов: <b>2</b>" in _final_text(message)
     assert expected in _final_text(message)
     runner.request_topup.assert_awaited_once_with("batch")
@@ -351,19 +373,20 @@ async def test_network_failure_returns_undelivered_leads_to_the_pool(batch_env) 
     message = _message()
     calls = 0
 
-    async def fail_on_second_card(*args, **kwargs):
+    async def fail_on_card(*args, **kwargs):
         nonlocal calls
         calls += 1
-        if calls == 2:
+        if calls == 1:
             raise TelegramNetworkError(method=MagicMock(spec=SendMessage), message="no network")
 
-    message.answer = AsyncMock(side_effect=fail_on_second_card)
+    message.answer = AsyncMock(side_effect=fail_on_card)
     await issue.handle_next_batch(message, _runner())
 
     async with batch_env() as session:
-        assert await count_issued_leads(session) == 1
-        assert await count_new_leads(session) == 2
-    assert "Не удалось отправить: <b>2</b>" in _final_text(message)
+        assert await count_issued_leads(session) == 0
+        assert await count_new_leads(session) == 3
+        assert await get_issued_batch(session, 1) is None
+    assert "Не удалось отправить: <b>3</b>" in _final_text(message)
 
 
 async def test_cancelled_delivery_returns_undelivered_leads(batch_env) -> None:
@@ -424,6 +447,185 @@ async def test_card_refused_by_telegram_does_not_block_the_rest(batch_env) -> No
     async with batch_env() as session:
         assert await count_issued_leads(session) == 2
         assert await count_new_leads(session) == 1
+    card = next(call for call in _cards(message) if "Организация 1" not in call.args[0])
+    assert "Лид 1 из 2" in card.args[0]
+    assert "Организация 2" in card.args[0]
+
+
+# ---------- browsing a batch left and right ----------
+
+
+async def test_browsing_a_batch_left_and_right_switches_cards_in_one_message(batch_env) -> None:
+    await _add_leads(batch_env, 3)
+    message = _message()
+    await issue.handle_next_batch(message, _runner())
+    batch_id = _batch_id_of(_cards(message)[0])
+
+    # Flip right to 2 / 3
+    cb_second = _status_callback(f"lb:{batch_id}:1")
+    await issue.handle_batch_page(cb_second)
+    cb_second.answer.assert_awaited_once_with()
+    edit = cb_second.message.edit_text.await_args
+    assert "Лид 2 из 3" in edit.args[0]
+    assert "Организация 2" in edit.args[0]
+    nav = edit.kwargs["reply_markup"].inline_keyboard[-1]
+    assert [(b.text, b.callback_data) for b in nav] == [
+        ("⬅️", f"lb:{batch_id}:0"),
+        ("2 / 3", BATCH_NOOP_CALLBACK),
+        ("➡️", f"lb:{batch_id}:2"),
+    ]
+
+    # Flip right to 3 / 3 (last page disables the right arrow)
+    cb_third = _status_callback(f"lb:{batch_id}:2")
+    await issue.handle_batch_page(cb_third)
+    edit = cb_third.message.edit_text.await_args
+    assert "Лид 3 из 3" in edit.args[0]
+    assert "Организация 3" in edit.args[0]
+    nav = edit.kwargs["reply_markup"].inline_keyboard[-1]
+    assert [(b.text, b.callback_data) for b in nav] == [
+        ("⬅️", f"lb:{batch_id}:1"),
+        ("3 / 3", BATCH_NOOP_CALLBACK),
+        ("·", BATCH_NOOP_CALLBACK),
+    ]
+
+    # Flip back left to 2 / 3
+    cb_back = _status_callback(f"lb:{batch_id}:1")
+    await issue.handle_batch_page(cb_back)
+    assert "Организация 2" in cb_back.message.edit_text.await_args.args[0]
+
+    # Tapping the counter or disabled arrow only answers without editing
+    cb_noop = _status_callback(BATCH_NOOP_CALLBACK)
+    await issue.handle_batch_page(cb_noop)
+    cb_noop.answer.assert_awaited_once_with()
+    cb_noop.message.edit_text.assert_not_awaited()
+
+
+async def test_single_lead_batch_has_no_pagination_row(batch_env) -> None:
+    await _add_leads(batch_env, 1)
+    message = _message()
+    await issue.handle_next_batch(message, _runner())
+
+    card = _cards(message)[0]
+    assert "Лид 1 из" not in card.args[0]
+    all_callbacks = [b.callback_data or "" for row in card.kwargs["reply_markup"].inline_keyboard for b in row]
+    assert not any(data.startswith("lb:") for data in all_callbacks)
+
+
+async def test_actions_on_a_batch_card_keep_pagination_buttons(batch_env) -> None:
+    await _add_leads(batch_env, 3)
+    message = _message()
+    await issue.handle_next_batch(message, _runner())
+    batch_id = _batch_id_of(_cards(message)[0])
+    async with batch_env() as session:
+        lead_ids = await get_issued_batch(session, batch_id)
+    assert lead_ids is not None and len(lead_ids) == 3
+    second_id = lead_ids[1]
+
+    # Status change keeps 2 / 3 pagination
+    cb_status = _status_callback(f"ls:{second_id}:{CONTACT_CONTACTED}:b{batch_id}")
+    await issue.handle_lead_status(cb_status)
+    edit = cb_status.message.edit_text.await_args
+    assert "Лид 2 из 3" in edit.args[0]
+    assert [b.text for b in edit.kwargs["reply_markup"].inline_keyboard[-1]] == ["⬅️", "2 / 3", "➡️"]
+
+    # Reminder keeps 2 / 3 pagination
+    cb_remind = _status_callback(f"rm:{second_id}:3:b{batch_id}")
+    await reminders.handle_remind(cb_remind)
+    edit = cb_remind.message.edit_text.await_args
+    assert "Лид 2 из 3" in edit.args[0]
+    assert "Напомню:" in edit.args[0]
+    assert [b.text for b in edit.kwargs["reply_markup"].inline_keyboard[-1]] == ["⬅️", "2 / 3", "➡️"]
+
+    # Site verdict keeps 2 / 3 pagination
+    cb_verdict = _status_callback(f"sv:{second_id}:no:b{batch_id}")
+    await issue.handle_site_verdict(cb_verdict)
+    edit = cb_verdict.message.edit_text.await_args
+    assert "Лид 2 из 3" in edit.args[0]
+    assert [b.text for b in edit.kwargs["reply_markup"].inline_keyboard[-1]] == ["⬅️", "2 / 3", "➡️"]
+
+    # Adding a phone keeps 2 / 3 pagination on the card message
+    cb_phone = _status_callback(f"lp:{second_id}:b{batch_id}")
+    cb_phone.message.chat = Chat(id=1, type="private")
+    cb_phone.message.message_id = 500
+    cb_phone.message.answer = AsyncMock(return_value=MagicMock(message_id=777))
+    await issue.handle_add_phone(cb_phone)
+
+    reply = _message()
+    reply.text = "+7 921 000-00-02"
+    reply.reply_to_message = MagicMock(message_id=777)
+    reply.bot = MagicMock()
+    reply.bot.edit_message_text = AsyncMock()
+    await issue.handle_phone_reply(reply)
+    edited = reply.bot.edit_message_text.await_args
+    assert "Лид 2 из 3" in edited.args[0]
+    assert "+79210000002" in edited.args[0]
+    assert [b.text for b in edited.kwargs["reply_markup"].inline_keyboard[-1]] == ["⬅️", "2 / 3", "➡️"]
+
+
+async def test_returning_a_lead_in_a_batch_advances_to_the_next_and_cleans_up_the_last(batch_env) -> None:
+    await _add_leads(batch_env, 2)
+    message = _message()
+    await issue.handle_next_batch(message, _runner())
+    batch_id = _batch_id_of(_cards(message)[0])
+    async with batch_env() as session:
+        first_id, second_id = (await get_issued_batch(session, batch_id)) or []
+
+    # Return lead 1: message switches to lead 2 (now the sole remaining lead in the batch)
+    cb_first = _status_callback(f"lr:{first_id}:b{batch_id}")
+    await issue.handle_return_to_pool(cb_first)
+    cb_first.answer.assert_awaited_once_with("Лид возвращён в пул")
+    edit = cb_first.message.edit_text.await_args
+    assert "Организация 2" in edit.args[0]
+    assert "Лид 1 из" not in edit.args[0]
+
+    # Return the last remaining lead: shows 'Возвращён в пул' with no keyboard and removes the batch
+    cb_second = _status_callback(f"lr:{second_id}:b{batch_id}")
+    await issue.handle_return_to_pool(cb_second)
+    edit = cb_second.message.edit_text.await_args
+    assert "Возвращён в пул" in edit.args[0]
+    assert edit.kwargs["reply_markup"] is None
+    async with batch_env() as session:
+        assert await get_issued_batch(session, batch_id) is None
+
+
+async def test_flipping_to_a_lead_returned_elsewhere_keeps_navigation_buttons(batch_env) -> None:
+    await _add_leads(batch_env, 2)
+    message = _message()
+    await issue.handle_next_batch(message, _runner())
+    batch_id = _batch_id_of(_cards(message)[0])
+    async with batch_env() as session:
+        _, second_id = (await get_issued_batch(session, batch_id)) or []
+        await return_undelivered_leads(session, [second_id])
+
+    cb = _status_callback(f"lb:{batch_id}:1")
+    await issue.handle_batch_page(cb)
+    edit = cb.message.edit_text.await_args
+    assert "Лид 2 из 2" in edit.args[0]
+    assert "Возвращён в пул" in edit.args[0]
+    rows = edit.kwargs["reply_markup"].inline_keyboard
+    assert len(rows) == 1
+    assert [b.text for b in rows[0]] == ["⬅️", "2 / 2", "·"]
+
+
+@pytest.mark.parametrize("data", ["lb:", "lb:abc:0", "lb:1:-1", "lb:1", "lb:1:0:extra", "lb:999:0"])
+async def test_stale_or_forged_batch_navigation_is_rejected(batch_env, data: str) -> None:
+    cb = _status_callback(data)
+    await issue.handle_batch_page(cb)
+    cb.answer.assert_awaited_once_with(STALE_BUTTON_TEXT, show_alert=True)
+    cb.message.edit_text.assert_not_awaited()
+
+
+def test_batch_keyboard_callback_data_fits_telegram_limits() -> None:
+    keyboard = get_lead_status_keyboard(
+        12345678,
+        CONTACT_CONTACTED,
+        can_add_phone=True,
+        search_url="https://yandex.ru/search/?text=x",
+        batch=BatchPosition(batch_id=9876543, index=14, total=30),
+    )
+    buttons = [button for row in keyboard.inline_keyboard for button in row if button.callback_data]
+    assert all(len(button.callback_data.encode()) <= 64 for button in buttons)
+    assert [b.text for b in keyboard.inline_keyboard[-1]] == ["⬅️", "15 / 30", "➡️"]
 
 
 # ---------- card and status buttons ----------
@@ -461,6 +663,7 @@ def test_card_never_exceeds_the_telegram_limit() -> None:
     huge = "&" * 3000
     lead = _lead(1, name=huge, address=huge, phone=huge, email=huge, socials=huge, raw_website=huge)
     assert len(format_issued_lead(lead)) <= MAX_MESSAGE_LENGTH
+    assert len(format_issued_lead(lead, position=(12, 30))) <= MAX_MESSAGE_LENGTH
 
 
 def test_status_keyboard_marks_the_current_status_and_fits_telegram_limits() -> None:
@@ -913,6 +1116,7 @@ ROLLBACK_SCHEMA = [
     "ALTER TABLE leads DROP COLUMN reserved_by",
     "ALTER TABLE leads DROP COLUMN reserved_until",
     "DROP TABLE import_log",
+    "DROP TABLE issued_batches",
     "DROP TABLE collector_state",
     "DROP TABLE provider_state",
     "DROP TABLE search_progress",
@@ -951,7 +1155,7 @@ async def test_upgrade_keeps_data_is_repeatable_and_old_leads_join_the_queue(old
     await _mark_checked(old_database)
 
     assert await _columns(old_database) >= NEW_COLUMNS
-    assert {"collector_state", "provider_state"} <= await _tables(old_database)
+    assert {"collector_state", "provider_state", "issued_batches"} <= await _tables(old_database)
 
     session_maker = async_sessionmaker(old_database, expire_on_commit=False, class_=AsyncSession)
     async with session_maker() as session:
@@ -973,7 +1177,7 @@ async def test_documented_rollback_restores_the_old_schema(old_database) -> None
             await conn.execute(text(statement))
 
     assert await _columns(old_database) == before
-    assert not {"collector_state", "provider_state"} & await _tables(old_database)
+    assert not {"collector_state", "provider_state", "issued_batches"} & await _tables(old_database)
     async with old_database.connect() as conn:
         rows = (await conn.execute(text("SELECT crm_status FROM leads ORDER BY id"))).scalars().all()
     assert rows == ["in_work", "in_work"]

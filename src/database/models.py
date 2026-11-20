@@ -213,3 +213,14 @@ class CollectorState(Base):
     scraper_check_runs: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
     # The day (in COLLECT_TIMEZONE, ISO format) the morning plan went out: a restart must not send it again.
     digest_sent_on: Mapped[str | None] = mapped_column(String(10), nullable=True, default=None)
+
+
+class IssuedBatch(Base):
+    """A batch of leads shown in one browsable message: its ordered lead IDs survive restarts."""
+
+    __tablename__ = "issued_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # JSON array of lead IDs in display order, e.g. "[10, 12, 15]".
+    lead_ids: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=lambda: datetime.now(UTC))

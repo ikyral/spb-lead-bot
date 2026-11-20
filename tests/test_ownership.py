@@ -671,6 +671,7 @@ OPERATOR_EVENTS = [
     (None, "sv:1:yes"),
     (None, "lp:1"),
     (None, "lr:1"),
+    (None, "lb:1:1"),
     (None, "lead:1:work:0"),
 ]
 
