@@ -21,9 +21,11 @@ from src.database.repo import (
     get_known_external_ids_by_prefix,
     get_provider_states,
     get_search_progress,
+    record_network_failure_run,
     record_provider_block,
     record_provider_run,
     record_provider_success,
+    reset_network_failure_streak,
     restore_provider_run,
     save_provider_cursors,
     save_search_progress,
@@ -62,6 +64,9 @@ MAX_CONSECUTIVE_FAILURES: int = 3
 # or this many in one run end the run for the provider: the page or the code needs checking.
 MAX_FORMAT_ERRORS_IN_A_ROW: int = 2
 MAX_FORMAT_ERRORS_PER_RUN: int = 3
+# Runs in a row ending with a network error (2GIS may be cutting connections softly) before a pause, and its length.
+NETWORK_FAILURE_RUNS_BEFORE_PAUSE: int = 3
+NETWORK_FAILURE_PAUSE_HOURS: float = 6.0
 # Cron numbers the weekdays from Sunday (0 or 7), APScheduler from Monday.
 _CRON_WEEKDAYS: tuple[str, ...] = ("sun", "mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _WEEKDAY_NUMBER_RE = re.compile(r"(?<![/\d])[0-7](?!\d)")
@@ -248,6 +253,8 @@ def unavailable_reason(provider: RunRules, state: ProviderState | None, now: dat
         return f"отключён {cause}({state.last_block_reason}), нужно ручное включение"
     if state.blocked_until is not None and now < state.blocked_until:
         return f"пауза после блокировки ({state.last_block_reason})"
+    if state.network_paused_until is not None and now < state.network_paused_until:
+        return f"пауза после повторных сетевых сбоев (до {_format_time(state.network_paused_until)})"
     allowed_at = interval_ends_at(provider, state)
     if allowed_at is not None and now < allowed_at and not provider.ignore_interval:
         return REST_REASON
@@ -269,6 +276,9 @@ class _Collection:
         self.config = config
         self.session_maker = session_maker
         self.succeeded: set[str] = set()
+        # Providers that got at least one search page, and those stopped by a network error, in this run.
+        self.pages_received: set[str] = set()
+        self.network_failed: set[str] = set()
         self.max_requests = max_requests
         self.result = CollectResult()
         self.places: list[RawPlace] = []
@@ -332,6 +342,8 @@ class _Collection:
             except ProviderStoppedError as exc:
                 self._add_places(exc.partial, collected)
                 self._stop_provider(provider, exc)
+                if isinstance(exc, ProviderNoConnectionError):
+                    self.network_failed.add(provider.name)
                 # A problem on our side of the network says nothing about the target: try it again.
                 return any_page_succeeded or not isinstance(exc, ProviderNoConnectionError)
             except ProviderAuthError as exc:
@@ -366,6 +378,7 @@ class _Collection:
             self.failures_in_a_row[provider.name] = 0
             self.format_errors_in_a_row[provider.name] = 0
             self.succeeded.add(provider.name)
+            self.pages_received.add(provider.name)
             if search_page.warning:
                 logger.warning("Provider %s: %s", provider.name, search_page.warning)
                 self.alert(search_page.warning)
@@ -484,6 +497,31 @@ class _Collection:
                 self.seen_ids.add(place.external_id)
                 self.places.append(normalize_place(place))
         return collected
+
+    async def record_network_streaks(self, session: AsyncSession) -> None:
+        """
+        Once per run: a received page resets the streak of network failures; a run without pages that ended
+        with a network error extends it, and from NETWORK_FAILURE_RUNS_BEFORE_PAUSE on the provider is paused.
+        """
+        for name in sorted(self.pages_received):
+            await reset_network_failure_streak(session, name)
+        for name in sorted(self.network_failed - self.pages_received):
+            state = await record_network_failure_run(
+                session, name, NETWORK_FAILURE_RUNS_BEFORE_PAUSE, NETWORK_FAILURE_PAUSE_HOURS
+            )
+            if state.network_failure_streak < NETWORK_FAILURE_RUNS_BEFORE_PAUSE:
+                logger.info(
+                    "Provider %s: %d run(s) in a row ended with a network error", name, state.network_failure_streak
+                )
+                continue
+            text = (
+                f"{name}: {state.network_failure_streak} запусков подряд закончились сетевой ошибкой; возможна "
+                f"«мягкая» защита 2ГИС, это не блокировка (счётчик блокировок не менялся). Пауза "
+                f"{NETWORK_FAILURE_PAUSE_HOURS:g} ч, до {_format_time(state.network_paused_until)}, проверьте "
+                f"вручную. Снять паузу раньше: /provider_on {name}"
+            )
+            logger.warning("Provider paused after network failures: %s", text)
+            self.alert(text)
 
     async def _handle_block(self, provider: BaseMapProvider, error: ProviderBlockedError) -> None:
         """Stop right away, tell the admins, and do not come back for hours."""
@@ -637,6 +675,7 @@ async def collect_leads(
             await restore_provider_run(session, name, state.last_run_at if state is not None else None)
         for name in collection.succeeded:
             await record_provider_success(session, name)
+        await collection.record_network_streaks(session)
         stats = await save_collected_places(session, collection.places)
         await save_search_progress(session, list(collection.new_progress.values()))
         await save_provider_cursors(session, cursors_to_save)

@@ -184,6 +184,12 @@ def _print_outcome(outcome: _Outcome) -> None:
                 f"{name}: отключён {cause}({state.last_block_reason}). "
                 f"Включить вручную: python collect_cli.py --enable-provider {name}"
             )
+        elif not _blocked_now(state):
+            print(
+                f"{name}: пауза после повторных сетевых сбоев (не блокировка), повтор не раньше "
+                f"{_local_time(state.network_paused_until)}. Снять раньше: "
+                f"python collect_cli.py --enable-provider {name}"
+            )
         else:
             print(
                 f"{name}: {state.last_block_reason}, повтор не раньше {_local_time(state.blocked_until)}. "
@@ -191,13 +197,19 @@ def _print_outcome(outcome: _Outcome) -> None:
             )
 
 
+def _blocked_now(state: ProviderState) -> bool:
+    return state.blocked_until is not None and datetime.now(UTC) < state.blocked_until
+
+
+def _network_paused_now(state: ProviderState) -> bool:
+    return state.network_paused_until is not None and datetime.now(UTC) < state.network_paused_until
+
+
 def _refused_providers(states: dict[str, ProviderState], names: Sequence[str]) -> dict[str, ProviderState]:
-    now = datetime.now(UTC)
     return {
         name: state
         for name, state in states.items()
-        if name in names
-        and (state.disabled_at is not None or (state.blocked_until is not None and now < state.blocked_until))
+        if name in names and (state.disabled_at is not None or _blocked_now(state) or _network_paused_now(state))
     }
 
 

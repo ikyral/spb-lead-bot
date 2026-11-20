@@ -118,6 +118,8 @@ NEW_PROVIDER_COLUMNS: tuple[str, ...] = (
     "requests_day",
     "requests_day_used",
     "cursor",
+    "network_failure_streak",
+    "network_paused_until",
 )
 # Blocks in a row after which a provider stays off until an admin turns it on.
 MAX_CONSECUTIVE_BLOCKS: int = 3
@@ -132,7 +134,10 @@ def _add_missing_columns(sync_conn: Connection) -> None:
         for name in names:
             if name not in existing:
                 ddl_type = model.__table__.c[name].type.compile(dialect=sync_conn.dialect)
-                sync_conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {name} {ddl_type}"))
+                ddl = f"ALTER TABLE {table_name} ADD COLUMN {name} {ddl_type}"
+                if name == "network_failure_streak":
+                    ddl += " NOT NULL DEFAULT 0"
+                sync_conn.execute(text(ddl))
                 if name == "contact_status":
                     _move_contact_results_out_of_crm_status(sync_conn)
                 elif name == "requests_total":
@@ -1309,6 +1314,30 @@ async def record_provider_block(session: AsyncSession, name: str, reason: str, b
     return state
 
 
+async def record_network_failure_run(
+    session: AsyncSession, name: str, runs_before_pause: int, pause_hours: float
+) -> ProviderState:
+    """
+    Count one more run in a row that ended with a network error; from `runs_before_pause` on, pause the provider.
+
+    Blocks are not touched: consecutive_blocks, blocked_until and last_block_reason stay as they are.
+    """
+    state = await _provider_state(session, name)
+    state.network_failure_streak = (state.network_failure_streak or 0) + 1
+    if state.network_failure_streak >= runs_before_pause:
+        state.network_paused_until = datetime.now(UTC) + timedelta(hours=pause_hours)
+    await session.commit()
+    return state
+
+
+async def reset_network_failure_streak(session: AsyncSession, name: str) -> None:
+    """A search page came through: network failures are no longer 'in a row'. The pause itself is left alone."""
+    state = await session.get(ProviderState, name)
+    if state is not None and state.network_failure_streak:
+        state.network_failure_streak = 0
+        await session.commit()
+
+
 async def disable_provider(session: AsyncSession, name: str, reason: str) -> ProviderState:
     """Switch a provider off until an admin turns it on or its key is replaced."""
     state = await _provider_state(session, name)
@@ -1339,10 +1368,12 @@ async def spend_daily_request(session: AsyncSession, name: str, day: str, ceilin
 
 
 async def enable_provider(session: AsyncSession, name: str) -> None:
-    """An admin's decision: forget the blocks and the pause."""
+    """An admin's decision: forget the blocks and the pauses."""
     state = await _provider_state(session, name)
     state.consecutive_blocks = 0
     state.blocked_until = None
+    state.network_failure_streak = 0
+    state.network_paused_until = None
     state.disabled_at = None
     await session.commit()
 

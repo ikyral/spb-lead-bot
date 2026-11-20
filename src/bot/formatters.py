@@ -813,6 +813,11 @@ def _provider_line(name: str, state: ProviderState | None, now: datetime) -> str
         return f"⛔ {safe_name}: отключён {cause}({reason}). Включить: /provider_on {safe_name}"
     if state.blocked_until is not None and now < state.blocked_until:
         return f"⏸ {safe_name}: пауза до {format_msk_time(state.blocked_until)} ({reason})"
+    if state.network_paused_until is not None and now < state.network_paused_until:
+        return (
+            f"⏸ {safe_name}: пауза после повторных сетевых сбоев до {format_msk_time(state.network_paused_until)} "
+            f"(не блокировка). Снять: /provider_on {safe_name}"
+        )
     return f"✅ {safe_name}"
 
 
