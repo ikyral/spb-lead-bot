@@ -467,6 +467,13 @@ class TwoGisCdpProvider(BaseMapProvider):
     def _raise_if_network_page(result: ScrapedSearchResult, places: list[RawPlace]) -> None:
         """A page of a network failure of the browser (chrome-error://, net::ERR_*) is no connection, not a refusal."""
         snapshot = result.snapshot
+        # A sign of a block always wins: the refusal path decides about such a page as before.
+        if twogis_site.detect_block(snapshot.status, snapshot.final_url, snapshot.title, snapshot.html) is not None:
+            return
+        if snapshot.final_url.startswith(("http://", "https://")) and not twogis_site.is_site_response(
+            snapshot.final_url
+        ):
+            return
         if result.blocked_reason is not None or not is_network_error_page(snapshot.final_url, snapshot.title):
             return
         logger.warning(

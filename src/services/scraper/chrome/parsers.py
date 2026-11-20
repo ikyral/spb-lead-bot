@@ -141,7 +141,10 @@ def is_network_error_page(url: str, title: str) -> bool:
     """Is this the page Chrome shows when nothing could be loaded (chrome-error://, net::ERR_*)? about:blank is not."""
     if url.startswith(_NETWORK_ERROR_PAGE_SCHEME):
         return True
-    return bool(_NETWORK_ERROR_TEXT_RE.search(url) or _NETWORK_ERROR_TEXT_RE.search(title))
+    # The text of the address is never searched; a title counts only on no page, a page of the browser, or 2GIS.
+    if not _NETWORK_ERROR_TEXT_RE.search(title):
+        return False
+    return not url or not url.startswith(("http://", "https://")) or is_site_response(url)
 
 
 def _translate_chrome_error(exc: ChromeException) -> Exception:
@@ -360,6 +363,8 @@ def _check_snapshot_block(
         reason = block_checker(snapshot)
         if reason is not None:
             return snapshot, reason
+    if status in (401, 403, 429):
+        return snapshot, f"2ГИС вернул HTTP {status}"
     if is_network_error_page(snapshot.final_url, snapshot.title):
         logger.warning(
             "The browser shows a network failure page: %s, status %s, title %r",
@@ -370,8 +375,6 @@ def _check_snapshot_block(
         raise _NetworkErrorPage("the browser shows a network failure page")
     if status is not None and status < 0:
         return snapshot, "сетевая ошибка при загрузке страницы 2ГИС"
-    if status in (401, 403, 429):
-        return snapshot, f"2ГИС вернул HTTP {status}"
     return snapshot, None
 
 

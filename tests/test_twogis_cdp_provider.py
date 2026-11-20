@@ -2287,3 +2287,61 @@ async def test_a_foreign_host_and_a_captcha_are_still_blocks_in_the_collector(
         state = (await get_provider_states(session))["2gis_cdp"]
     assert state.consecutive_blocks == 1 and state.blocked_until is not None
     assert fake.clicks == []
+
+
+# ---------- a sign of a block always wins over a page that only looks like a network failure ----------
+
+CAPTCHA_WITH_ERR_TITLE = ("https://2gis.ru/spb/search/x", "net::ERR_TIMED_OUT", "<div class='g-recaptcha'></div>")
+CAPTCHA_HOST_WITH_ERR = ("https://captcha.2gis.ru/form?e=net::ERR_TIMED_OUT", "2GIS Captcha", "<html></html>")
+FOREIGN_WITH_ERR_TITLE = ("https://evil.example.com/", "net::ERR_TIMED_OUT", "<html></html>")
+FOREIGN_WITH_ERR_QUERY = ("https://evil.example.com/?e=net::ERR_TIMED_OUT", "Пример", "<html></html>")
+
+
+def test_net_err_in_the_address_or_on_a_foreign_host_is_not_a_network_failure_page() -> None:
+    assert (
+        parsers.is_network_error_page("https://evil.example.com/?e=net::ERR_TIMED_OUT", "net::ERR_TIMED_OUT") is False
+    )
+    assert parsers.is_network_error_page("https://2gis.ru/spb/search/x?e=net::ERR_TIMED_OUT", "2ГИС") is False
+    assert parsers.is_network_error_page("", "net::ERR_TIMED_OUT") is True
+    assert parsers.is_network_error_page("chrome-error://chromewebdata/", "") is True
+
+
+@pytest.mark.parametrize(
+    "page_info", [CAPTCHA_WITH_ERR_TITLE, CAPTCHA_HOST_WITH_ERR, FOREIGN_WITH_ERR_TITLE, FOREIGN_WITH_ERR_QUERY]
+)
+def test_the_network_check_of_a_result_leaves_a_block_to_the_refusal_path(page_info: tuple[str, str, str]) -> None:
+    snapshot = PageSnapshot(200, *page_info)
+    result = ScrapedSearchResult(snapshot=snapshot, items=[], has_more=False)
+    TwoGisCdpProvider._raise_if_network_page(result, [])  # no NoConnection: nothing is raised
+
+
+@pytest.mark.parametrize(
+    "page_info", [CAPTCHA_WITH_ERR_TITLE, CAPTCHA_HOST_WITH_ERR, FOREIGN_WITH_ERR_TITLE, FOREIGN_WITH_ERR_QUERY]
+)
+async def test_a_captcha_or_a_foreign_host_with_net_err_text_stays_a_block_in_the_collector(
+    memory_session_maker, page_info: tuple[str, str, str]
+) -> None:
+    settings = _settings(COLLECT_QUERIES="dentist_clinic", COLLECT_DISTRICTS="Центральный")
+    fake = FakeRemote(pages={1: _doc(["101"])}, page_info=page_info)
+    harness = Harness(fake, min_hours_between_runs=0)
+    await collect_leads(memory_session_maker, [harness.provider], load_collector_config(settings))
+    async with memory_session_maker() as session:
+        state = (await get_provider_states(session))["2gis_cdp"]
+    assert state.consecutive_blocks == 1 and state.blocked_until is not None
+    assert harness.notes and fake.clicks == []
+
+
+@pytest.mark.parametrize(
+    "page_info",
+    [
+        ("https://2gis.ru/spb/search/x", "net::ERR_TIMED_OUT", ""),
+        ("chrome-error://chromewebdata/", "2gis.ru", ""),
+    ],
+)
+@pytest.mark.parametrize("status", [401, 403, 429])
+def test_a_refusing_status_with_a_network_looking_page_stays_a_block(
+    page_info: tuple[str, str, str], status: int
+) -> None:
+    fake = FakeRemote(page_info=page_info)
+    _, reason = parsers._check_snapshot_block(fake, status, None)  # type: ignore[arg-type]
+    assert reason == f"2ГИС вернул HTTP {status}"
