@@ -37,6 +37,7 @@ from src.services.api_client import (
     ProviderProxyError,
     ProviderQuotaError,
     ProviderStoppedError,
+    ProviderTemporaryError,
     ProviderUnavailableError,
 )
 from src.services.normalize import normalize_place
@@ -286,7 +287,7 @@ class _Collection:
         page succeeded, or it failed with an error that is about this target (format error, other
         provider error), so retrying it every run would stall the cursor forever.
         Returns False when retrying the same target is right: block, proxy or connection problem,
-        key/quota/availability problem, exhausted budget, or the target was not tried.
+        temporary network/server error, key/quota/availability problem, exhausted budget, or the target was not tried.
         """
         collected = 0
         any_page_succeeded = False
@@ -324,6 +325,12 @@ class _Collection:
                 return any_page_succeeded
             except (ProviderQuotaError, ProviderUnavailableError) as exc:
                 self._stop_provider(provider, exc)
+                return any_page_succeeded
+            except ProviderTemporaryError as exc:
+                # Our side (network, 5xx, browser) failed, not the target: try it again next run.
+                logger.warning("Provider %s failed on %s: %s", provider.name, target.query.category, exc)
+                self.record_error(str(exc))
+                self._count_failure(provider, str(exc))
                 return any_page_succeeded
             except ProviderError as exc:
                 logger.warning("Provider %s failed on %s: %s", provider.name, target.query.category, exc)

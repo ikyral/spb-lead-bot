@@ -23,6 +23,8 @@ from src.services.api_client import (
     ProviderNoConnectionError,
     ProviderProxyError,
     ProviderQuotaError,
+    ProviderResponseError,
+    ProviderStoppedError,
     ProviderTemporaryError,
 )
 from src.services.collector import MAX_CONSECUTIVE_FAILURES, _progress_key, collect_leads, load_collector_config
@@ -747,4 +749,26 @@ async def test_a_target_with_a_page_and_then_an_error_moves_the_cursor_on(sessio
 
     config = _cursor_config(COLLECT_MAX_REQUESTS_PER_RUN=2)
     await collect_leads(session_maker, [PageThenFormatError(name="2gis_cdp")], config)
+    assert await _cursor_of(session_maker, "2gis_cdp") == 1
+
+
+async def test_temporary_error_keeps_the_cursor(session_maker, no_site_checks, caplog) -> None:
+    config = _cursor_config()
+    provider = FakeProvider(error=ProviderTemporaryError("сеть"), name="2gis_cdp")
+    with caplog.at_level("WARNING"):
+        result = await collect_leads(session_maker, [provider], config)
+    assert result.errors == MAX_CONSECUTIVE_FAILURES
+    assert await _cursor_of(session_maker, "2gis_cdp") == 0
+    assert len([r for r in caplog.records if "failed on" in r.getMessage()]) == MAX_CONSECUTIVE_FAILURES
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ProviderResponseError("bad answer"), KeyError("bug"), ProviderStoppedError("stopped")],
+)
+async def test_target_bound_errors_move_the_cursor_on(session_maker, no_site_checks, error) -> None:
+    config = _cursor_config(COLLECT_MAX_REQUESTS_PER_RUN=1)
+    provider = FakeProvider(error=error, name="2gis_cdp")
+    result = await collect_leads(session_maker, [provider], config)
+    assert result.errors == 1
     assert await _cursor_of(session_maker, "2gis_cdp") == 1
