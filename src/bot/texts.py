@@ -241,3 +241,5 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
         ),
     ),
 )
+
+FOREIGN_CITY_DROPPED_LINE: str = "• Отсеяно не из СПб: <b>{count}</b>"
