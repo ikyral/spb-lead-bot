@@ -1391,7 +1391,7 @@ class ProviderReset:
 
     @property
     def nothing_paused(self) -> bool:
-        return not (self.blocks_reset or self.network_reset or self.everything)
+        return not (self.blocks_reset or self.network_reset)
 
 
 async def reset_provider_pause(session: AsyncSession, name: str, *, everything: bool = False) -> ProviderReset:
@@ -1401,7 +1401,9 @@ async def reset_provider_pause(session: AsyncSession, name: str, *, everything: 
     With `everything` both parts are cleared whatever they hold (the old behavior of enable_provider).
     last_block_reason and last_block_at stay as history, as in enable_provider.
     """
-    state = await _provider_state(session, name)
+    state = await session.get(ProviderState, name)
+    if state is None:
+        return ProviderReset(everything=everything)
     blocks_active = bool(state.consecutive_blocks) or state.blocked_until is not None or state.disabled_at is not None
     network_active = bool(state.network_failure_streak) or state.network_paused_until is not None
     outcome = ProviderReset(
@@ -1411,6 +1413,8 @@ async def reset_provider_pause(session: AsyncSession, name: str, *, everything: 
         network_before=state.network_failure_streak or 0,
         everything=everything,
     )
+    if not (outcome.blocks_reset or outcome.network_reset):
+        return outcome
     if outcome.blocks_reset:
         state.consecutive_blocks = 0
         state.blocked_until = None

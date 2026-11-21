@@ -69,6 +69,15 @@ async def test_all_resets_everything_even_a_clean_part(session_maker) -> None:
     assert not outcome.nothing_paused
 
 
+@pytest.mark.parametrize("everything", [False, True])
+async def test_no_row_means_no_write(session_maker, everything: bool) -> None:
+    async with session_maker() as session:
+        outcome = await reset_provider_pause(session, NAME, everything=everything)
+    assert outcome.nothing_paused
+    async with session_maker() as session:
+        assert NAME not in await get_provider_states(session)
+
+
 async def _run(args: str | None, outcome: ProviderReset) -> tuple[MagicMock, str]:
     runner = MagicMock()
     runner.known_provider = MagicMock(side_effect=lambda name: name == NAME)
