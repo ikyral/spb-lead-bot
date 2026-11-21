@@ -21,7 +21,7 @@ from src.config import settings
 from src.database.models import CONTACT_REJECTED, STATUS_NEW, STATUS_REJECTED, Lead
 from src.database.repo import get_leads_by_external_ids
 from src.services.chains import load_chain_index
-from src.services.checker import analyze_website, create_check_client
+from src.services.checker import DEAD_SITE_CRASH_DETAILS, analyze_website, create_check_client
 from src.services.contact_links import (
     SOURCE_2GIS,
     ContactLink,
@@ -193,7 +193,7 @@ async def _check_sites(records: list[EnrichRecord]) -> dict[str, tuple[str, str 
             except Exception:
                 # The same as in the pipeline. The address is not logged: it comes from a file.
                 logger.exception("Website check crashed")
-                return record.external_id, (SITE_DEAD, "Website check error")
+                return record.external_id, (SITE_DEAD, DEAD_SITE_CRASH_DETAILS)
 
     async with create_check_client() as client:
         return dict(await asyncio.gather(*(check(client, record) for record in records)))

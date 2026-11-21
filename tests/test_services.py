@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from src.services import checker
-from src.services.checker import SOCIAL_DOMAINS, analyze_website, is_social_domain
+from src.services.checker import DEAD_SITE_NETWORK_DETAILS, SOCIAL_DOMAINS, analyze_website, is_social_domain
 from src.services.scorer import calculate_lead_score, is_high_margin_category
 
 # --- Scorer Tests ---
@@ -241,7 +241,7 @@ async def test_analyze_website_dead_site_exceptions() -> None:
     transport_timeout = httpx.MockTransport(mock_handler_timeout)
     async with httpx.AsyncClient(transport=transport_timeout) as client:
         res = await analyze_website("https://timeout-site.ru", client=client)
-        assert res == ("dead_site", "HTTP/Connection error")
+        assert res == ("dead_site", DEAD_SITE_NETWORK_DETAILS)
 
     def mock_handler_connect_error(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("Failed to resolve host", request=request)
@@ -249,7 +249,7 @@ async def test_analyze_website_dead_site_exceptions() -> None:
     transport_connect = httpx.MockTransport(mock_handler_connect_error)
     async with httpx.AsyncClient(transport=transport_connect) as client:
         res = await analyze_website("https://unreachable-host.ru", client=client)
-        assert res == ("dead_site", "HTTP/Connection error")
+        assert res == ("dead_site", DEAD_SITE_NETWORK_DETAILS)
 
     # Malformed URL
     res_malformed = await analyze_website("https://::invalid::url")
@@ -267,7 +267,7 @@ async def test_analyze_website_total_timeout_marks_dead(monkeypatch: pytest.Monk
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(hanging_handler)) as client:
         res = await asyncio.wait_for(analyze_website("https://slow-site.ru", client=client), timeout=2)
-    assert res == ("dead_site", "HTTP/Connection error")
+    assert res == ("dead_site", DEAD_SITE_NETWORK_DETAILS)
 
 
 @pytest.mark.asyncio
@@ -369,7 +369,7 @@ async def test_analyze_website_schemeless_dead_on_both_schemes() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         res = await analyze_website("no-such-domain-spb.ru", client=client)
-    assert res == ("dead_site", "HTTP/Connection error")
+    assert res == ("dead_site", DEAD_SITE_NETWORK_DETAILS)
     assert requested == ["https", "http"]
 
 
@@ -384,7 +384,7 @@ async def test_analyze_website_no_http_fallback_after_timeout_or_explicit_https(
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(timeout_handler)) as client:
         res = await analyze_website("slow-host.ru", client=client)
-    assert res == ("dead_site", "HTTP/Connection error")
+    assert res == ("dead_site", DEAD_SITE_NETWORK_DETAILS)
     assert requested == ["https://slow-host.ru"]
 
     requested.clear()
@@ -395,7 +395,7 @@ async def test_analyze_website_no_http_fallback_after_timeout_or_explicit_https(
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(ssl_error_handler)) as client:
         res = await analyze_website("https://explicit-https.ru", client=client)
-    assert res == ("dead_site", "HTTP/Connection error")
+    assert res == ("dead_site", DEAD_SITE_NETWORK_DETAILS)
     assert requested == ["https://explicit-https.ru"]
 
 

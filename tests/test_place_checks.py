@@ -5,6 +5,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy import inspect, select
 from sqlalchemy.exc import OperationalError
@@ -426,3 +427,99 @@ async def test_a_card_dropped_as_not_from_spb_is_neither_a_lead_nor_a_check(
         await pipeline.save_collected_places(session, places, record_checks_for={place.external_id for place in places})
     assert {lead.external_id for lead in await _leads(session_maker)} == {"2gis_1", "2gis_3"}  # Zelenogorsk is SPb
     assert set(await _checks(session_maker)) == {"1", "3"}  # the Moscow-region firm "2" is not remembered
+
+
+# ---------- a site that did not answer is not remembered ----------
+
+
+def _mock_check_client(monkeypatch: pytest.MonkeyPatch, handler: Any) -> None:
+    """The real checker over a stub transport: no network."""
+    monkeypatch.setattr(
+        pipeline, "create_check_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+
+
+def _answers(request: httpx.Request) -> httpx.Response:
+    host = request.url.host
+    if host == "timeout.example":
+        raise httpx.ConnectTimeout("timed out", request=request)
+    if host == "refused.example":
+        raise httpx.ConnectError("Connection refused", request=request)
+    if host == "dns.example":
+        raise httpx.ConnectError("Failed to resolve host", request=request)
+    if host == "ssl.example":
+        raise httpx.ConnectError("SSL: CERTIFICATE_VERIFY_FAILED", request=request)
+    if host == "gone.example":
+        return httpx.Response(404, request=request)
+    if host == "broken.example":
+        return httpx.Response(500, request=request)
+    return httpx.Response(200, request=request)
+
+
+@pytest.mark.parametrize("host", ["timeout", "refused", "dns", "ssl"])
+async def test_a_site_that_did_not_answer_is_a_lead_but_not_remembered(
+    session_maker: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, host: str
+) -> None:
+    _mock_check_client(monkeypatch, _answers)
+    place = _place(1, f"https://{host}.example")
+    with caplog.at_level(logging.INFO, logger="src.services.pipeline"):
+        async with session_maker() as session:
+            stats = await pipeline.save_collected_places(session, [place], record_checks_for={place.external_id})
+    assert stats["saved_new"] == 1
+    assert {lead.external_id: lead.site_status for lead in await _leads(session_maker)} == {
+        place.external_id: SITE_DEAD
+    }
+    assert await _checks(session_maker) == {}
+    assert "the site did not answer: 1" in caplog.text
+    assert f"{host}.example" not in caplog.text
+
+
+async def test_a_crashed_check_is_a_lead_but_not_remembered(
+    session_maker: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def crash(url: str | None, client: Any = None) -> tuple[str, str | None]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(pipeline, "analyze_website", crash)
+    place = _place(1, "https://crash.example")
+    async with session_maker() as session:
+        stats = await pipeline.save_collected_places(session, [place], record_checks_for={place.external_id})
+    assert stats["saved_new"] == 1
+    assert [lead.site_status for lead in await _leads(session_maker)] == [SITE_DEAD]
+    assert await _checks(session_maker) == {}
+
+
+async def test_real_http_errors_and_invalid_urls_stay_remembered_the_rest_is_unchanged(
+    session_maker: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _mock_check_client(monkeypatch, _answers)
+    places = [
+        _place(1, "https://gone.example"),
+        _place(2, "https://broken.example"),
+        _place(3, "https://::invalid::url"),
+        _place(4, "https://works.example"),
+        _place(5, None),
+        _place(6, "https://timeout.example"),
+    ]
+    with caplog.at_level(logging.INFO, logger="src.services.pipeline"):
+        async with session_maker() as session:
+            await pipeline.save_collected_places(
+                session, places, record_checks_for={place.external_id for place in places}
+            )
+    rows = await _checks(session_maker)
+    assert {firm: row.site_status for firm, row in rows.items()} == {
+        "1": SITE_DEAD,
+        "2": SITE_DEAD,
+        "3": SITE_DEAD,
+        "4": SITE_HAS_SITE,
+        "5": SITE_NO_SITE,
+    }
+    leads = {lead.external_id: lead.site_status for lead in await _leads(session_maker)}
+    assert leads == {
+        "2gis_1_hash": SITE_DEAD,
+        "2gis_2_hash": SITE_DEAD,
+        "2gis_3_hash": SITE_DEAD,
+        "2gis_5_hash": SITE_NO_SITE,
+        "2gis_6_hash": SITE_DEAD,
+    }
+    assert "the site did not answer: 1" in caplog.text
