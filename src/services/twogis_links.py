@@ -20,6 +20,13 @@ _READABLE_CARD_HOSTS: frozenset[str] = frozenset({"2gis.ru", "www.2gis.ru"})
 _CARD_PATH_RE = re.compile(r"(?:/[a-z0-9][a-z0-9_-]*)?/firm/([0-9]+)/?", re.ASCII)
 
 
+def firm_id_of(external_id: str) -> str:
+    """The number of a 2GIS organization in an external_id `2gis_<number>[_<hash>]`; '' for other sources."""
+    if not external_id.startswith("2gis_"):
+        return ""
+    return external_id.removeprefix("2gis_").split("_", 1)[0]
+
+
 def build_card_url(city_slug: str, firm_id: object) -> str | None:
     """
     Public organization card: https://2gis.ru/<city>/firm/<number>, or None if it cannot be built.

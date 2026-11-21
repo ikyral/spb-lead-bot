@@ -2,15 +2,22 @@
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
-from src.database.repo import find_existing_external_ids, get_lead_fingerprints, save_new_leads
+from src.database.repo import (
+    PlaceCheckData,
+    find_existing_external_ids,
+    get_lead_fingerprints,
+    save_new_leads,
+    save_place_checks,
+)
 from src.services.chains import load_chain_index, refresh_chain_flags
 from src.services.checker import analyze_website, create_check_client
 from src.services.dedup import DuplicateIndex, merge_duplicate_places
@@ -26,6 +33,7 @@ from src.services.site_status import (
     confidence_of_check,
     source_of_status,
 )
+from src.services.twogis_links import firm_id_of
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +84,7 @@ async def _process_and_save_places(
     progress: ProgressCallback | None = None,
     extra_fields: dict[str, Any] | None = None,
     seen: list[RawPlace] | None = None,
+    record_checks_for: Collection[str] = (),
 ) -> dict[str, int]:
     """
     Verify places concurrently, score them, and persist qualified leads.
@@ -84,6 +93,8 @@ async def _process_and_save_places(
     a qualified place matching an already saved lead counts as a duplicate.
     `progress` is notified after every check; its errors never break the harvest.
     `seen` is everything this run has seen, also what is not saved, for counting branches of chains.
+    Places whose external_id is in `record_checks_for` are remembered in place_checks with the status they got,
+    whatever the outcome; that is written after the leads, so a failure there never loses them.
     """
     total_found = len(places)
     # Before merging: branches with one phone for the whole chain would become one place.
@@ -127,6 +138,7 @@ async def _process_and_save_places(
     duplicates_skipped = 0
     leads_to_save: list[dict[str, Any]] = []
     chains_to_save: list[dict[str, Any]] = []
+    checks_to_save: list[PlaceCheckData] = []
 
     known_leads = await _load_known_leads(session)
     chains = await load_chain_index(session, settings)
@@ -150,6 +162,16 @@ async def _process_and_save_places(
             high_margin=place.high_margin,
             small_chain=chains.branches(place.name) == 2,
         )
+        if place.external_id in record_checks_for and (firm_id := firm_id_of(place.external_id)):
+            checks_to_save.append(
+                PlaceCheckData(
+                    firm_id=firm_id,
+                    category=place.category,
+                    district=place.district,
+                    query_text=place.query_text,
+                    site_status=site_status,
+                )
+            )
 
         if not is_worth_saving(site_status, score):
             _log_place(place, "not-a-lead", _why_not(site_status, score, place))
@@ -203,6 +225,7 @@ async def _process_and_save_places(
     marked = await refresh_chain_flags(session, chains)
     if saved_chains or marked:
         logger.info("Chains: %d saved aside, %d earlier leads marked", saved_chains, marked)
+    await _record_place_checks(session, checks_to_save)
 
     return {
         "total_found": total_found,
@@ -212,14 +235,31 @@ async def _process_and_save_places(
     }
 
 
+async def _record_place_checks(session: AsyncSession, checks: list[PlaceCheckData]) -> None:
+    """The leads are already committed: a failure here costs only the statistics and the skipping."""
+    if not checks:
+        return
+    try:
+        inserted, updated = await save_place_checks(session, checks)
+    except SQLAlchemyError:
+        await session.rollback()
+        logger.exception("Could not remember %d checked organizations in place_checks", len(checks))
+        return
+    logger.info("Checked organizations remembered: %d new, %d checked again", inserted, updated)
+
+
 async def save_collected_places(
-    session: AsyncSession, places: list[RawPlace], extra_fields: dict[str, Any] | None = None
+    session: AsyncSession,
+    places: list[RawPlace],
+    extra_fields: dict[str, Any] | None = None,
+    record_checks_for: Collection[str] = (),
 ) -> dict[str, int]:
     """
     Verify, score and save places from automatic collection.
 
     Runs repeat, so most places are already known: they are skipped before the website
     check and never touched, whatever happened to the lead (issued, contacted, rejected).
+    Checked places whose external_id is in `record_checks_for` are remembered in place_checks.
     """
     merged = merge_duplicate_places(places)
     known_ids = await find_existing_external_ids(session, [place.external_id for place in merged])
@@ -234,7 +274,9 @@ async def save_collected_places(
         logger.info(
             "Already in the database, not checked again: %d of %d places", len(merged) - len(fresh), len(merged)
         )
-    stats = await _process_and_save_places(session, fresh, extra_fields=extra_fields, seen=places)
+    stats = await _process_and_save_places(
+        session, fresh, extra_fields=extra_fields, seen=places, record_checks_for=record_checks_for
+    )
     stats["total_found"] = len(places)
     stats["duplicates_skipped"] += len(places) - len(fresh)
     return stats

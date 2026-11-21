@@ -18,6 +18,7 @@ from src.database.repo import (
     MAX_CONSECUTIVE_BLOCKS,
     get_known_external_ids_by_prefix,
     get_provider_states,
+    get_recently_checked_firm_ids,
     record_network_failure_run,
     record_provider_block,
     record_provider_run,
@@ -92,6 +93,8 @@ class CollectorConfig:
     max_requests_per_day: int
     block_backoff_hours: float = 6.0
     recheck_days: int = 30
+    # A firm whose site 2gis_cdp checked (place_checks) is not clicked again for this long.
+    site_recheck_days: int = 30
 
 
 def _split(value: str) -> list[str]:
@@ -187,6 +190,7 @@ def load_collector_config(settings: Settings) -> CollectorConfig:
         max_requests_per_day=settings.COLLECT_MAX_REQUESTS_PER_DAY,
         block_backoff_hours=settings.SCRAPER_BLOCK_BACKOFF_HOURS,
         recheck_days=settings.COLLECT_RECHECK_DAYS,
+        site_recheck_days=settings.SITE_RECHECK_DAYS,
     )
 
 
@@ -275,6 +279,8 @@ class _Collection:
         self.result = CollectResult()
         self.places: list[RawPlace] = []
         self.seen_ids: set[str] = set()
+        # external_ids of places from providers that remember their checks (place_checks).
+        self.checked_ids: set[str] = set()
         self.failures_in_a_row: dict[str, int] = {}
         self.format_errors_in_a_row: dict[str, int] = {}
         self.format_errors_total: dict[str, int] = {}
@@ -314,18 +320,18 @@ class _Collection:
                 self.drop_provider(provider)
                 return any_page_succeeded
             except ProviderBlockedError as exc:
-                self._add_places(exc.partial, collected)
+                self._add_places(exc.partial, collected, provider=provider)
                 await self._handle_block(provider, exc)
                 return any_page_succeeded
             except ProviderProxyError as exc:
                 self._stop_on_proxy(provider, exc)
                 return any_page_succeeded
             except ProviderFormatError as exc:
-                self._add_places(exc.partial, collected)
+                self._add_places(exc.partial, collected, provider=provider)
                 self._skip_on_format_error(provider, target, exc)
                 return True
             except ProviderStoppedError as exc:
-                self._add_places(exc.partial, collected)
+                self._add_places(exc.partial, collected, provider=provider)
                 self._stop_provider(provider, exc)
                 if isinstance(exc, ProviderNoConnectionError):
                     self.network_failed.add(provider.name)
@@ -365,7 +371,7 @@ class _Collection:
                 logger.warning("Provider %s: %s", provider.name, search_page.warning)
                 self.alert(search_page.warning)
 
-            collected = self._add_places(search_page.places, collected)
+            collected = self._add_places(search_page.places, collected, provider=provider)
             if collected >= self.config.max_results_per_query or not search_page.has_more:
                 return True
         return True
@@ -430,8 +436,14 @@ class _Collection:
         )
         self.drop_provider(provider)
 
-    def _add_places(self, places: list[RawPlace], collected: int) -> int:
+    def _add_places(
+        self,
+        places: list[RawPlace],
+        collected: int,
+        provider: BaseMapProvider | None = None,
+    ) -> int:
         """Add places up to the limit per query, without repeats. Returns the new count for this query."""
+        records_checks = provider is not None and provider.records_place_checks
         for place in places:
             if collected >= self.config.max_results_per_query:
                 break
@@ -439,6 +451,8 @@ class _Collection:
             if place.external_id not in self.seen_ids:
                 self.seen_ids.add(place.external_id)
                 self.places.append(normalize_place(place))
+                if records_checks:
+                    self.checked_ids.add(place.external_id)
         return collected
 
     async def record_network_streaks(self, session: AsyncSession) -> None:
@@ -534,12 +548,18 @@ async def collect_leads(
         }
         usable = [provider for provider in providers if skipped[provider.name] is None]
         known_by_prefix: dict[str, set[str]] = {}
+        checked_firm_ids: set[str] | None = None
         for provider in usable:
             prefix = provider.external_id_prefix
             if prefix:
                 if prefix not in known_by_prefix:
                     known_by_prefix[prefix] = await get_known_external_ids_by_prefix(session, prefix)
                 provider.set_known_external_ids(set(known_by_prefix[prefix]))
+            if provider.records_place_checks:
+                # In addition to the saved leads: a firm checked recently (a working site, too) is not clicked.
+                if checked_firm_ids is None:
+                    checked_firm_ids = await get_recently_checked_firm_ids(session, config.site_recheck_days, now)
+                provider.add_checked_firm_ids(set(checked_firm_ids))
     resting = {name for name, reason in skipped.items() if reason == REST_REASON}
 
     collection = _Collection(usable, config, budget, session_maker)
@@ -615,7 +635,7 @@ async def collect_leads(
         for name in collection.succeeded:
             await record_provider_success(session, name)
         await collection.record_network_streaks(session)
-        stats = await save_collected_places(session, collection.places)
+        stats = await save_collected_places(session, collection.places, record_checks_for=collection.checked_ids)
         await save_provider_cursors(session, cursors_to_save)
     result.found = stats["total_found"]
     result.qualified = stats["qualified"]

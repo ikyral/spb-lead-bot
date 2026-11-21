@@ -8,14 +8,17 @@ The log has one line for every organization that was found ("Place [niche] outco
 pipeline._log_place). An organization seen again counts once, with its best outcome: selected (new, known, chain)
 beats not-a-lead. "Selected" means no working site: such an organization is a lead.
 
-Database mode: saved leads per niche and per district / search text, from a copy of leads.db (opened read-only):
+Database mode, from a copy of leads.db (opened read-only):
 
     python scripts/niche_stats.py --db path/to/leads.db
 
-The database keeps only saved leads, not the organizations whose site works, so the share of useful leads cannot be
-computed from it: that share comes only from the log (the mode above, also the way for data older than the
-query_text column). Leads saved before query_text was kept, and leads of sources without a search text (OSM), are
-counted under "unknown query". Chains are kept aside to count branches and are not counted as leads.
+First the shares of useful organizations from place_checks: every organization whose site 2gis_cdp checked, also
+those with a working site, per niche and per district / search text. "Useful" is USEFUL_STATUSES of
+src/services/site_status.py. The table exists only for data collected after it was added; a database without it
+(or with it empty) gets a note, and the share of older data comes only from the log (the mode above).
+Then saved leads per niche and per district / search text. Leads saved before query_text was kept, and leads of
+sources without a search text (OSM), are counted under "unknown query". Chains are kept aside to count branches
+and are not counted as leads.
 """
 
 import re
@@ -149,6 +152,93 @@ def format_saved_table(stats: dict[SavedKey, SavedStats]) -> str:
     return "\n".join(lines)
 
 
+# ---------- shares from place_checks ----------
+
+NO_CHECKS_NOTE = (
+    "No checked organizations in place_checks (an older database, or nothing collected since the table was added):\n"
+    "shares of useful organizations need data collected after this change. Below are saved leads only; for shares\n"
+    "of older data run the script on the log."
+)
+
+
+def useful_statuses() -> frozenset[str]:
+    """The statuses the project treats as a useful lead, from src/services/site_status.py."""
+    root = str(Path(__file__).resolve().parent.parent)
+    if root not in sys.path:
+        sys.path.insert(0, root)  # run as `python scripts/niche_stats.py`: the project root is not on the path
+    from src.services.site_status import USEFUL_STATUSES
+
+    return USEFUL_STATUSES
+
+
+@dataclass
+class CheckStats:
+    checked: int = 0
+    useful: int = 0
+
+    @property
+    def share(self) -> float:
+        return self.useful / self.checked if self.checked else 0.0
+
+
+def count_checks(
+    rows: Iterable[tuple[str, str | None, str | None, str | None]], useful: frozenset[str]
+) -> dict[SavedKey, CheckStats]:
+    """Rows of (category, district, query_text, site_status) of place_checks, per niche, district and search text."""
+    stats: dict[SavedKey, CheckStats] = defaultdict(CheckStats)
+    for category, district, query_text, site_status in rows:
+        query = query_text.strip() if query_text and query_text.strip() else None
+        key_stats = stats[(category, district or None, query)]
+        key_stats.checked += 1
+        if site_status in useful:
+            key_stats.useful += 1
+    return dict(stats)
+
+
+def _check_row(label: str, stats: CheckStats) -> str:
+    return f"{label:60} {stats.checked:>8} {stats.useful:>7} {stats.share:>6.0%}"
+
+
+def format_checks_table(stats: dict[SavedKey, CheckStats], useful: frozenset[str]) -> str:
+    """Per niche: its share, then one line per district and search text, the best share first."""
+    by_niche: dict[str, list[tuple[SavedKey, CheckStats]]] = defaultdict(list)
+    for key, key_stats in stats.items():
+        by_niche[key[0]].append((key, key_stats))
+    totals = {
+        niche: CheckStats(checked=sum(s.checked for _, s in items), useful=sum(s.useful for _, s in items))
+        for niche, items in by_niche.items()
+    }
+    lines = [
+        "Shares of useful organizations from place_checks (every organization whose site 2gis_cdp checked;",
+        f"useful = {', '.join(sorted(useful))}).",
+        "",
+        f"{'niche / district / query':60} {'checked':>8} {'useful':>7} {'share':>6}",
+    ]
+    for niche in sorted(totals, key=lambda name: (-totals[name].share, -totals[name].checked, name)):
+        lines.append(_check_row(niche, totals[niche]))
+        items = sorted(by_niche[niche], key=lambda item: (-item[1].share, -item[1].checked, item[0][1] or ""))
+        for (_, district, query), key_stats in items:
+            lines.append(_check_row(f"  {district or NO_DISTRICT} / {query or UNKNOWN_QUERY}", key_stats))
+    return "\n".join(lines)
+
+
+def _connect_read_only(db_path: str) -> sqlite3.Connection:
+    uri = f"{Path(db_path).resolve().as_uri()}?mode=ro"
+    return sqlite3.connect(uri, uri=True)
+
+
+def read_check_rows(db_path: str) -> list[tuple[str, str | None, str | None, str | None]] | None:
+    """(category, district, query_text, site_status) of place_checks; None if the table is not there yet."""
+    connection = _connect_read_only(db_path)
+    try:
+        if not list(connection.execute("PRAGMA table_info(place_checks)")):
+            return None
+        cursor = connection.execute("SELECT category, district, query_text, site_status FROM place_checks")
+        return [(str(row[0]), row[1], row[2], row[3]) for row in cursor]
+    finally:
+        connection.close()
+
+
 # By (has query_text, has is_chain): older databases may lack either column.
 _SAVED_QUERIES: dict[tuple[bool, bool], str] = {
     (True, True): (
@@ -162,8 +252,7 @@ _SAVED_QUERIES: dict[tuple[bool, bool], str] = {
 
 def read_saved_rows(db_path: str) -> list[tuple[str, str | None, str | None, str | None]]:
     """(category, district, query_text, site_status) of saved leads; the file is opened read-only."""
-    uri = f"{Path(db_path).resolve().as_uri()}?mode=ro"
-    connection = sqlite3.connect(uri, uri=True)
+    connection = _connect_read_only(db_path)
     try:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(leads)")}
         if not columns:
@@ -177,13 +266,20 @@ def read_saved_rows(db_path: str) -> list[tuple[str, str | None, str | None, str
 
 def main_db(db_path: str) -> int:
     try:
+        checks = read_check_rows(db_path)
         rows = read_saved_rows(db_path)
     except sqlite3.Error as exc:
         print(f"Cannot read the leads of {db_path}: {exc}")
         return 1
+    if checks:
+        useful = useful_statuses()
+        print(format_checks_table(count_checks(checks, useful), useful))
+    else:
+        print(NO_CHECKS_NOTE)
+    print()
     if not rows:
         print("No saved leads in the database")
-        return 1
+        return 0 if checks else 1
     print(format_saved_table(count_saved(rows)))
     return 0
 

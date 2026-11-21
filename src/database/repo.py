@@ -41,6 +41,7 @@ from src.database.models import (
     ImportLog,
     IssuedBatch,
     Lead,
+    PlaceCheck,
     ProviderState,
 )
 from src.services.scorer import calculate_lead_score
@@ -237,6 +238,57 @@ async def get_known_external_ids_by_prefix(session: AsyncSession, prefix: str) -
     """Return all saved external IDs starting with `prefix`."""
     stmt = select(Lead.external_id).where(Lead.external_id.startswith(prefix))
     return {str(eid) for eid in (await session.scalars(stmt)).all()}
+
+
+@dataclass(frozen=True)
+class PlaceCheckData:
+    """One checked organization for place_checks: no contacts, names or addresses."""
+
+    firm_id: str
+    category: str
+    district: str | None
+    query_text: str | None
+    site_status: str
+
+
+async def save_place_checks(
+    session: AsyncSession, checks: list[PlaceCheckData], now: datetime | None = None
+) -> tuple[int, int]:
+    """
+    Insert or update checked organizations and commit. Returns (inserted, updated).
+
+    A firm already in the table gets the new status, niche, search text and checked_at: there is never a second
+    row. The last occurrence in `checks` wins when a firm is there twice.
+    """
+    if not checks:
+        return 0, 0
+    checked_at = now or datetime.now(UTC)
+    latest = {check.firm_id: check for check in checks if check.firm_id}
+    existing: dict[str, PlaceCheck] = {}
+    firm_ids = list(latest)
+    for start in range(0, len(firm_ids), _EXISTENCE_CHECK_CHUNK):
+        chunk = firm_ids[start : start + _EXISTENCE_CHECK_CHUNK]
+        for row in (await session.scalars(select(PlaceCheck).where(PlaceCheck.firm_id.in_(chunk)))).all():
+            existing[row.firm_id] = row
+    for firm_id, check in latest.items():
+        found = existing.get(firm_id)
+        row = found if found is not None else PlaceCheck(firm_id=firm_id)
+        if found is None:
+            session.add(row)
+        row.category = check.category
+        row.district = check.district
+        row.query_text = check.query_text
+        row.site_status = check.site_status
+        row.checked_at = checked_at
+    await session.commit()
+    return len(latest) - len(existing), len(existing)
+
+
+async def get_recently_checked_firm_ids(session: AsyncSession, days: int, now: datetime | None = None) -> set[str]:
+    """Firms checked less than `days` ago: not clicked again. Older ones are checked again."""
+    since = (now or datetime.now(UTC)) - timedelta(days=days)
+    stmt = select(PlaceCheck.firm_id).where(PlaceCheck.checked_at > since)
+    return {str(firm_id) for firm_id in (await session.scalars(stmt)).all()}
 
 
 async def save_new_leads(

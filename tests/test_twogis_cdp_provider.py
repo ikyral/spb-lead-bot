@@ -1701,6 +1701,23 @@ async def test_known_external_ids_skip_clicking_and_deduplicate_within_run() -> 
     assert provider._known_firm_ids == set()
 
 
+async def test_recently_checked_firms_are_skipped_together_with_saved_leads(caplog: pytest.LogCaptureFixture) -> None:
+    fake = FakeRemote(pages={1: _doc(["101", "102", "103"])}, cards=_cards("101", "102", "103"))
+    harness = Harness(fake)
+    provider = harness.provider
+    assert provider.records_place_checks is True
+    provider.set_known_external_ids({"2gis_101"})  # a saved lead
+    provider.add_checked_firm_ids({"102", ""})  # checked recently (place_checks), e.g. a working site
+    try:
+        with caplog.at_level("INFO"):
+            page = await provider.search(QUERY, AREA, page=1)
+        assert [place.external_id for place in page.places] == ["2gis_103"]
+        assert not any("/firm/101" in c or "/firm/102" in c for c in fake.clicks)
+        assert "skipped 2 already-known organizations" in caplog.text
+    finally:
+        await provider.close()
+
+
 def test_cdp_options_from_settings_assisted_mode() -> None:
     settings = _settings(
         TWOGIS_HEADLESS=True,
