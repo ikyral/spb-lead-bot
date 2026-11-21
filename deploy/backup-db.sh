@@ -4,6 +4,7 @@
 # Consistent online backup of leads.db via sqlite3 ".backup", integrity check, rotation,
 # Telegram alert to the owner on failure. The token never goes to argv, logs or stdout.
 set -euo pipefail
+umask 077
 
 DB="${DB:-/opt/spb-lead-bot/leads.db}"
 DEST="${DEST:-/opt/spb-lead-bot/backups/daily}"
@@ -11,10 +12,11 @@ KEEP="${KEEP:-7}"
 SQLITE_BIN="${SQLITE_BIN:-sqlite3}"
 
 TMP=""
+ALERTED=0
 
 cleanup_tmp() {
   if [ -n "$TMP" ]; then
-    rm -f -- "$TMP"
+    rm -f -- "$TMP" "$TMP-wal" "$TMP-shm" "$TMP-journal"
   fi
 }
 
@@ -47,17 +49,32 @@ fail() {
   local reason="$1"
   cleanup_tmp
   echo "backup failed: ${reason}" >&2
+  ALERTED=1
   send_alert "$reason" || true
   exit 1
 }
 
-trap cleanup_tmp EXIT
+# Any non-zero exit that did not go through fail() (set -e, SIGTERM from the unit timeout)
+# still sends exactly one alert. send_alert never exits, so the handler cannot loop.
+on_exit() {
+  local rc=$?
+  trap - EXIT
+  cleanup_tmp
+  if [ "$rc" -ne 0 ] && [ "$ALERTED" = 0 ]; then
+    ALERTED=1
+    echo "backup failed: unexpected error (code $rc)" >&2
+    send_alert "непредвиденная ошибка (код $rc)" || true
+  fi
+  exit "$rc"
+}
+trap on_exit EXIT
+trap 'exit 143' TERM INT
 
 if ! [[ "$KEEP" =~ ^[0-9]+$ ]] || [ "$KEEP" -lt 1 ]; then
   fail "KEEP должен быть числом не меньше 1"
 fi
 command -v "$SQLITE_BIN" >/dev/null 2>&1 || fail "sqlite3 не найден"
-[ -f "$DB" ] || fail "файл базы не найден"
+[ -f "$DB" ] && [ -r "$DB" ] || fail "файл базы не найден или не читается"
 
 mkdir -p -m 700 -- "$DEST" || fail "не удалось создать папку бэкапов"
 
@@ -87,6 +104,7 @@ check=$("$SQLITE_BIN" "$TMP" "PRAGMA integrity_check;") || fail "integrity_check
 
 chmod 600 "$TMP" || fail "не удалось выставить права на файл"
 mv -- "$TMP" "$final" || fail "не удалось переименовать бэкап"
+rm -f -- "$TMP-wal" "$TMP-shm"
 TMP=""
 echo "backup created: ${final##*/}"
 

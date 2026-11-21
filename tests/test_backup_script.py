@@ -158,6 +158,51 @@ def test_missing_token_fails_without_calling_curl(env: Env) -> None:
     assert "BOT_TOKEN" in result.stderr
 
 
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a non-root POSIX user")
+def test_unreadable_db_fails_with_exactly_one_alert(env: Env) -> None:
+    env.db.chmod(0o000)
+    try:
+        result = env.run()
+    finally:
+        env.db.chmod(0o600)
+    assert result.returncode != 0
+    assert env.curl_calls() == 1
+    assert TOKEN not in result.stdout + result.stderr
+
+
+def test_failing_rm_in_rotation_sends_exactly_one_alert(env: Env) -> None:
+    env.dest.mkdir(parents=True)
+    (env.dest / "leads-20260101.db").write_text("x")
+    (env.dest / "leads-20260102.db").write_text("x")
+    rm_stub = env.stub / "rm"
+    rm_stub.write_text(
+        '#!/bin/sh\nfor a in "$@"; do case "$a" in *leads-20260101.db) exit 1;; esac; done\nexec /bin/rm "$@"\n'
+    )
+    rm_stub.chmod(0o755)
+    result = env.run(KEEP="2")
+    assert result.returncode != 0
+    assert env.curl_calls() == 1
+    assert TOKEN not in result.stdout + result.stderr
+
+
+def test_no_stray_files_after_success_including_wal_source(env: Env) -> None:
+    con = sqlite3.connect(env.db)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("INSERT INTO leads (name) VALUES ('c')")
+    con.commit()
+    try:
+        result = env.run()
+    finally:
+        con.close()
+    assert result.returncode == 0, result.stderr
+    names = env.backups()
+    assert len(names) == 1 and names[0].startswith("leads-") and names[0].endswith(".db")
+    assert not [p for p in env.dest.iterdir() if p.name.startswith(".leads-")]
+    check = sqlite3.connect(env.dest / names[0])
+    assert check.execute("SELECT count(*) FROM leads").fetchone() == (3,)
+    check.close()
+
+
 def test_failed_alert_keeps_nonzero_exit_without_leaking(env: Env) -> None:
     result = env.run(DB=str(env.root / "nonexistent.db"), CURL_EXIT="22")
     assert result.returncode != 0

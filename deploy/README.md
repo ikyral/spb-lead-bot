@@ -124,10 +124,15 @@
 
 Таймер раз в сутки делает согласованную копию `leads.db` (`sqlite3 .backup`, не `cp`), проверяет её (`PRAGMA integrity_check` должен вернуть `ok`, таблица `leads` читается) и хранит 7 последних копий в `/opt/spb-lead-bot/backups/daily/` (файлы `leads-ГГГГММДД.db`, права 600; при повторном запуске в тот же день имя `leads-ГГГГММДД-ЧЧММСС.db`, существующие файлы не перезаписываются). Ротация удаляет только файлы вида `leads-ГГГГММДД[-ЧЧММСС].db` внутри этой папки и только после успешной копии. При любой ошибке (нет базы, битая база, мало места: нужно свободного места минимум 2 размера базы) старые копии остаются нетронутыми, а владельцу приходит сообщение в Telegram и сервис получает статус failed.
 
-**Время 04:10 по времени сервера (CET).** Плановый сбор стартует в 03/09/15/21 МСК (это 01/07/13/19 по CET) и длится 15-30 минут, поэтому 04:10 в него не попадает (внеочередной сбор при малом пуле редок). `Persistent=true`: если сервер был выключен в 04:10, копия сделается при следующем запуске.
+**Время 04:10 по местному времени сервера.** Проверьте часовой пояс сервера:
 
-Установка под root (скрипт кладётся вне репозитория, как скрипт обновления, чтобы автообновление не могло незаметно изменить то, что запускает systemd):
+    timedatectl | grep "Time zone"
 
+Ожидается `Time zone: Europe/Berlin (CET, +0100)`. Расписание таймера всегда следует местному времени сервера: если пояс другой, 04:10 сдвинется и расчёт ниже неверен. Плановый сбор стартует в 03/09/15/21 МСК (это 01/07/13/19 по CET) и длится 15-30 минут, поэтому 04:10 в него не попадает (внеочередной сбор при малом пуле редок). `Persistent=true`: если сервер был выключен в 04:10, копия сделается при следующем запуске.
+
+Нужен пакет `sqlite3` (`apt install -y sqlite3`, он уже стоит с раздела 1). Установка под root (скрипт кладётся вне репозитория, как скрипт обновления, чтобы автообновление не могло незаметно изменить то, что запускает systemd):
+
+    cd /opt/spb-lead-bot
     install -o leadbot -g leadbot -m 750 deploy/backup-db.sh /opt/spb-lead-bot-backup.sh
     cp deploy/spb-lead-bot-backup.service /etc/systemd/system/
     cp deploy/spb-lead-bot-backup.timer /etc/systemd/system/
@@ -143,22 +148,32 @@
 
 В журнале должна быть строка `backup created: leads-ГГГГММДД.db`, а `systemctl start` завершиться без ошибки.
 
-Безопасная проверка оповещения (боевая база и папка копий не затрагиваются, в Telegram должно прийти сообщение «⚠️ Бэкап leads.db не удался»):
+Проверка пути ошибки без оповещения (боевая база и папка копий не затрагиваются). Токена в этом окружении нет, поэтому в Telegram ничего не уйдёт:
 
     sudo -u leadbot env DB=/nonexistent /opt/spb-lead-bot-backup.sh; echo "exit=$?"
 
-Здесь токен и ID администратора в окружении не заданы, поэтому оповещение не уйдёт. Чтобы проверить его целиком, временно подставьте в юнит `Environment=DB=/nonexistent` через `systemctl edit spb-lead-bot-backup.service`, выполните `systemctl start spb-lead-bot-backup.service` (будет статус failed и сообщение в Telegram), затем удалите override (`systemctl revert spb-lead-bot-backup.service`).
+Ожидается `exit=1`, строка `backup failed: ...` и строка `alert skipped: BOT_TOKEN or ADMIN_TG_ID is not set`.
+
+Проверка настоящего оповещения. Выполните `systemctl edit spb-lead-bot-backup.service` и впишите в открывшийся редактор:
+
+    [Service]
+    Environment=DB=/nonexistent
+
+Затем `systemctl start spb-lead-bot-backup.service`. Ожидается: статус failed (`systemctl status spb-lead-bot-backup.service`) и в Telegram сообщение «⚠️ Бэкап leads.db не удался: ...». **Обязательно после проверки** уберите временную настройку, иначе ночной бэкап будет падать:
+
+    systemctl revert spb-lead-bot-backup.service
 
 Токен для оповещения берётся из `/opt/spb-lead-bot/.env` (`BOT_TOKEN`, `ADMIN_TG_ID`) через `EnvironmentFile=`. Формат systemd проще формата `.env`: строки вида `export X=...`, пробелы вокруг `=`, значения с экранированием могут прочитаться иначе. Кавычки вокруг значения systemd снимает сам. Если в `.env` для этих двух переменных есть `export` или пробелы вокруг `=`, оповещение не уйдёт (в журнале будет `alert skipped`), а копия всё равно сделается. Токен передаётся в curl через stdin, в `ps` и журнал не попадает.
 
-Восстановление из копии (под root):
+Восстановление из копии (под root, по одной команде):
 
     systemctl stop spb-lead-bot
-    sudo -u leadbot cp /opt/spb-lead-bot/backups/daily/leads-<дата>.db /opt/spb-lead-bot/leads.db
+    sudo -u leadbot mv /opt/spb-lead-bot/leads.db /opt/spb-lead-bot/leads_broken_$(date +%Y%m%d%H%M).db
     rm -f /opt/spb-lead-bot/leads.db-wal /opt/spb-lead-bot/leads.db-shm
+    sudo -u leadbot cp /opt/spb-lead-bot/backups/daily/leads-<дата>.db /opt/spb-lead-bot/leads.db
     systemctl start spb-lead-bot
 
-Старые `-wal` и `-shm` обязательно удалите: иначе SQLite применит их к подставленной копии. Перед восстановлением сохраните текущий `leads.db` (например, переименуйте), если он ещё читается.
+Сначала текущая база переименовывается (не теряется), потом удаляются старые `-wal` и `-shm`: иначе SQLite применил бы их к подставленной копии.
 
 ## 11. Как проверить
 
