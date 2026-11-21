@@ -24,6 +24,7 @@ _FILLABLE_FIELDS: tuple[str, ...] = (
     "email",
     "source_url",
     "rubric",
+    "query_text",
 )
 
 _PHONE_SEPARATORS_RE = re.compile(r"[,;]")
