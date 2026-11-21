@@ -170,6 +170,26 @@ class SearchProgress(Base):
     exhausted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
 
 
+class PlaceCheck(Base):
+    """
+    An organization of 2GIS whose site 2gis_cdp has checked, whether it became a lead or not.
+
+    For the share of useful leads per niche and search text, and so a firm is not clicked again for
+    SITE_RECHECK_DAYS. No contacts, names or addresses are kept here: only what the statistics need.
+    """
+
+    __tablename__ = "place_checks"
+
+    # The number of the organization on 2GIS, without the branch suffix of its external_id.
+    firm_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    category: Mapped[str] = mapped_column(String(128))
+    district: Mapped[str | None] = mapped_column(String(128), nullable=True, default=None)
+    query_text: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    site_status: Mapped[str] = mapped_column(String(32))
+    # The last check; updated when the firm is checked again.
+    checked_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+
+
 class ImportLog(Base):
     """One imported file: only counts and fixed reasons, never the content of leads."""
 

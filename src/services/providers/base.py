@@ -300,8 +300,15 @@ class BaseMapProvider(ABC):
     # Prefix of external_id stored in the database; when set, the collector supplies known IDs before the run.
     external_id_prefix: str | None = None
 
+    # True: every organization whose site the pipeline checked is remembered in place_checks (2gis_cdp only).
+    records_place_checks: bool = False
+
     def set_known_external_ids(self, external_ids: set[str]) -> None:
         """Optional hint of already-stored external IDs so slow providers can skip known items."""
+        return None
+
+    def add_checked_firm_ids(self, firm_ids: set[str]) -> None:
+        """Optional hint: 2GIS firms whose site was checked recently, added to the known ones (after them)."""
         return None
 
     @abstractmethod

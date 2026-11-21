@@ -1,3 +1,4 @@
+import logging
 import re
 from pathlib import Path, PurePosixPath
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -11,6 +12,8 @@ from src.services.scraper.chrome.proxy import normalize_country, parse_proxy
 # Relative paths (.env, sqlite files) are resolved against the project root,
 # not the current working directory.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+logger = logging.getLogger(__name__)
 
 
 class SettingsError(ValueError):
@@ -26,6 +29,9 @@ class ProxySettingsError(Exception):
 
 # OUTREACH_OFFER and OUTREACH_SIGNATURE are cut to this many characters.
 OUTREACH_TEXT_MAX: int = 300
+# SITE_RECHECK_DAYS outside these bounds is brought back into them (with a warning in the log).
+SITE_RECHECK_DAYS_MIN: int = 1
+SITE_RECHECK_DAYS_MAX: int = 365
 
 
 class Settings(BaseSettings):
@@ -95,6 +101,8 @@ class Settings(BaseSettings):
     COLLECT_MAX_REQUESTS_PER_DAY: int = Field(default=200, ge=1)
     # A fully walked search target of the 2GIS API is not requested again for this long.
     COLLECT_RECHECK_DAYS: int = Field(default=30, ge=1)
+    # An organization whose site 2gis_cdp checked (table place_checks) is not clicked again for this many days.
+    SITE_RECHECK_DAYS: int = 30
 
     # The city in links to 2GIS cards, for the API provider as well.
     SCRAPER_CITY_SLUG: str = "spb"
@@ -216,6 +224,20 @@ class Settings(BaseSettings):
     @classmethod
     def _trim_outreach(cls, value: str) -> str:
         return " ".join(value.split())[:OUTREACH_TEXT_MAX]
+
+    @field_validator("SITE_RECHECK_DAYS")
+    @classmethod
+    def _clamp_site_recheck_days(cls, value: int) -> int:
+        clamped = min(max(value, SITE_RECHECK_DAYS_MIN), SITE_RECHECK_DAYS_MAX)
+        if clamped != value:
+            logger.warning(
+                "SITE_RECHECK_DAYS=%d is out of %d..%d, using %d",
+                value,
+                SITE_RECHECK_DAYS_MIN,
+                SITE_RECHECK_DAYS_MAX,
+                clamped,
+            )
+        return clamped
 
     @field_validator("TWOGIS_PROXY_COUNTRY")
     @classmethod

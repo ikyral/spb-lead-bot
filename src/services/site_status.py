@@ -44,6 +44,8 @@ ISSUE_GROUPS: tuple[tuple[str, ...], ...] = (
     (SITE_UNCERTAIN,),
     (SITE_UNKNOWN,),
 )
+# Useful leads: no site of its own, or the site does not open. The first group of handing out.
+USEFUL_STATUSES: frozenset[str] = frozenset(ISSUE_GROUPS[0])
 # No verdict about the site yet: such leads are worth keeping whatever their score is.
 UNVERIFIED_STATUSES: frozenset[str] = frozenset({SITE_UNKNOWN, SITE_UNCERTAIN, SITE_NOT_FOUND})
 # No site of its own, as far as anyone can tell. A social network instead of a site is the same for a lead.

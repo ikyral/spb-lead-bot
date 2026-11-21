@@ -72,7 +72,7 @@ from src.services.scraper.robots import (
     parse_robots,
 )
 from src.services.scraper.snapshot import PageSnapshot
-from src.services.twogis_links import build_card_url
+from src.services.twogis_links import build_card_url, firm_id_of
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +233,7 @@ class TwoGisCdpProvider(BaseMapProvider):
 
     name = PROVIDER_NAME
     external_id_prefix: str | None = "2gis_"
+    records_place_checks: bool = True
 
     def __init__(
         self,
@@ -276,15 +277,15 @@ class TwoGisCdpProvider(BaseMapProvider):
 
     def set_known_external_ids(self, external_ids: set[str]) -> None:
         """Store numeric 2GIS firm IDs already saved in the DB so search pages skip clicking them."""
-        self._known_firm_ids = {
-            firm_id
-            for eid in external_ids
-            if eid.startswith("2gis_") and (firm_id := eid.removeprefix("2gis_").split("_", 1)[0])
-        }
+        self._known_firm_ids = {firm_id for eid in external_ids if (firm_id := firm_id_of(eid))}
+
+    def add_checked_firm_ids(self, firm_ids: set[str]) -> None:
+        """Firms whose site was checked recently (place_checks): skipped like saved leads, never instead of them."""
+        self._known_firm_ids |= {firm_id for firm_id in firm_ids if firm_id}
 
     def _remember_places(self, places: list[RawPlace]) -> None:
         for place in places:
-            firm_id = place.external_id.removeprefix("2gis_").split("_", 1)[0]
+            firm_id = firm_id_of(place.external_id)
             if firm_id:
                 self._known_firm_ids.add(firm_id)
 
