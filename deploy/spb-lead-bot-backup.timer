@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily backup of SPB Lead Bot leads.db
+
+[Timer]
+# 04:10 server local time (CET). Scheduled collections start at 03/09/15/21 Moscow time
+# (01/07/13/19 CET) and take 15-30 min; 04:10 is outside them (low-pool runs are rare).
+OnCalendar=*-*-* 04:10:00
+Persistent=true
+RandomizedDelaySec=0
+Unit=spb-lead-bot-backup.service
+
+[Install]
+WantedBy=timers.target

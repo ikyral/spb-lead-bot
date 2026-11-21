@@ -385,7 +385,7 @@
 
 Проверка: `journalctl -u spb-lead-bot-update -n 30` (во время сбора там строка «collection in progress»). Откат: `sudo cp -p /opt/spb-lead-bot-update.sh.bak /opt/spb-lead-bot-update.sh`.
 
-**Правило: merge в `main` = немедленная выкатка** (через несколько минут). Скрипт обновляется только по fast-forward (`--ff-only`); если сервис после рестарта не поднялся, код откатывается на прежний коммит. Перед рискованной веткой (схема БД, миграции) сделайте копию базы: `sudo -u leadbot sqlite3 /opt/spb-lead-bot/leads.db ".backup /opt/spb-lead-bot/backups/leads_before_<имя>.db"`. Копии юнитов, drop-in для systemd, journald и sshd, а также пошаговая установка с нуля: `deploy/README.md`.
+**Правило: merge в `main` = немедленная выкатка** (через несколько минут). Скрипт обновляется только по fast-forward (`--ff-only`); если сервис после рестарта не поднялся, код откатывается на прежний коммит. Перед рискованной веткой (схема БД, миграции) сделайте копию базы: `sudo -u leadbot sqlite3 /opt/spb-lead-bot/leads.db ".backup /opt/spb-lead-bot/backups/leads_before_<имя>.db"`. Ежедневный автоматический бэкап (таймер 04:10 по времени сервера, 7 копий в `backups/daily/`, оповещение в Telegram при сбое): `deploy/README.md`, раздел 10. Копии юнитов, drop-in для systemd, journald и sshd, а также пошаговая установка с нуля: `deploy/README.md`.
 
 ### Рабочий сервер: ресурсы, расписание, защиты
 
