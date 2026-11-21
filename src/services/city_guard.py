@@ -4,11 +4,12 @@ import re
 from typing import Any
 
 # A conservative box around the whole federal city: Kronstadt, Lomonosov, Petergof, Sestroretsk, Zelenogorsk,
-# Kurortny district. Places of the oblast next to the city (Kudrovo, Murino) fall inside it and are not rejected:
+# Kurortny district. Places of the oblast next to the city (Kudrovo, Murino) fall inside it and are kept by the
+# POINT rule only (an adm_div city "Кудрово" or "Мурино" is still rejected by the adm_div rule, as intended):
 # a missed foreign place is acceptable, a rejected local one is not. The single place for these numbers.
 SPB_LAT_MIN: float = 59.55
-SPB_LAT_MAX: float = 60.25
-SPB_LON_MIN: float = 29.45
+SPB_LAT_MAX: float = 60.30
+SPB_LON_MIN: float = 29.40
 SPB_LON_MAX: float = 30.80
 
 _SPB_NAME_PARTS: tuple[str, ...] = ("санкт-петербург", "санкт петербург", "петербург", "спб")
@@ -23,6 +24,26 @@ _SPB_TOWNS: tuple[str, ...] = (
     "пушкин",
     "павловск",
     "красное село",
+    "шушары",
+    "парголово",
+    "стрельна",
+    "металлострой",
+    "песочный",
+    "левашово",
+    "репино",
+    "комарово",
+    "солнечное",
+    "молодежное",
+    "белоостров",
+    "лисий нос",
+    "усть-ижора",
+    "понтонный",
+    "саперный",
+    "петродворец",
+    "александровская",
+    "тярлево",
+    "ольгино",
+    "лахта",
 )
 _MAP_CENTER_RE = re.compile(r"[?&]m=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)(?:/|&|$)")
 

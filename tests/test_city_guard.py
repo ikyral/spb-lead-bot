@@ -33,7 +33,7 @@ def _item(firm_id: str, lat: float | None = None, lon: float | None = None, **ex
 
 @pytest.mark.parametrize(
     ("lat", "lon"),
-    [(59.93, 30.33), (60.20, 29.69), (60.00, 29.77), (59.90, 30.30)],
+    [(59.93, 30.33), (60.20, 29.69), (60.00, 29.77), (59.90, 30.30), (60.30, 29.40), (59.55, 30.80)],
 )
 def test_spb_points_are_kept(lat: float, lon: float) -> None:
     assert foreign_card_reason(_item("1", lat, lon)) is None
@@ -45,21 +45,21 @@ def test_card_without_point_is_kept() -> None:
     assert point_outside_spb("x", 30.0) is False
 
 
-@pytest.mark.parametrize(("lat", "lon"), [(55.60, 37.36), (60.70, 28.75)])
+@pytest.mark.parametrize(("lat", "lon"), [(55.60, 37.36), (60.70, 28.75), (60.31, 30.0), (60.0, 29.39)])
 def test_moscow_region_and_vyborg_points_are_rejected(lat: float, lon: float) -> None:
     reason = foreign_card_reason(_item("1", lat, lon))
     assert reason is not None
     assert "outside" in reason
 
 
-@pytest.mark.parametrize("city", ["Москва", "Выборг", "Московский"])
+@pytest.mark.parametrize("city", ["Москва", "Выборг", "Московский", "Кудрово", "Мурино"])
 def test_clearly_foreign_card_city_is_rejected(city: str) -> None:
     reason = foreign_card_reason(_item("1", adm_div=[{"type": "city", "name": city}]))
     assert reason is not None
     assert city in reason
 
 
-@pytest.mark.parametrize("city", ["Санкт-Петербург", "Зеленогорск", "Кронштадт"])
+@pytest.mark.parametrize("city", ["Санкт-Петербург", "Зеленогорск", "Кронштадт", "Шушары", "Молодёжное"])
 def test_spb_card_city_is_kept(city: str) -> None:
     assert foreign_card_reason(_item("1", adm_div=[{"type": "city", "name": city}])) is None
 
