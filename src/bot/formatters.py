@@ -22,6 +22,7 @@ from src.bot.texts import (
     DIGEST_USEFUL_LINE,
     FOLLOWUP_DUE_LINE,
     FOLLOWUP_WRITTEN_LINE,
+    FOREIGN_CITY_DROPPED_LINE,
     HELP_HIDDEN_TEXT,
     HELP_SECTIONS,
     OUTREACH_DEAD_SITE_TEMPLATE,
@@ -586,6 +587,8 @@ def format_collection_report(report: RunReport) -> str:
         f"• Длительность: <b>{report.duration_seconds:.0f} с</b>",
         f"\n📦 В запасе: <b>{report.pool_size}</b>",
     ]
+    if result.foreign_city_dropped:
+        lines.insert(8, FOREIGN_CITY_DROPPED_LINE.format(count=result.foreign_city_dropped))
     if result.format_errors:
         lines.insert(6, f"• Пропущено целей из-за ошибки формата: <b>{result.format_errors}</b>")
     lines += [

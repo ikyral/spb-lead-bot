@@ -48,6 +48,7 @@ from src.services.api_client import (
     ProviderProxyError,
     ProviderUnavailableError,
 )
+from src.services.city_guard import foreign_card_reason
 from src.services.providers.base import BaseMapProvider, RawPlace, SearchArea, SearchPage, SearchQuery
 from src.services.providers.twogis_catalog import parse_catalog_items
 from src.services.providers.twogis_scraper import CAPTCHA_POLL_SECONDS, ROBOTS_AGENT, call_owner, read_card_contacts
@@ -403,6 +404,7 @@ class TwoGisCdpProvider(BaseMapProvider):
         self.human_check_passed = False
         self.run_counted = False
         self.cards_opened = 0
+        self.foreign_city_dropped = 0
         if session is not None:
             await session.close()
 
@@ -704,6 +706,11 @@ class TwoGisCdpProvider(BaseMapProvider):
                     logger.info(
                         "2gis_cdp: %r is left out: not an organization (type %r)", item.get("name"), item.get("type")
                     )
+                    continue
+                foreign = foreign_card_reason(item)
+                if foreign is not None:
+                    self.foreign_city_dropped += 1
+                    logger.warning("2gis_cdp: %r is left out: not from St. Petersburg (%s)", item.get("name"), foreign)
                     continue
                 if read_card_contacts(item) is None:
                     logger.info("2gis_cdp: %r is left out: the card does not say its contacts", item.get("name"))

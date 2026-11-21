@@ -300,6 +300,8 @@ class BaseMapProvider(ABC):
     run_counted: bool = True
     # Organization cards opened and read during this run (for the summary; set by providers that open cards).
     cards_opened: int = 0
+    # Cards left out during this run because they are not from St. Petersburg (for the summary).
+    foreign_city_dropped: int = 0
     # Prefix of external_id stored in the database; when set, the collector supplies known IDs before the run.
     external_id_prefix: str | None = None
 

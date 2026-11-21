@@ -206,6 +206,8 @@ class CollectResult:
     requests: int = 0
     # Organization cards actually opened and read (found counts places that passed filters and merging).
     cards_opened: int = 0
+    # Cards left out because they are not from St. Petersburg.
+    foreign_city_dropped: int = 0
     next_cursor: int = 0
     targets_processed: int = 0
     # Targets skipped because a page could not be understood (format error), and providers whose run
@@ -647,6 +649,7 @@ async def collect_leads(
         }
         not_counted = [p.name for p in usable if p.min_hours_between_runs and not p.run_counted]
         result.cards_opened = sum(p.cards_opened for p in providers)
+        result.foreign_city_dropped = sum(p.foreign_city_dropped for p in providers)
         await _close_providers(providers)
 
     cursors_to_save: dict[str, int] = {}

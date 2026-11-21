@@ -33,6 +33,7 @@ from src.services.api_client import (
     ProviderTemporaryError,
     ProviderUnavailableError,
 )
+from src.services.city_guard import foreign_page_reasons
 from src.services.scraper.snapshot import PageSnapshot
 from src.services.scraper.twogis_site import is_site_response, page_address
 
@@ -1131,6 +1132,13 @@ class SearchPageReader(_BaseChromePageReader):
             other,
             pagination,
         )
+        # Log only: a possible redirect to another city changes nothing in the run.
+        if url or title:
+            reasons = foreign_page_reasons(str(url), str(title))
+            if reasons:
+                logger.warning(
+                    "possible foreign city: %s; url %s, title %r", "; ".join(reasons), unquote(str(url)), title
+                )
         if self._snapshot_dir is not None:
             self._save_snapshot(firm_hrefs, [node.attributes.get("href", "") for node in all_links], pagination)
 
