@@ -17,7 +17,15 @@ TOTAL_CHECK_TIMEOUT_SECONDS: float = 20.0
 # requires auth, or rate-limits us. The site exists, so it is not a dead_site lead.
 ALIVE_ERROR_STATUSES: frozenset[int] = frozenset({401, 403, 429})
 
-DEAD_SITE_RESULT: tuple[str, str | None] = ("dead_site", "HTTP/Connection error")
+# The details tell a real dead site from a site that merely did not answer us.
+DEAD_SITE_HTTP_DETAILS = "HTTP/Connection error"  # a real HTTP error status or an invalid URL
+DEAD_SITE_NETWORK_DETAILS = "Network error or timeout"  # timeout / DNS / SSL / transport failure: maybe our network
+DEAD_SITE_CRASH_DETAILS = "Website check error"  # the check itself crashed
+# Verdicts after which the site was not really judged: such a firm is worth checking again on the next pass.
+UNANSWERED_DETAILS: frozenset[str] = frozenset({DEAD_SITE_NETWORK_DETAILS, DEAD_SITE_CRASH_DETAILS})
+
+DEAD_SITE_RESULT: tuple[str, str | None] = ("dead_site", DEAD_SITE_HTTP_DETAILS)
+DEAD_SITE_NETWORK_RESULT: tuple[str, str | None] = ("dead_site", DEAD_SITE_NETWORK_DETAILS)
 
 SOCIAL_DOMAINS: tuple[str, ...] = (
     "vk.com",
@@ -141,8 +149,8 @@ async def analyze_website(
         tuple[str, str | None]: (site_status, details)
         - ("no_site", None): URL is empty or whitespace
         - ("social_only", url): URL points or redirects to social networks
-        - ("dead_site", "HTTP/Connection error"): connection failed, timeout, or 4xx/5xx
-          (except ALIVE_ERROR_STATUSES)
+        - ("dead_site", DEAD_SITE_HTTP_DETAILS): invalid URL or 4xx/5xx (except ALIVE_ERROR_STATUSES)
+        - ("dead_site", DEAD_SITE_NETWORK_DETAILS): timeout, connection, DNS or SSL error
         - ("has_site", str(response.url)): responsive standalone website
 
     A URL without scheme is tried over https first and, if that fails with a
@@ -198,9 +206,11 @@ async def _probe(client: httpx.AsyncClient, url: str) -> tuple[tuple[str, str | 
             timeout=TOTAL_CHECK_TIMEOUT_SECONDS,
         )
     except (httpx.TimeoutException, TimeoutError):
-        return DEAD_SITE_RESULT, False
-    except (httpx.HTTPError, httpx.InvalidURL):
+        return DEAD_SITE_NETWORK_RESULT, False
+    except httpx.InvalidURL:
         return DEAD_SITE_RESULT, True
+    except httpx.HTTPError:
+        return DEAD_SITE_NETWORK_RESULT, True
 
     if status_code >= 400 and status_code not in ALIVE_ERROR_STATUSES:
         return DEAD_SITE_RESULT, True

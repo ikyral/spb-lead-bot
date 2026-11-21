@@ -4,7 +4,7 @@ import httpcore
 import httpx
 import pytest
 
-from src.services.checker import analyze_website, create_check_client
+from src.services.checker import DEAD_SITE_NETWORK_DETAILS, analyze_website, create_check_client
 from src.services.safe_http import PublicOnlyNetworkBackend, is_public_ip
 
 OK_RESPONSE = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
@@ -93,7 +93,7 @@ async def test_check_blocks_non_public_targets_without_connecting(url: str) -> N
         resolver=_fake_dns({"localhost": ["127.0.0.1", "::1"], "internal.example": ["10.0.0.5"]}),
     )
     async with create_check_client(network_backend=backend) as client:
-        assert await analyze_website(url, client=client) == ("dead_site", "HTTP/Connection error")
+        assert await analyze_website(url, client=client) == ("dead_site", DEAD_SITE_NETWORK_DETAILS)
     assert inner.connected == []
 
 
@@ -103,7 +103,7 @@ async def test_check_blocks_host_resolving_to_any_private_address() -> None:
     inner = FakeInternet({PUBLIC_IP: OK_RESPONSE})
     backend = PublicOnlyNetworkBackend(inner=inner, resolver=_fake_dns({"mixed.example": [PUBLIC_IP, "10.0.0.5"]}))
     async with create_check_client(network_backend=backend) as client:
-        assert await analyze_website("http://mixed.example/", client=client) == ("dead_site", "HTTP/Connection error")
+        assert await analyze_website("http://mixed.example/", client=client) == ("dead_site", DEAD_SITE_NETWORK_DETAILS)
     assert inner.connected == []
 
 
@@ -114,7 +114,7 @@ async def test_check_blocks_redirect_to_private_address() -> None:
     backend = PublicOnlyNetworkBackend(inner=inner, resolver=_fake_dns({"redirector.example": [PUBLIC_IP]}))
     async with create_check_client(network_backend=backend) as client:
         res = await analyze_website("http://redirector.example/", client=client)
-    assert res == ("dead_site", "HTTP/Connection error")
+    assert res == ("dead_site", DEAD_SITE_NETWORK_DETAILS)
     assert inner.connected == [(PUBLIC_IP, 80)]
 
 

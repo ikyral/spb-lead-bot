@@ -19,7 +19,12 @@ from src.database.repo import (
     save_place_checks,
 )
 from src.services.chains import load_chain_index, refresh_chain_flags
-from src.services.checker import analyze_website, create_check_client
+from src.services.checker import (
+    DEAD_SITE_CRASH_DETAILS,
+    UNANSWERED_DETAILS,
+    analyze_website,
+    create_check_client,
+)
 from src.services.dedup import DuplicateIndex, merge_duplicate_places
 from src.services.providers.base import RawPlace
 from src.services.providers.csv_loader import parse_csv_leads
@@ -122,7 +127,7 @@ async def _process_and_save_places(
                 site_status, details = await analyze_website(place.raw_website, client=client)
             except Exception:
                 logger.exception("Website check crashed for %r", place.raw_website)
-                site_status, details = "dead_site", "Website check error"
+                site_status, details = "dead_site", DEAD_SITE_CRASH_DETAILS
         checks_done += 1
         if progress is not None:
             try:
@@ -139,6 +144,7 @@ async def _process_and_save_places(
     leads_to_save: list[dict[str, Any]] = []
     chains_to_save: list[dict[str, Any]] = []
     checks_to_save: list[PlaceCheckData] = []
+    unanswered = 0
 
     known_leads = await _load_known_leads(session)
     chains = await load_chain_index(session, settings)
@@ -163,15 +169,19 @@ async def _process_and_save_places(
             small_chain=chains.branches(place.name) == 2,
         )
         if place.external_id in record_checks_for and (firm_id := firm_id_of(place.external_id)):
-            checks_to_save.append(
-                PlaceCheckData(
-                    firm_id=firm_id,
-                    category=place.category,
-                    district=place.district,
-                    query_text=place.query_text,
-                    site_status=site_status,
+            if site_status == SITE_DEAD and details in UNANSWERED_DETAILS:
+                # The site did not answer (timeout, network, crash): maybe our fault, so check this firm again later.
+                unanswered += 1
+            else:
+                checks_to_save.append(
+                    PlaceCheckData(
+                        firm_id=firm_id,
+                        category=place.category,
+                        district=place.district,
+                        query_text=place.query_text,
+                        site_status=site_status,
+                    )
                 )
-            )
 
         if not is_worth_saving(site_status, score):
             _log_place(place, "not-a-lead", _why_not(site_status, score, place))
@@ -225,6 +235,8 @@ async def _process_and_save_places(
     marked = await refresh_chain_flags(session, chains)
     if saved_chains or marked:
         logger.info("Chains: %d saved aside, %d earlier leads marked", saved_chains, marked)
+    if unanswered:
+        logger.info("Checked organizations not remembered, the site did not answer: %d", unanswered)
     await _record_place_checks(session, checks_to_save)
 
     return {
