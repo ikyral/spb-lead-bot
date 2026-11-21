@@ -166,7 +166,7 @@ class SearchProgress(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     provider: Mapped[str] = mapped_column(String(32))
     next_page: Mapped[int] = mapped_column(Integer, default=1)
-    # All pages have been seen; the target is left alone until COLLECT_RECHECK_DAYS pass.
+    # All pages have been seen; kept for old databases; no longer used.
     exhausted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
 
 

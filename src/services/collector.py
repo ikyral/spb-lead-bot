@@ -92,7 +92,6 @@ class CollectorConfig:
     max_requests_per_run: int
     max_requests_per_day: int
     block_backoff_hours: float = 6.0
-    recheck_days: int = 30
     # A firm whose site 2gis_cdp checked (place_checks) is not clicked again for this long.
     site_recheck_days: int = 30
 
@@ -189,7 +188,6 @@ def load_collector_config(settings: Settings) -> CollectorConfig:
         max_requests_per_run=settings.COLLECT_MAX_REQUESTS_PER_RUN,
         max_requests_per_day=settings.COLLECT_MAX_REQUESTS_PER_DAY,
         block_backoff_hours=settings.SCRAPER_BLOCK_BACKOFF_HOURS,
-        recheck_days=settings.COLLECT_RECHECK_DAYS,
         site_recheck_days=settings.SITE_RECHECK_DAYS,
     )
 

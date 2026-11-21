@@ -523,3 +523,11 @@ async def test_real_http_errors_and_invalid_urls_stay_remembered_the_rest_is_unc
         "2gis_6_hash": SITE_DEAD,
     }
     assert "the site did not answer: 1" in caplog.text
+
+
+def test_legacy_collect_recheck_days_in_environment_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COLLECT_RECHECK_DAYS", "30")
+    settings = _settings()
+    assert not hasattr(settings, "COLLECT_RECHECK_DAYS")
+    assert settings.SITE_RECHECK_DAYS == 30
+    assert not hasattr(load_collector_config(_settings(COLLECT_RECHECK_DAYS=30)), "recheck_days")
