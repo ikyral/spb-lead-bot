@@ -1,0 +1,12 @@
+[Unit]
+Description=SPB Lead Bot
+After=network-online.target
+Wants=network-online.target
+[Service]
+User=leadbot
+WorkingDirectory=/opt/spb-lead-bot
+ExecStart=/usr/bin/xvfb-run -a /opt/spb-lead-bot/venv/bin/python main.py
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target

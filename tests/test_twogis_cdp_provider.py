@@ -588,17 +588,6 @@ def test_other_districts_and_no_district_keep_the_text() -> None:
     assert set(SPB_DISTRICTS) >= twogis_cdp.AMBIGUOUS_DISTRICTS
 
 
-def test_the_progress_key_does_not_depend_on_the_search_text() -> None:
-    from src.services.collector import SearchTarget, _progress_key
-
-    area = SearchArea(bbox=(59.97, 30.29, 60.09, 30.4), district="Выборгский")
-    harness = Harness(FakeRemote())
-    target = SearchTarget(query=QUERY, area=area)
-    before = _progress_key(harness.provider, target)
-    harness.provider._search_text = twogis_cdp.build_search_text(QUERY.text, area.district)
-    assert _progress_key(harness.provider, target) == before
-
-
 def test_pagination_url_uses_the_same_extended_text() -> None:
     harness = Harness(FakeRemote())
     text = twogis_cdp.build_search_text(QUERY.text, "Выборгский")

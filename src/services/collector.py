@@ -1,6 +1,5 @@
 """Automatic lead collection: what to search for (from settings) and one collection pass."""
 
-import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -14,13 +13,11 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.config import Settings, SettingsError
-from src.database.models import ProviderState, SearchProgress
+from src.database.models import ProviderState
 from src.database.repo import (
     MAX_CONSECUTIVE_BLOCKS,
-    disable_provider,
     get_known_external_ids_by_prefix,
     get_provider_states,
-    get_search_progress,
     record_network_failure_run,
     record_provider_block,
     record_provider_run,
@@ -28,7 +25,6 @@ from src.database.repo import (
     reset_network_failure_streak,
     restore_provider_run,
     save_provider_cursors,
-    save_search_progress,
 )
 from src.services.api_client import (
     ProviderAuthError,
@@ -222,11 +218,6 @@ class CollectResult:
 REST_REASON: str = "уже запускался сегодня: сайт не должен посещаться часто"
 
 
-def _progress_key(provider: BaseMapProvider, target: SearchTarget) -> str:
-    parts = (provider.name, provider.progress_scope, target.query.category, target.query.text, target.area.bbox)
-    return hashlib.sha256(repr(parts).encode("utf-8")).hexdigest()
-
-
 class RunRules(Protocol):
     """What the rest between runs depends on: a provider, or a source the collector visits by other means."""
 
@@ -270,7 +261,6 @@ class _Collection:
         config: CollectorConfig,
         max_requests: int,
         session_maker: async_sessionmaker[AsyncSession],
-        known_progress: dict[str, SearchProgress] | None = None,
     ) -> None:
         self.active = list(providers)
         self.config = config
@@ -286,9 +276,6 @@ class _Collection:
         self.failures_in_a_row: dict[str, int] = {}
         self.format_errors_in_a_row: dict[str, int] = {}
         self.format_errors_total: dict[str, int] = {}
-        self.known_progress = known_progress or {}
-        self.new_progress: dict[str, SearchProgress] = {}
-        self.walked_targets: dict[str, int] = {}
 
     def alert(self, text: str) -> None:
         if text not in self.result.alerts:
@@ -314,11 +301,7 @@ class _Collection:
         """
         collected = 0
         any_page_succeeded = False
-        first_page = self._first_page(provider, target)
-        if first_page is None:
-            self.walked_targets[provider.name] = self.walked_targets.get(provider.name, 0) + 1
-            return True
-        for page in range(first_page, first_page + self.config.max_pages):
+        for page in range(1, self.config.max_pages + 1):
             if self.result.requests >= self.max_requests:
                 return any_page_succeeded
             self.result.requests += 1
@@ -347,10 +330,7 @@ class _Collection:
                 # A problem on our side of the network says nothing about the target: try it again.
                 return any_page_succeeded or not isinstance(exc, ProviderNoConnectionError)
             except ProviderAuthError as exc:
-                if provider.auth_failure_hint is None:
-                    self._stop_provider(provider, exc)
-                else:
-                    await self._handle_rejected_key(provider, exc, provider.auth_failure_hint)
+                self._stop_provider(provider, exc)
                 return any_page_succeeded
             except (ProviderQuotaError, ProviderUnavailableError) as exc:
                 self._stop_provider(provider, exc)
@@ -383,35 +363,10 @@ class _Collection:
                 logger.warning("Provider %s: %s", provider.name, search_page.warning)
                 self.alert(search_page.warning)
 
-            # Remembered as read, so a page must not be cut short: the rest of it would never be seen.
-            collected = self._add_places(search_page.places, collected, whole_page=bool(provider.progress_scope))
-            self._remember_progress(provider, target, page, search_page.has_more)
+            collected = self._add_places(search_page.places, collected)
             if collected >= self.config.max_results_per_query or not search_page.has_more:
                 return True
         return True
-
-    def _first_page(self, provider: BaseMapProvider, target: SearchTarget) -> int | None:
-        """Where to continue this target; None if all of its pages were seen recently."""
-        if not provider.progress_scope:
-            return 1
-        progress = self.known_progress.get(_progress_key(provider, target))
-        if progress is None:
-            return 1
-        if progress.exhausted_at is None:
-            return progress.next_page
-        if datetime.now(UTC) - progress.exhausted_at < timedelta(days=self.config.recheck_days):
-            return None
-        return 1
-
-    def _remember_progress(self, provider: BaseMapProvider, target: SearchTarget, page: int, has_more: bool) -> None:
-        if provider.progress_scope:
-            key = _progress_key(provider, target)
-            self.new_progress[key] = SearchProgress(
-                key=key,
-                provider=provider.name,
-                next_page=page + 1,
-                exhausted_at=None if has_more else datetime.now(UTC),
-            )
 
     def _stop_provider(self, provider: BaseMapProvider, error: ProviderError) -> None:
         """Repeating will not help and could get the key suspended."""
@@ -473,24 +428,10 @@ class _Collection:
         )
         self.drop_provider(provider)
 
-    async def _handle_rejected_key(self, provider: BaseMapProvider, error: ProviderError, hint: str) -> None:
-        """A rejected key will not start working by itself: no more requests with it, the leads stay available."""
-        async with self.session_maker() as session:
-            await disable_provider(session, provider.name, hint)
-        self.drop_provider(provider)
-        self.succeeded.discard(provider.name)
-        text = (
-            f"{provider.name}: {hint}. Источник отключён, накопленные лиды выдаются как обычно. Что делать: укажите "
-            f"новый ключ и перезапустите бота, источник включится сам; для прежнего ключа: /provider_on {provider.name}"
-        )
-        logger.error("Provider switched off: %s (%s)", text, error)
-        self.record_error(text)
-        self.alert(text)
-
-    def _add_places(self, places: list[RawPlace], collected: int, whole_page: bool = False) -> int:
+    def _add_places(self, places: list[RawPlace], collected: int) -> int:
         """Add places up to the limit per query, without repeats. Returns the new count for this query."""
         for place in places:
-            if collected >= self.config.max_results_per_query and not whole_page:
+            if collected >= self.config.max_results_per_query:
                 break
             collected += 1
             if place.external_id not in self.seen_ids:
@@ -586,7 +527,6 @@ async def collect_leads(
     now = datetime.now(UTC)
     async with session_maker() as session:
         states = await get_provider_states(session)
-        known_progress = await get_search_progress(session)
         skipped = {
             provider.name: unavailable_reason(provider, states.get(provider.name), now) for provider in providers
         }
@@ -600,7 +540,7 @@ async def collect_leads(
                 provider.set_known_external_ids(set(known_by_prefix[prefix]))
     resting = {name for name, reason in skipped.items() if reason == REST_REASON}
 
-    collection = _Collection(usable, config, budget, session_maker, known_progress)
+    collection = _Collection(usable, config, budget, session_maker)
     result = collection.result
     result.skipped = {name: reason for name, reason in skipped.items() if reason is not None}
     for name, reason in result.skipped.items():
@@ -665,10 +605,6 @@ async def collect_leads(
     else:
         result.next_cursor = (start + result.targets_processed) % len(targets)
 
-    for name, count in collection.walked_targets.items():
-        if count == len(targets):
-            result.skipped[name] = f"все запросы пройдены до конца, повторный обход через {config.recheck_days} дн."
-
     async with session_maker() as session:
         for name in not_counted:
             state = states.get(name)
@@ -677,7 +613,6 @@ async def collect_leads(
             await record_provider_success(session, name)
         await collection.record_network_streaks(session)
         stats = await save_collected_places(session, collection.places)
-        await save_search_progress(session, list(collection.new_progress.values()))
         await save_provider_cursors(session, cursors_to_save)
     result.found = stats["total_found"]
     result.qualified = stats["qualified"]
