@@ -16,7 +16,8 @@ from src.database.models import Base, Lead, PlaceCheck
 from src.database.repo import PlaceCheckData, get_recently_checked_firm_ids, init_db, save_place_checks
 from src.services import pipeline
 from src.services.collector import collect_leads, load_collector_config
-from src.services.providers.base import BaseMapProvider, RawPlace, SearchPage
+from src.services.providers.base import BaseMapProvider, RawPlace, SearchArea, SearchPage, SearchQuery
+from src.services.providers.twogis_cdp import CdpOptions, TwoGisCdpProvider
 from src.services.site_status import SITE_DEAD, SITE_HAS_SITE, SITE_NO_SITE, USEFUL_STATUSES
 from src.services.twogis_links import firm_id_of
 
@@ -389,3 +390,39 @@ def test_db_mode_without_checks_says_so_and_shows_the_leads(
     assert out.startswith(niche_stats.NO_CHECKS_NOTE)
     assert "data collected after this change" in out
     assert "Saved leads from the database" in out and "tire_service" in out
+
+
+# ---------- the card city guard and the checks ----------
+
+
+async def test_a_card_dropped_as_not_from_spb_is_neither_a_lead_nor_a_check(
+    session_maker: Any, site_works_for_https: None
+) -> None:
+    """
+    The guard drops the card before the pipeline: no lead and no place_checks row.
+
+    A row would put a firm outside the city into the denominator of the shares of its niche. The cost is that such a
+    firm is opened again on the next pass; the guard counts and logs every one of them.
+    """
+
+    def item(firm_id: str, lat: float, lon: float) -> dict[str, Any]:
+        return {
+            "id": firm_id,
+            "name": f"Фирма {firm_id}",
+            "type": "branch",
+            "point": {"lat": lat, "lon": lon},
+            "contact_groups": [{"contacts": [{"type": "phone", "value": f"+7 812 555-00-0{firm_id}"}]}],
+        }
+
+    provider = TwoGisCdpProvider(CdpOptions())
+    payload = {"result": {"items": [item("1", 59.93, 30.33), item("2", 55.60, 37.36), item("3", 60.20, 29.69)]}}
+    places = provider._places(
+        [payload],
+        SearchQuery(text="шиномонтаж", category="tire_service"),
+        SearchArea(bbox=(59.9, 30.3, 60.0, 30.4), district="Выборгский район"),
+    )
+    assert provider.foreign_city_dropped == 1
+    async with session_maker() as session:
+        await pipeline.save_collected_places(session, places, record_checks_for={place.external_id for place in places})
+    assert {lead.external_id for lead in await _leads(session_maker)} == {"2gis_1", "2gis_3"}  # Zelenogorsk is SPb
+    assert set(await _checks(session_maker)) == {"1", "3"}  # the Moscow-region firm "2" is not remembered
