@@ -709,13 +709,16 @@ class TwoGisCdpProvider(BaseMapProvider):
                     logger.info("2gis_cdp: %r is left out: the card does not say its contacts", item.get("name"))
                     continue
                 cards.append(item)
-        return parse_catalog_items(
+        places = parse_catalog_items(
             {"result": {"items": cards}},
             area.district,
             query.category,
             query.high_margin,
             city_slug=self._options.city_slug,
         )
+        for place in places:
+            place.query_text = self._search_text or None  # the same text that went into the search URL
+        return places
 
     # ---------- the browser and the rules ----------
 

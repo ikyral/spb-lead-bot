@@ -102,3 +102,96 @@ def test_a_log_cut_in_the_middle_of_a_letter_is_still_read(tmp_path: Any, capsys
     log.write_bytes(good + cut + b"\n")
     assert niche_stats.main([str(log)]) == 0
     assert "nails" in capsys.readouterr().out
+
+
+# ---------- the database mode ----------
+
+
+def _make_db(path: Any, with_query_text: bool = True) -> None:
+    import sqlite3
+
+    connection = sqlite3.connect(path)
+    query_column = ", query_text TEXT" if with_query_text else ""
+    connection.execute(
+        f"CREATE TABLE leads (id INTEGER PRIMARY KEY, category TEXT, district TEXT, site_status TEXT, "
+        f"is_chain BOOLEAN{query_column})"
+    )
+    search = "шаурма Выборгский район Санкт-Петербург"
+    rows = [
+        ("street_food", "Выборгский", "no_site", 0, search),
+        ("street_food", "Выборгский", "dead_site", 0, search),
+        ("street_food", "Выборгский", "unknown", None, search),
+        ("street_food", "Выборгский", "no_site", 0, None),  # saved before query_text was kept
+        ("street_food", "Выборгский", "no_site", 1, search),  # a chain: not a lead
+        ("nails", None, "no_site", 0, None),  # OSM: no district search text
+    ]
+    for category, district, status, chain, query in rows:
+        if with_query_text:
+            connection.execute(
+                "INSERT INTO leads (category, district, site_status, is_chain, query_text) VALUES (?, ?, ?, ?, ?)",
+                (category, district, status, chain, query),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO leads (category, district, site_status, is_chain) VALUES (?, ?, ?, ?)",
+                (category, district, status, chain),
+            )
+    connection.commit()
+    connection.close()
+
+
+def test_saved_leads_are_counted_per_niche_district_and_query_without_a_database() -> None:
+    stats = niche_stats.count_saved(
+        [
+            ("street_food", "Выборгский", "шаурма Выборгский район", "no_site"),
+            ("street_food", "Выборгский", "шаурма Выборгский район", "dead_site"),
+            ("street_food", "Выборгский", "  ", "social_only"),  # blank is the same as unknown
+            ("street_food", "Выборгский", None, "unknown"),
+        ]
+    )
+    known = stats[("street_food", "Выборгский", "шаурма Выборгский район")]
+    unknown = stats[("street_food", "Выборгский", None)]
+    assert (known.saved, known.no_site, known.dead_site, known.other) == (2, 1, 1, 0)
+    assert (unknown.saved, unknown.other) == (2, 2)
+    table = niche_stats.format_saved_table(stats)
+    assert table.startswith(niche_stats.DB_HEADER)
+    assert "share of useful leads is not known" in table
+    assert "Выборгский / unknown query" in table
+
+
+def test_db_mode_reads_a_database_read_only(tmp_path: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    db = tmp_path / "leads.db"
+    _make_db(db)
+    before = db.read_bytes()
+    rows = niche_stats.read_saved_rows(str(db))
+    assert len(rows) == 5  # the chain is left out
+    stats = niche_stats.count_saved(rows)
+    searched = stats[("street_food", "Выборгский", "шаурма Выборгский район Санкт-Петербург")]
+    assert (searched.saved, searched.no_site, searched.dead_site, searched.other) == (3, 1, 1, 1)
+    assert stats[("street_food", "Выборгский", None)].no_site == 1
+    assert stats[("nails", None, None)].saved == 1
+
+    assert niche_stats.main(["--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "street_food" in out and "- / unknown query" in out and "not known here" in out
+    assert db.read_bytes() == before  # nothing was written
+
+
+def test_db_mode_on_a_database_without_the_column_counts_every_lead_as_unknown_query(tmp_path: Any) -> None:
+    db = tmp_path / "old.db"
+    _make_db(db, with_query_text=False)
+    stats = niche_stats.count_saved(niche_stats.read_saved_rows(str(db)))
+    assert set(stats) == {("street_food", "Выборгский", None), ("nails", None, None)}
+    assert stats[("street_food", "Выборгский", None)].saved == 4
+
+
+def test_db_mode_says_when_the_database_cannot_be_read(tmp_path: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    missing = tmp_path / "missing.db"
+    assert niche_stats.main(["--db", str(missing)]) == 1
+    assert not missing.exists()  # read-only: no empty file is created
+    assert niche_stats.main(["--db"]) == 2
+    import sqlite3
+
+    empty = tmp_path / "empty.db"
+    sqlite3.connect(empty).execute("CREATE TABLE leads (id INTEGER PRIMARY KEY, category TEXT)").connection.close()
+    assert niche_stats.main(["--db", str(empty)]) == 1

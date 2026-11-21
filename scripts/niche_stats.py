@@ -7,13 +7,24 @@ Share of selected organizations among the found ones, per niche, from the log of
 The log has one line for every organization that was found ("Place [niche] outcome (id): reason", see
 pipeline._log_place). An organization seen again counts once, with its best outcome: selected (new, known, chain)
 beats not-a-lead. "Selected" means no working site: such an organization is a lead.
+
+Database mode: saved leads per niche and per district / search text, from a copy of leads.db (opened read-only):
+
+    python scripts/niche_stats.py --db path/to/leads.db
+
+The database keeps only saved leads, not the organizations whose site works, so the share of useful leads cannot be
+computed from it: that share comes only from the log (the mode above, also the way for data older than the
+query_text column). Leads saved before query_text was kept, and leads of sources without a search text (OSM), are
+counted under "unknown query". Chains are kept aside to count branches and are not counted as leads.
 """
 
 import re
+import sqlite3
 import sys
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 LINE_RE = re.compile(r"Place \[(?P<niche>[^\]]+)\] (?P<outcome>[a-z-]+) \((?P<id>[^\s()]+)\): (?P<reason>.*)$")
 SELECTED = frozenset({"new", "known", "chain"})
@@ -67,7 +78,122 @@ def format_table(stats: dict[str, NicheStats]) -> str:
     return "\n".join(lines)
 
 
+# ---------- the database mode ----------
+
+UNKNOWN_QUERY = "unknown query"
+NO_DISTRICT = "-"
+DB_HEADER = (
+    "Saved leads from the database (chains left out). Organizations with a working site are not saved,\n"
+    "so the share of useful leads is not known here: run the script on the log for it."
+)
+
+
+@dataclass
+class SavedStats:
+    no_site: int = 0
+    dead_site: int = 0
+    other: int = 0
+
+    @property
+    def saved(self) -> int:
+        return self.no_site + self.dead_site + self.other
+
+    def add(self, site_status: str | None) -> None:
+        if site_status == "no_site":
+            self.no_site += 1
+        elif site_status == "dead_site":
+            self.dead_site += 1
+        else:
+            self.other += 1
+
+
+# (niche, district, query text); None of a district or a query is shown as unknown.
+SavedKey = tuple[str, str | None, str | None]
+
+
+def count_saved(rows: Iterable[tuple[str, str | None, str | None, str | None]]) -> dict[SavedKey, SavedStats]:
+    """Rows of (category, district, query_text, site_status) counted per niche, district and search text."""
+    stats: dict[SavedKey, SavedStats] = defaultdict(SavedStats)
+    for category, district, query_text, site_status in rows:
+        query = query_text.strip() if query_text and query_text.strip() else None
+        stats[(category, district or None, query)].add(site_status)
+    return dict(stats)
+
+
+def _stats_row(label: str, stats: SavedStats) -> str:
+    return f"{label:60} {stats.saved:>6} {stats.no_site:>8} {stats.dead_site:>10} {stats.other:>6}"
+
+
+def format_saved_table(stats: dict[SavedKey, SavedStats]) -> str:
+    """Per niche: its total, then one line per district and search text, the largest first."""
+    by_niche: dict[str, list[tuple[SavedKey, SavedStats]]] = defaultdict(list)
+    for key, key_stats in stats.items():
+        by_niche[key[0]].append((key, key_stats))
+    totals: dict[str, SavedStats] = {}
+    for niche, items in by_niche.items():
+        total = SavedStats()
+        for _, key_stats in items:
+            total.no_site += key_stats.no_site
+            total.dead_site += key_stats.dead_site
+            total.other += key_stats.other
+        totals[niche] = total
+
+    head = f"{'niche / district / query':60} {'saved':>6} {'no_site':>8} {'dead_site':>10} {'other':>6}"
+    lines = [DB_HEADER, "", head]
+    for niche in sorted(totals, key=lambda name: (-totals[name].saved, name)):
+        lines.append(_stats_row(niche, totals[niche]))
+        items = sorted(by_niche[niche], key=lambda item: (-item[1].saved, item[0][1] or "", item[0][2] or ""))
+        for (_, district, query), key_stats in items:
+            label = f"  {district or NO_DISTRICT} / {query or UNKNOWN_QUERY}"
+            lines.append(_stats_row(label, key_stats))
+    return "\n".join(lines)
+
+
+# By (has query_text, has is_chain): older databases may lack either column.
+_SAVED_QUERIES: dict[tuple[bool, bool], str] = {
+    (True, True): (
+        "SELECT category, district, query_text, site_status FROM leads WHERE is_chain IS NULL OR is_chain = 0"
+    ),
+    (True, False): "SELECT category, district, query_text, site_status FROM leads",
+    (False, True): "SELECT category, district, NULL, site_status FROM leads WHERE is_chain IS NULL OR is_chain = 0",
+    (False, False): "SELECT category, district, NULL, site_status FROM leads",
+}
+
+
+def read_saved_rows(db_path: str) -> list[tuple[str, str | None, str | None, str | None]]:
+    """(category, district, query_text, site_status) of saved leads; the file is opened read-only."""
+    uri = f"{Path(db_path).resolve().as_uri()}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True)
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(leads)")}
+        if not columns:
+            raise sqlite3.OperationalError("no table leads")
+        # A database the bot has not migrated yet has no query_text: all its leads are of an unknown query.
+        cursor = connection.execute(_SAVED_QUERIES["query_text" in columns, "is_chain" in columns])
+        return [(str(row[0]), row[1], row[2], row[3]) for row in cursor]
+    finally:
+        connection.close()
+
+
+def main_db(db_path: str) -> int:
+    try:
+        rows = read_saved_rows(db_path)
+    except sqlite3.Error as exc:
+        print(f"Cannot read the leads of {db_path}: {exc}")
+        return 1
+    if not rows:
+        print("No saved leads in the database")
+        return 1
+    print(format_saved_table(count_saved(rows)))
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "--db":
+        if len(argv) != 2:
+            print("Usage: python scripts/niche_stats.py --db path/to/leads.db")
+            return 2
+        return main_db(argv[1])
     if argv:
         lines: list[str] = []
         for path in argv:

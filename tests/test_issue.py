@@ -1131,6 +1131,7 @@ ROLLBACK_SCHEMA = [
     "ALTER TABLE leads DROP COLUMN owned_until",
     "ALTER TABLE leads DROP COLUMN reserved_by",
     "ALTER TABLE leads DROP COLUMN reserved_until",
+    "ALTER TABLE leads DROP COLUMN query_text",
     "DROP TABLE import_log",
     "DROP TABLE issued_batches",
     "DROP TABLE collector_state",

@@ -608,6 +608,22 @@ def test_pagination_url_uses_the_same_extended_text() -> None:
     assert url is not None and url.endswith("/page/2") and "Санкт-Петербург" not in url  # percent-encoded
 
 
+async def test_every_place_keeps_the_text_that_went_into_the_search_url() -> None:
+    fake = FakeRemote(pages={1: _doc(["101", "102"])}, cards=_cards("101", "102"))
+    harness = Harness(fake)
+    area = SearchArea(bbox=(59.97, 30.29, 60.09, 30.4), district="Выборгский")
+    try:
+        found = await harness.provider.search(QUERY, area)
+    finally:
+        await harness.provider.close()
+    expected = twogis_cdp.build_search_text(QUERY.text, "Выборгский")
+    assert expected == "стоматология Выборгский район Санкт-Петербург"
+    assert fake.navigations == [twogis_site.build_search_url("spb", expected)]
+    assert [place.query_text for place in found.places] == [expected, expected]
+    assert {place.category for place in found.places} == {"dentist_clinic"}
+    assert {place.district for place in found.places} == {"Выборгский"}
+
+
 async def test_an_area_without_a_district_adds_nothing() -> None:
     fake = FakeRemote(page_info=("https://2gis.ru/spb/search/x", "Ничего не найдено — 2ГИС", "<html></html>"))
     harness = Harness(fake)

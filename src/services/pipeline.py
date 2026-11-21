@@ -185,6 +185,7 @@ async def _process_and_save_places(
                 "email": place.email,
                 "source_url": place.source_url,
                 "rubric": place.rubric,
+                "query_text": place.query_text,
                 "site_url": place.raw_website if site_status == SITE_DEAD else None,
                 "site_confidence": confidence_of_check(site_status, place.source),
                 "site_source": source_of_status(place.source) if site_status != SITE_UNKNOWN else None,

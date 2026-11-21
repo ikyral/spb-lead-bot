@@ -238,6 +238,7 @@ class RawPlace:
     email: str | None = None  # only an address published in the organization's public card
     source_url: str | None = None  # the organization's card in the source
     rubric: str | None = None  # the source's own category, more precise than the searched niche
+    query_text: str | None = None  # the exact search text that found the place, when the source has one
     # False: the source gave no contacts, and that does not mean the organization has none.
     contacts_known: bool = True
 

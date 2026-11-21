@@ -115,6 +115,9 @@ class Lead(Base):
     # An enrichment request file keeps its leads for that person until reserved_until; compared at read time.
     reserved_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
     reserved_until: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, default=None)
+    # The exact text of the source's search that found the lead (2GIS, e.g. "шаурма Выборгский район").
+    # NULL for leads saved before it was kept and for sources without a search text (OSM).
+    query_text: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
 
     @property
     def has_contacts(self) -> bool:

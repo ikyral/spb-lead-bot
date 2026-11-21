@@ -103,6 +103,7 @@ NEW_LEAD_COLUMNS: tuple[str, ...] = (
     "owned_until",
     "reserved_by",
     "reserved_until",
+    "query_text",
 )
 # The same for the collector_state table.
 NEW_STATE_COLUMNS: tuple[str, ...] = (
