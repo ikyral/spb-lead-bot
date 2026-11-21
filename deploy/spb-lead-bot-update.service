@@ -1,0 +1,7 @@
+[Unit]
+Description=Update SPB Lead Bot from GitHub
+
+[Service]
+Type=oneshot
+User=leadbot
+ExecStart=/opt/spb-lead-bot-update.sh

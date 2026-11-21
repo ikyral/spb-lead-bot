@@ -42,7 +42,6 @@ from src.database.models import (
     IssuedBatch,
     Lead,
     ProviderState,
-    SearchProgress,
 )
 from src.services.scorer import calculate_lead_score
 from src.services.site_status import (
@@ -504,9 +503,7 @@ async def update_issued_batch(session: AsyncSession, batch_id: int, lead_ids: li
     await session.commit()
 
 
-async def remove_lead_from_batch(
-    session: AsyncSession, batch_id: int, lead_id: int
-) -> tuple[list[int], int] | None:
+async def remove_lead_from_batch(session: AsyncSession, batch_id: int, lead_id: int) -> tuple[list[int], int] | None:
     """Remove a returned lead from its batch. Returns (remaining_ids, old_index), or None if not found."""
     batch = await session.get(IssuedBatch, batch_id)
     if batch is None:
@@ -1434,18 +1431,6 @@ async def save_provider_cursors(session: AsyncSession, cursors: dict[str, int]) 
     for name, pos in cursors.items():
         state = await _provider_state(session, name)
         state.cursor = pos
-    await session.commit()
-
-
-async def get_search_progress(session: AsyncSession) -> dict[str, SearchProgress]:
-    """How far every search target has been walked, by its key."""
-    return {row.key: row for row in (await session.scalars(select(SearchProgress))).all()}
-
-
-async def save_search_progress(session: AsyncSession, rows: list[SearchProgress]) -> None:
-    """Store new positions. Called after the leads of those pages are saved: otherwise a crash would lose them."""
-    for row in rows:
-        await session.merge(row)
     await session.commit()
 
 

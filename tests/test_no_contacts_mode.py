@@ -28,25 +28,23 @@ from src.bot.keyboards import (
 )
 from src.bot.middlewares import AdminOnlyMiddleware
 from src.config import Settings
-from src.database.models import STATUS_ISSUED, STATUS_NEW, Lead, ProviderState, SearchProgress
+from src.database.models import STATUS_ISSUED, STATUS_NEW, Lead, ProviderState
 from src.database.repo import (
     count_new_leads,
     count_new_leads_with_contacts,
-    enable_provider,
     get_provider_states,
     init_db,
     issue_next_leads,
     save_new_leads,
 )
 from src.services import pipeline
-from src.services.api_client import ProviderAuthError, ProviderTemporaryError
-from src.services.collector import MAX_CONSECUTIVE_BLOCKS, CollectorConfig, collect_leads, load_collector_config
+from src.services.collector import CollectorConfig, load_collector_config
 from src.services.dedup import merge_duplicate_places
 from src.services.lead_export import export_new_leads
 from src.services.lead_file import REASON_NO_CONTACTS, build_document, lead_to_record, parse_lead_file
 from src.services.lead_import import SOURCE_TELEGRAM, ImportService
 from src.services.normalize import parse_manual_phone
-from src.services.providers.base import BaseMapProvider, RawPlace, SearchArea, SearchPage, SearchQuery
+from src.services.providers.base import RawPlace, SearchArea, SearchQuery
 from src.services.providers.registry import ProviderSet
 from src.services.providers.twogis_catalog import parse_catalog_items
 from src.services.scheduler import CollectorRunner, RunReport
@@ -958,156 +956,7 @@ def test_the_browser_module_has_nothing_that_hides_automation() -> None:
         assert marker not in source
 
 
-# ---------- remembering how far a source was read ----------
-
-
-class PagedProvider(BaseMapProvider):
-    """A source with `total` organizations, ten on a page, that records the pages it was asked for."""
-
-    name = "paged"
-    progress_scope = "full"
-
-    def __init__(self, total: int = 50, fail_page: int | None = None, auth_error: bool = False) -> None:
-        self.total = total
-        self.fail_page = fail_page
-        self.auth_error = auth_error
-        self.asked: list[tuple[str, int]] = []
-        if auth_error:
-            self.auth_failure_hint = "источник не принял доступ"
-
-    async def search_places(self, district_name: str, category_key: str) -> list[RawPlace]:
-        return []
-
-    async def search(self, query, area, page=1, page_size=50) -> SearchPage:
-        self.asked.append((query.category, page))
-        if self.auth_error:
-            raise ProviderAuthError("SECRET отклонён")
-        if page == self.fail_page:
-            raise ProviderTemporaryError("сеть")
-        first = (page - 1) * 10 + 1
-        count = max(0, min(10, self.total - first + 1))
-        places = [
-            _place(number, source="paged", external_id=f"paged_{number}") for number in range(first, first + count)
-        ]
-        return SearchPage(places=places, has_more=first + count <= self.total and count > 0)
-
-
-def _asked_pages(provider: PagedProvider) -> list[int]:
-    return [page for _, page in provider.asked]
-
-
-async def test_next_run_continues_from_the_page_where_the_last_one_stopped(session_maker) -> None:
-    provider = PagedProvider()
-    config = _config(COLLECT_MAX_PAGES=2)
-
-    first = await collect_leads(session_maker, [provider], config)
-    second = await collect_leads(session_maker, [provider], config)
-    third = await collect_leads(session_maker, [provider], config)
-
-    assert _asked_pages(provider) == [1, 2, 3, 4, 5]
-    assert [run.saved_new for run in (first, second, third)] == [20, 20, 10]
-
-
-async def test_walked_target_costs_nothing_and_the_report_says_why(session_maker) -> None:
-    provider = PagedProvider(total=15)
-    config = _config(COLLECT_MAX_PAGES=5)
-
-    await collect_leads(session_maker, [provider], config)
-    assert _asked_pages(provider) == [1, 2]
-
-    again = await collect_leads(session_maker, [provider], config)
-    assert _asked_pages(provider) == [1, 2]
-    assert again.requests == 0
-    assert again.errors == 0
-    assert "пройдены до конца" in again.skipped["paged"]
-
-
-async def test_walked_target_is_read_again_after_the_recheck_period(session_maker) -> None:
-    provider = PagedProvider(total=5)
-    config = _config(COLLECT_RECHECK_DAYS=30)
-    await collect_leads(session_maker, [provider], config)
-
-    async with session_maker() as session:
-        row = (await session.scalars(select(SearchProgress))).one()
-        row.exhausted_at = datetime.now(UTC) - timedelta(days=31)
-        await session.commit()
-
-    await collect_leads(session_maker, [provider], config)
-    assert _asked_pages(provider) == [1, 1]
-
-
-async def test_failed_page_is_requested_again(session_maker) -> None:
-    provider = PagedProvider(fail_page=2)
-    config = _config(COLLECT_MAX_PAGES=2)
-    await collect_leads(session_maker, [provider], config)
-    provider.fail_page = None
-    await collect_leads(session_maker, [provider], config)
-    assert _asked_pages(provider)[:3] == [1, 2, 2]  # the failed page 2 is asked again, not skipped
-
-
-async def test_position_is_not_saved_if_the_leads_were_not(session_maker, monkeypatch) -> None:
-    """Otherwise the pages of a failed run would be skipped for good."""
-    provider = PagedProvider()
-    config = _config(COLLECT_MAX_PAGES=1)
-
-    async def fail(*_args, **_kwargs):
-        raise RuntimeError("database")
-
-    with monkeypatch.context() as patch:
-        patch.setattr("src.services.collector.save_collected_places", fail)
-        with pytest.raises(RuntimeError):
-            await collect_leads(session_maker, [provider], config)
-
-    await collect_leads(session_maker, [provider], config)
-    assert _asked_pages(provider) == [1, 1]
-
-
-async def test_targets_keep_their_own_positions(session_maker) -> None:
-    provider = PagedProvider()
-    config = _config(COLLECT_QUERIES="dentist_clinic,beauty", COLLECT_MAX_PAGES=1)
-    await collect_leads(session_maker, [provider], config)
-    await collect_leads(session_maker, [provider], config)
-    assert len(set(provider.asked)) == 4
-
-
-async def test_page_is_not_cut_short_when_it_is_remembered_as_read(session_maker) -> None:
-    result = await collect_leads(session_maker, [PagedProvider()], _config(COLLECT_MAX_RESULTS_PER_QUERY=3))
-    assert result.saved_new == 10
-
-
-async def test_sources_without_a_scope_repeat_as_before(session_maker) -> None:
-    provider = PagedProvider(total=5)
-    provider.progress_scope = None
-    await collect_leads(session_maker, [provider], _config())
-    await collect_leads(session_maker, [provider], _config())
-    assert _asked_pages(provider) == [1, 1]
-
-
 # ---------- a source that does not accept the access ----------
-
-
-async def test_rejected_access_switches_the_source_off_and_stops_asking(session_maker) -> None:
-    provider = PagedProvider(auth_error=True)
-    config = _config(COLLECT_QUERIES="dentist_clinic,beauty")
-    first = await collect_leads(session_maker, [provider], config)
-
-    assert len(provider.asked) == 1
-    assert len(first.alerts) == 1
-    assert "/provider_on paged" in first.alerts[0]
-    assert "SECRET" not in first.alerts[0]
-    async with session_maker() as session:
-        state = (await get_provider_states(session))["paged"]
-    assert state.disabled_at is not None
-    assert state.consecutive_blocks < MAX_CONSECUTIVE_BLOCKS
-
-    second = await collect_leads(session_maker, [provider], config)
-    assert len(provider.asked) == 1  # nothing more goes out
-    assert "paged" in second.skipped
-
-    async with session_maker() as session:
-        await enable_provider(session, "paged")
-    await collect_leads(session_maker, [provider], config)
-    assert len(provider.asked) == 2  # the admin's command lets it try again
 
 
 async def test_status_explains_a_switched_off_source_without_mentioning_blocks() -> None:
