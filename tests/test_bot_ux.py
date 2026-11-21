@@ -214,7 +214,7 @@ async def test_an_unknown_source_gets_an_example() -> None:
     text = message.answer.await_args.args[0]
     assert "Неизвестный источник: &lt;yandex&gt;" in text
     assert "<code>/provider_on 2gis_cdp</code>" in text
-    runner.enable_provider.assert_not_called()
+    runner.reset_provider_pause.assert_not_called()
 
 
 def test_a_request_file_sent_back_says_which_file_to_send_and_where_it_is() -> None:

@@ -11,6 +11,7 @@ from src.bot.texts import (
     AREA_OWNED_LINE,
     AREA_OWNER_ITEM,
     BATCH_BUTTON_TEXT,
+    COLLECTION_SKIPPED_TITLE,
     CONTACT_SOURCE_TITLES,
     CONTACTS_TITLE,
     DIGEST_DUE_LINE,
@@ -88,6 +89,7 @@ from src.services.twogis_links import twogis_card_url, twogis_search_url
 if TYPE_CHECKING:  # the scheduler pulls in the database layer, which this module must not import
     from src.database.models import ImportLog, ProviderState
     from src.database.repo import OwnerSummary, PoolStats, TeamRow
+    from src.services.collector import CollectResult
     from src.services.digest import DigestData
     from src.services.lead_enrich import EnrichStats, UsefulLead
     from src.services.lead_import import ImportResult
@@ -570,9 +572,28 @@ def format_request_usage(usage: RequestUsage) -> str:
     return f"\n🔌 <b>Запросы сбора:</b>\n• За сутки: <b>{usage.collector_today}</b> из {usage.collector_day_limit}"
 
 
+def _all_providers_skipped(result: CollectResult) -> bool:
+    """No provider really worked in the run: every one was skipped and nothing was requested, found or failed."""
+    return bool(result.skipped) and not (
+        result.requests
+        or result.cards_opened
+        or result.found
+        or result.saved_new
+        or result.errors
+        or result.format_errors
+        or result.format_fuse_providers
+        or result.last_error
+    )
+
+
 def format_collection_report(report: RunReport) -> str:
     """Format the outcome of a collection run."""
     result = report.result
+    if _all_providers_skipped(result):
+        lines = [COLLECTION_SKIPPED_TITLE]
+        lines += [f"⏭ {html.escape(name)}: {html.escape(why)}" for name, why in result.skipped.items()]
+        lines.append(f"\n📦 В запасе: <b>{report.pool_size}</b>")
+        return "\n".join(lines)
     status = _RUN_STATUS_TITLES.get(report.status, report.status)
     lines = [
         f"🏁 <b>Сбор лидов завершён</b> ({status})\n",

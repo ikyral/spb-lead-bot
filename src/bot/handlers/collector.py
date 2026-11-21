@@ -8,7 +8,18 @@ from aiogram.types import CallbackQuery, Message
 
 from src.bot.formatters import format_collector_status
 from src.bot.keyboards import STALE_BUTTON_TEXT
-from src.bot.texts import UNKNOWN_PROVIDER_TEXT
+from src.bot.texts import (
+    PROVIDER_ON_BLOCKS_KEPT,
+    PROVIDER_ON_BLOCKS_RESET,
+    PROVIDER_ON_DONE_TEXT,
+    PROVIDER_ON_NETWORK_KEPT,
+    PROVIDER_ON_NETWORK_RESET,
+    PROVIDER_ON_NOTHING_KEPT,
+    PROVIDER_ON_NOTHING_TEXT,
+    PROVIDER_ON_USAGE_TEXT,
+    UNKNOWN_PROVIDER_TEXT,
+)
+from src.database.repo import MAX_CONSECUTIVE_BLOCKS
 from src.services.scheduler import TRIGGER_MANUAL, CollectorRunner
 
 router = Router(name="collector")
@@ -79,16 +90,39 @@ async def handle_collect_off(message: Message, collector_runner: CollectorRunner
 
 @router.message(Command("provider_on"))
 async def handle_provider_on(message: Message, command: CommandObject, collector_runner: CollectorRunner) -> None:
-    """Turn a source back on after blocks. This is the only way out of an automatic switch-off."""
-    name = (command.args or "").strip() or (
-        "2gis_cdp" if collector_runner.known_provider("2gis_cdp") else "2gis_scraper"
-    )
+    """
+    Turn a source back on. By default only the pause that is really there is reset
+    (blocks and/or a network series); `/provider_on <name> all` resets everything.
+    """
+    parts = (command.args or "").split()
+    everything = len(parts) == 2 and parts[1].lower() == "all"
+    if len(parts) > 2 or (len(parts) == 2 and not everything):
+        await message.answer(PROVIDER_ON_USAGE_TEXT, parse_mode="HTML")
+        return
+    name = parts[0] if parts else ("2gis_cdp" if collector_runner.known_provider("2gis_cdp") else "2gis_scraper")
     if not collector_runner.known_provider(name):
         await message.answer(UNKNOWN_PROVIDER_TEXT.format(name=html.escape(name)), parse_mode="HTML")
         return
-    await collector_runner.enable_provider(name)
+    outcome = await collector_runner.reset_provider_pause(name, everything=everything)
+    safe_name = html.escape(name)
+    if outcome.nothing_paused:
+        await message.answer(PROVIDER_ON_NOTHING_TEXT.format(name=safe_name), parse_mode="HTML")
+        return
+    reset: list[str] = []
+    kept: list[str] = []
+    if outcome.blocks_reset:
+        reset.append(PROVIDER_ON_BLOCKS_RESET.format(count=outcome.blocks_before, limit=MAX_CONSECUTIVE_BLOCKS))
+    else:
+        kept.append(PROVIDER_ON_BLOCKS_KEPT)
+    if outcome.network_reset:
+        reset.append(PROVIDER_ON_NETWORK_RESET.format(count=outcome.network_before))
+    else:
+        kept.append(PROVIDER_ON_NETWORK_KEPT)
     await message.answer(
-        f"✅ Источник {html.escape(name)} включён, счётчик блокировок сброшен. "
-        "Если сайт снова откажет, источник остановится сам.",
+        PROVIDER_ON_DONE_TEXT.format(
+            name=safe_name,
+            reset=", ".join(reset),
+            kept=", ".join(kept) or PROVIDER_ON_NOTHING_KEPT,
+        ),
         parse_mode="HTML",
     )

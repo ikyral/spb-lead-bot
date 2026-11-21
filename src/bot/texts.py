@@ -82,6 +82,25 @@ UNKNOWN_PROVIDER_TEXT: str = (
     "Неизвестный источник: {name}. Пример: <code>/provider_on 2gis_cdp</code>, список: /collect_status"
 )
 
+PROVIDER_ON_USAGE_TEXT: str = (
+    "Формат: <code>/provider_on 2gis_cdp</code> (сбросить только то, что на паузе) "
+    "или <code>/provider_on 2gis_cdp all</code> (сбросить всё)."
+)
+PROVIDER_ON_NOTHING_TEXT: str = (
+    "ℹ️ Источник {name} ни на паузе, ни отключён: ничего не менял. Полный сброс: <code>/provider_on {name} all</code>"
+)
+PROVIDER_ON_DONE_TEXT: str = (
+    "✅ Источник {name}. Сброшено: {reset}. Не тронуто: {kept}. Если сайт снова откажет, источник остановится сам."
+)
+PROVIDER_ON_BLOCKS_RESET: str = "блокировки (было {count} из {limit})"
+PROVIDER_ON_BLOCKS_KEPT: str = "блокировки"
+PROVIDER_ON_NETWORK_RESET: str = "сетевая серия (было {count})"
+PROVIDER_ON_NETWORK_KEPT: str = "сетевая серия"
+PROVIDER_ON_NOTHING_KEPT: str = "ничего"
+
+# ---------- collection report ----------
+COLLECTION_SKIPPED_TITLE: str = "⏭ <b>Сбор пропущен</b>"
+
 HELP_HIDDEN_TEXT: str = "Остальные команды доступны только администраторам бота."
 
 # ---------- the first message to a lead ----------

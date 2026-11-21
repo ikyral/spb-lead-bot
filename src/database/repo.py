@@ -1378,6 +1378,50 @@ async def enable_provider(session: AsyncSession, name: str) -> None:
     await session.commit()
 
 
+@dataclass(frozen=True)
+class ProviderReset:
+    """What /provider_on found paused and what it reset. A reset part reports the counter it had."""
+
+    blocks_reset: bool = False
+    blocks_before: int = 0
+    network_reset: bool = False
+    network_before: int = 0
+    # The whole state was cleared on request ("all"), including parts that were not paused.
+    everything: bool = False
+
+    @property
+    def nothing_paused(self) -> bool:
+        return not (self.blocks_reset or self.network_reset or self.everything)
+
+
+async def reset_provider_pause(session: AsyncSession, name: str, *, everything: bool = False) -> ProviderReset:
+    """
+    An admin's decision: forget only the pause that is really there (blocks and/or a network series).
+
+    With `everything` both parts are cleared whatever they hold (the old behavior of enable_provider).
+    last_block_reason and last_block_at stay as history, as in enable_provider.
+    """
+    state = await _provider_state(session, name)
+    blocks_active = bool(state.consecutive_blocks) or state.blocked_until is not None or state.disabled_at is not None
+    network_active = bool(state.network_failure_streak) or state.network_paused_until is not None
+    outcome = ProviderReset(
+        blocks_reset=blocks_active or everything,
+        blocks_before=state.consecutive_blocks or 0,
+        network_reset=network_active or everything,
+        network_before=state.network_failure_streak or 0,
+        everything=everything,
+    )
+    if outcome.blocks_reset:
+        state.consecutive_blocks = 0
+        state.blocked_until = None
+        state.disabled_at = None
+    if outcome.network_reset:
+        state.network_failure_streak = 0
+        state.network_paused_until = None
+    await session.commit()
+    return outcome
+
+
 async def save_provider_cursors(session: AsyncSession, cursors: dict[str, int]) -> None:
     """Persist per-provider target cursors."""
     if not cursors:
