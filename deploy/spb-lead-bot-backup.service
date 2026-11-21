@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily backup of SPB Lead Bot leads.db
+
+[Service]
+Type=oneshot
+User=leadbot
+Group=leadbot
+EnvironmentFile=/opt/spb-lead-bot/.env
+# Installed by hand OUTSIDE the git checkout (deploy/backup-db.sh -> /opt/spb-lead-bot-backup.sh),
+# so auto-update cannot change what runs here unnoticed.
+ExecStart=/opt/spb-lead-bot-backup.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=15min
