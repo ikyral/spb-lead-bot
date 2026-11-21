@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from src.database.models import CollectorState, ImportLog, ProviderState
 from src.database.repo import (
     PoolStats,
+    ProviderReset,
     count_imported_leads,
     count_new_leads,
     count_new_leads_with_contacts,
@@ -24,6 +25,7 @@ from src.database.repo import (
     get_last_import,
     get_pool_stats,
     get_provider_states,
+    reset_provider_pause,
 )
 from src.services.collector import CollectorConfig, CollectResult, collect_leads
 from src.services.providers.registry import ProviderSet
@@ -389,6 +391,13 @@ class CollectorRunner:
         async with self._session_maker() as session:
             await enable_provider(session, name)
         logger.info("Provider %s enabled by an admin", name)
+
+    async def reset_provider_pause(self, name: str, *, everything: bool = False) -> ProviderReset:
+        """An admin's decision: reset only the pause that is there, or everything with `everything`."""
+        async with self._session_maker() as session:
+            outcome = await reset_provider_pause(session, name, everything=everything)
+        logger.info("Provider %s pause reset by an admin: %s", name, outcome)
+        return outcome
 
     async def get_status(self) -> CollectorStatus:
         async with self._session_maker() as session:

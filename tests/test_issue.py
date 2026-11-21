@@ -48,6 +48,7 @@ from src.database.models import (
     ProviderState,
 )
 from src.database.repo import (
+    ProviderReset,
     count_issued_leads,
     count_new_leads,
     get_issued_batch,
@@ -903,27 +904,27 @@ async def test_notifier_survives_one_unreachable_admin() -> None:
 async def test_provider_on_command() -> None:
     runner = MagicMock()
     runner.known_provider = MagicMock(side_effect=lambda name: name == "2gis_scraper")
-    runner.enable_provider = AsyncMock()
+    runner.reset_provider_pause = AsyncMock(return_value=ProviderReset(blocks_reset=True, blocks_before=2))
 
     message = _message()
     await collector_handlers.handle_provider_on(message, MagicMock(args=None), runner)
-    runner.enable_provider.assert_awaited_once_with("2gis_scraper")
-    assert "включён" in _final_text(message)
+    runner.reset_provider_pause.assert_awaited_once_with("2gis_scraper", everything=False)
+    assert "Сброшено" in _final_text(message)
 
-    runner.enable_provider.reset_mock()
+    runner.reset_provider_pause.reset_mock()
     await collector_handlers.handle_provider_on(message, MagicMock(args="<b>что-то</b>"), runner)
-    runner.enable_provider.assert_not_awaited()
+    runner.reset_provider_pause.assert_not_awaited()
     assert "&lt;b&gt;что-то" in _final_text(message)
 
 
 async def test_provider_on_without_a_name_means_the_browser_parser_of_2gis() -> None:
     runner = MagicMock()
     runner.known_provider = MagicMock(return_value=True)
-    runner.enable_provider = AsyncMock()
+    runner.reset_provider_pause = AsyncMock(return_value=ProviderReset())
 
     await collector_handlers.handle_provider_on(_message(), MagicMock(args=None), runner)
 
-    runner.enable_provider.assert_awaited_once_with("2gis_cdp")
+    runner.reset_provider_pause.assert_awaited_once_with("2gis_cdp", everything=False)
 
 
 async def test_collect_commands_answer_and_switch() -> None:
